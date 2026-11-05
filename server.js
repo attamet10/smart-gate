@@ -4279,15 +4279,15 @@ app.post('/api/requests/:id/approve', authenticateToken, requireRole(['subject_t
       saveRequestMeta(request.request_no, updatedMeta);
       saveRequestMeta(requestId, updatedMeta);
 
-      // บันทึกลงตาราง approval_logs ของ Supabase ด้วย
+      // บันทึกลงตาราง approval_logs ด้วย
       try {
-        await supabase.from('approval_logs').insert([{
+        await db.insertAutoIncrement('approval_logs', {
           request_id: requestId,
           step: currentStep,
           approver_id: '00000000-0000-0000-0000-000000000002',
           action: 'approved',
           note: isDualStepAdvisorAndSubject ? `${logEntry.note} + อนุมัติควบขั้นที่ 2 (ครูที่ปรึกษาสอนเอง)` : logEntry.note
-        }]);
+        });
       } catch (e) {}
 
       console.log(`✅ [APPROVED STEP ${isDualStepAdvisorAndSubject ? '1+2' : currentStep}/${totalSteps}] Request ${request.request_no} -> step ${nextStep} (${nextStatus}) by ${user.username}`);
@@ -4359,11 +4359,7 @@ app.post('/api/requests/:id/reject', authenticateToken, requireRole(['subject_te
 
   if (supabase) {
     try {
-      const { data: request } = await supabase
-        .from('leave_requests')
-        .select(`*, users:student_id (full_name, username, departments (name))`)
-        .eq('id', requestId)
-        .single();
+      const request = await db.getLeaveRequestWithStudent(requestId);
 
       if (!request) {
         return res.status(404).json({ success: false, message: 'ไม่พบคำร้องนี้ในระบบ' });
@@ -4378,11 +4374,11 @@ app.post('/api/requests/:id/reject', authenticateToken, requireRole(['subject_te
       const approverDisplayName = (ALL_SYSTEM_ACCOUNTS[user.username] ? ALL_SYSTEM_ACCOUNTS[user.username].full_name : null) || user.full_name || user.username;
       const nowIso = new Date().toISOString();
 
-      const { data: updated } = await supabase.from('leave_requests').update({
-        status: 'rejected',
-        rejection_reason: cleanReason,
-        updated_at: nowIso
-      }).eq('id', requestId).select();
+      await db.query(
+        'UPDATE leave_requests SET status = ?, rejection_reason = ?, updated_at = ? WHERE id = ?',
+        ['rejected', cleanReason, nowIso, requestId]
+      );
+      const updated = await db.query('SELECT * FROM leave_requests WHERE id = ?', [requestId]);
 
       const historyList = Array.isArray(meta.approvalHistory) ? [...meta.approvalHistory] : [];
       historyList.push({
@@ -4409,13 +4405,13 @@ app.post('/api/requests/:id/reject', authenticateToken, requireRole(['subject_te
       saveRequestMeta(requestId, updatedMeta);
 
       try {
-        await supabase.from('approval_logs').insert([{
+        await db.insertAutoIncrement('approval_logs', {
           request_id: requestId,
           step: currentStep,
           approver_id: '00000000-0000-0000-0000-000000000002',
           action: 'rejected',
           note: cleanReason
-        }]);
+        });
       } catch (e) {}
 
       const studentName = meta.studentName || (request.users ? request.users.full_name : 'นักเรียน');
@@ -4464,11 +4460,7 @@ app.post('/api/requests/:id/emergency-override', authenticateToken, requireRole(
 
   if (supabase) {
     try {
-      const { data: request } = await supabase
-        .from('leave_requests')
-        .select(`*, users:student_id (full_name, username, departments (name))`)
-        .eq('id', requestId)
-        .single();
+      const request = await db.getLeaveRequestWithStudent(requestId);
 
       if (!request) {
         return res.status(404).json({ success: false, reason: 'ไม่พบคำร้องนี้ในระบบ' });
@@ -4483,13 +4475,11 @@ app.post('/api/requests/:id/emergency-override', authenticateToken, requireRole(
       const approverDisplayName = (ALL_SYSTEM_ACCOUNTS[user.username] ? ALL_SYSTEM_ACCOUNTS[user.username].full_name : null) || user.full_name || user.username;
       const roleLabel = user.role === 'deputy_director' ? 'รองผู้อำนวยการ' : (user.role === 'discipline_head' ? 'ฝ่ายปกครอง' : 'ผู้ดูแลระบบ');
 
-      const { data: updated } = await supabase.from('leave_requests').update({
-        current_step: finalStep,
-        status: 'approved',
-        qr_token: qrToken,
-        qr_generated_at: nowIso,
-        updated_at: nowIso
-      }).eq('id', requestId).select();
+      await db.query(
+        'UPDATE leave_requests SET current_step = ?, status = ?, qr_token = ?, qr_generated_at = ?, updated_at = ? WHERE id = ?',
+        [finalStep, 'approved', qrToken, nowIso, nowIso, requestId]
+      );
+      const updated = await db.query('SELECT * FROM leave_requests WHERE id = ?', [requestId]);
 
       const historyList = Array.isArray(meta.approvalHistory) ? [...meta.approvalHistory] : [];
       historyList.push({
@@ -4550,7 +4540,8 @@ app.delete('/api/requests/:id', authenticateToken, async (req, res) => {
 
   if (supabase) {
     try {
-      const { data: request } = await supabase.from('leave_requests').select('*').eq('id', requestId).single();
+      const requestRows = await db.query('SELECT * FROM leave_requests WHERE id = ?', [requestId]);
+      const request = requestRows[0];
       if (!request) {
         return res.status(404).json({ success: false, error: 'ไม่พบคำร้องที่ต้องการลบ' });
       }
@@ -4566,10 +4557,11 @@ app.delete('/api/requests/:id', authenticateToken, async (req, res) => {
         }
       }
 
-      await supabase.from('approval_logs').delete().eq('request_id', requestId);
-      await supabase.from('scan_logs').delete().eq('request_id', requestId);
-      const { error } = await supabase.from('leave_requests').delete().eq('id', requestId);
-      if (error) {
+      await db.query('DELETE FROM approval_logs WHERE request_id = ?', [requestId]);
+      await db.query('DELETE FROM scan_logs WHERE request_id = ?', [requestId]);
+      try {
+        await db.query('DELETE FROM leave_requests WHERE id = ?', [requestId]);
+      } catch (error) {
         console.error('Delete request error:', error);
         return res.status(500).json({ success: false, error: error.message });
       }
@@ -4596,14 +4588,25 @@ app.post('/api/requests/:id/waive', authenticateToken, requireRole(['discipline_
         waiver_note: waiverNote || 'งานปกครองละเว้นรายการ'
       };
 
-      let { data, error } = await supabase.from('leave_requests').update(updatePayload).eq('id', requestId).select();
+      let error = null;
+      try {
+        await db.query(
+          'UPDATE leave_requests SET is_waived = ?, waiver_note = ? WHERE id = ?',
+          [updatePayload.is_waived, updatePayload.waiver_note, requestId]
+        );
+      } catch (updErr) {
+        error = updErr;
+      }
 
-      // Fallback if columns don't exist yet in Supabase schema: store in admin_note
-      if (error && error.message && error.message.includes('column')) {
+      // Fallback if columns don't exist yet in the schema: store in admin_note
+      if (error && db.isMissingColumnError(error)) {
         const adminNoteStr = isWaived ? `[WAIVED: ${waiverNote || 'งานปกครองละเว้น'}] โดย ${user.full_name || 'งานปกครอง'}` : '';
-        const fb = await supabase.from('leave_requests').update({ admin_note: adminNoteStr }).eq('id', requestId).select();
-        data = fb.data;
-        error = fb.error;
+        try {
+          await db.query('UPDATE leave_requests SET admin_note = ? WHERE id = ?', [adminNoteStr, requestId]);
+          error = null;
+        } catch (fbErr) {
+          error = fbErr;
+        }
       }
 
       if (!error) {
@@ -4641,20 +4644,17 @@ app.post('/api/gate/scan', async (req, res) => {
 
   if (supabase) {
     try {
-      const { data: request, error } = await supabase
-        .from('leave_requests')
-        .select(`*, users:student_id (full_name, username, classrooms (name))`)
-        .eq('qr_token', baseToken)
-        .single();
+      const rows = await db.getLeaveRequestsWithStudent('lr.qr_token = ?', [baseToken]);
+      const request = rows[0];
 
-      if (error || !request) {
-        await supabase.from('scan_logs').insert([{
+      if (!request) {
+        await db.insertAutoIncrement('scan_logs', {
           qr_token: cleanToken,
           student_name: 'ไม่ทราบชื่อ',
           scan_type: scanType,
           result: 'denied',
           message: '❌ ไม่พบรหัส QR ในระบบ'
-        }]);
+        });
         return res.json({ success: false, reason: '❌ รหัส QR ไม่ถูกต้อง หรือไม่พบในระบบ' });
       }
 
@@ -4669,13 +4669,13 @@ app.post('/api/gate/scan', async (req, res) => {
       if (totpCode && !isTestQr) {
         const totpCheck = verifyTotp(baseToken, totpCode);
         if (!totpCheck.valid) {
-          await supabase.from('scan_logs').insert([{
+          await db.insertAutoIncrement('scan_logs', {
             qr_token: cleanToken,
             student_name: studentName,
             scan_type: scanType,
             result: 'denied',
             message: '❌ [QR หมดอายุ] ตรวจพบรูปแคปหน้าจอส่งต่อ รหัสความปลอดภัยหมดอายุแล้ว'
-          }]);
+          });
           return res.json({
             success: false,
             reason: '❌ [ตรวจพบภาพแคปหน้าจอ] รหัส QR นี้หมดอายุแล้ว กรุณาเปิดจากหน้าจอแอปจริงแบบสดๆ'
