@@ -19,24 +19,10 @@
   <!-- HTML5 QR Scanner -->
   <script src="https://unpkg.com/html5-qrcode"></script>
 
-  <style>
-    body {
-      font-family: 'TH Sarabun New', 'TH Sarabun PSK', 'Sarabun', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
-      font-size: 1.05rem;
-      line-height: 1.5;
-      background-color: #0b0f19;
-    }
-    input, button, select, textarea, optgroup {
-      font-family: 'TH Sarabun New', 'TH Sarabun PSK', 'Sarabun', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
-    }
-    .oled-screen {
-      background-color: #030712;
-      font-family: 'Courier New', Courier, monospace;
-      box-shadow: inset 0 0 15px rgba(0, 200, 255, 0.25);
-    }
-  </style>
+  <!-- Shared Stylesheet (รวม CSS ทุกหน้าไว้ที่เดียว: public/style.css) -->
+  <link rel="stylesheet" href="style.css">
 </head>
-<body class="text-slate-100 min-h-screen flex flex-col justify-between p-4 sm:p-8">
+<body class="kiosk-page text-slate-100 min-h-screen flex flex-col justify-between p-4 sm:p-8">
 
   <!-- Top Bar -->
   <header class="max-w-6xl w-full mx-auto flex flex-wrap items-center justify-between gap-4 pb-6 border-b border-slate-800">
