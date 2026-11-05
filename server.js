@@ -6706,24 +6706,21 @@ app.post('/api/admin/students/import', authenticateToken, async (req, res) => {
     saveStoredProfile(s.username, s);
     if (supabase) {
       try {
-        await supabase.from('users').upsert({
-          username: s.username,
-          student_code: s.student_code,
-          full_name: s.full_name,
-          role: 'student',
-          status: 'active',
-          student_prefix: s.student_prefix,
-          first_name: s.first_name,
-          last_name: s.last_name,
-          curriculum_level: s.curriculum_level,
-          class_year: s.class_year,
-          room_number: s.room_number,
-          advisor_username: s.advisor_username,
-          advisor_name: s.advisor_name,
-          onboarding_completed: false
-        }, { onConflict: 'username' });
+        await db.query(
+          `INSERT INTO users (id, username, student_code, full_name, role, status, student_prefix, first_name,
+             last_name, curriculum_level, class_year, room_number, advisor_username, advisor_name, onboarding_completed)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE student_code=VALUES(student_code), full_name=VALUES(full_name),
+             role=VALUES(role), status=VALUES(status), student_prefix=VALUES(student_prefix),
+             first_name=VALUES(first_name), last_name=VALUES(last_name), curriculum_level=VALUES(curriculum_level),
+             class_year=VALUES(class_year), room_number=VALUES(room_number), advisor_username=VALUES(advisor_username),
+             advisor_name=VALUES(advisor_name), onboarding_completed=VALUES(onboarding_completed)`,
+          [crypto.randomUUID(), s.username, s.student_code, s.full_name, 'student', 'active', s.student_prefix,
+           s.first_name, s.last_name, s.curriculum_level, s.class_year, s.room_number, s.advisor_username,
+           s.advisor_name, false]
+        );
       } catch (e) {
-        console.warn('Upsert to supabase warning:', e.message);
+        console.warn('Upsert to MySQL warning:', e.message);
       }
     }
     successCount++;
