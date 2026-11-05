@@ -997,7 +997,7 @@ async function finalizeGateExit(requestId, reason = 'TIMEOUT_30S') {
   try {
     if (supabase && requestId && requestId !== 'MANUAL' && requestId !== 'MANUAL_BTN') {
       if (!requestObj) {
-        const { data } = await supabase.from('leave_requests').select('*, users(*, departments(*), classrooms(*))').eq('id', requestId).single();
+        const data = await db.getLeaveRequestWithStudent(requestId);
         if (data) requestObj = data;
       }
 
@@ -1008,18 +1008,15 @@ async function finalizeGateExit(requestId, reason = 'TIMEOUT_30S') {
 
         // 1. ตัดสิทธิ์ QR Code และบันทึกสถานะสิ้นสุดขาออก
         try {
-          await supabase.from('leave_requests').update({
-            is_qr_used: true,
-            qr_used_at: outIso,
-            actual_out_time: outIso,
-            status: finalStatus
-          }).eq('id', requestId);
+          await db.query(
+            'UPDATE leave_requests SET is_qr_used = ?, qr_used_at = ?, actual_out_time = ?, status = ? WHERE id = ?',
+            [true, outIso, outIso, finalStatus, requestId]
+          );
         } catch (e) {
-          await supabase.from('leave_requests').update({
-            is_qr_used: true,
-            qr_used_at: outIso,
-            status: finalStatus
-          }).eq('id', requestId);
+          await db.query(
+            'UPDATE leave_requests SET is_qr_used = ?, qr_used_at = ?, status = ? WHERE id = ?',
+            [true, outIso, finalStatus, requestId]
+          );
         }
 
         saveRequestMeta(requestId, {
@@ -1036,14 +1033,14 @@ async function finalizeGateExit(requestId, reason = 'TIMEOUT_30S') {
           ? 'ตรวจพบคน/รถผ่านเซนเซอร์ ไม้กั้นปิดลง' 
           : (reason === 'TIMEOUT_30S' ? 'ครบกำหนดเวลา 30 วินาที ไม้กั้นปิดลง' : `ไม้กั้นปิด (${reason})`);
 
-        await supabase.from('scan_logs').insert([{
+        await db.insertAutoIncrement('scan_logs', {
           request_id: requestId,
           qr_token: requestObj.qr_token || 'COMPLETED',
           student_name: studentName,
           scan_type: 'exit_completed',
           result: 'success',
           message: `ไม้กั้นปิดเรียบร้อย (${reasonDesc}) - ตัดสิทธิ์ QR และบันทึกสถานะ "${finalStatus === 'returned' ? 'กลับบ้านเสร็จสิ้น' : 'อยู่นอกสถานศึกษา'}"`
-        }]);
+        });
 
         // 3. ส่งแจ้งเตือน Line
         const reasonBadge = reason === 'SENSOR_PASSED' ? '🚗 ขับ/เดินผ่านเซนเซอร์แล้ว' : '⏱️ ครบเวลาไม้กั้น 30 วินาที';
@@ -1064,8 +1061,8 @@ async function finalizeGateExit(requestId, reason = 'TIMEOUT_30S') {
         if (reqMeta.isTemporaryTest || (requestObj.request_no && requestObj.request_no.startsWith('TEST-')) || (requestObj.qr_token && requestObj.qr_token.startsWith('TEST-'))) {
           console.log(`🧹 [AUTO-PURGE TEST REQUEST] ไม้กั้นปิดแล้ว กำลังลบข้อมูลทดสอบ ${requestId} ออกจากระบบ 100%`);
           try {
-            await supabase.from('leave_requests').delete().eq('id', requestId);
-            await supabase.from('scan_logs').delete().eq('request_id', requestId);
+            await db.query('DELETE FROM leave_requests WHERE id = ?', [requestId]);
+            await db.query('DELETE FROM scan_logs WHERE request_id = ?', [requestId]);
           } catch (delErr) {
             console.warn('Auto purge error:', delErr.message);
           }
@@ -1349,8 +1346,10 @@ let simulatorState = {
 // ดึงรายชื่อผู้ใช้
 app.get('/api/users', async (req, res) => {
   if (supabase) {
-    const { data, error } = await supabase.from('users').select('*');
-    if (!error && data) return res.json({ users: data.map(sanitizeUser) });
+    try {
+      const data = await db.query('SELECT * FROM users');
+      if (data) return res.json({ users: data.map(sanitizeUser) });
+    } catch (e) {}
   }
   res.json({ users: [] });
 });
@@ -1360,13 +1359,9 @@ app.get('/api/profile/:username', async (req, res) => {
   const username = req.params.username;
   if (supabase) {
     try {
-      const { data: user, error } = await supabase
-        .from('users')
-        .select(`*, classrooms (name, advisor_name), departments (name)`)
-        .eq('username', username)
-        .maybeSingle();
+      const user = await db.getUserByUsernameWithRelations(username);
 
-      if (!error && user) {
+      if (user) {
         const stored = getStoredProfile(user.username);
         const resolvedDept = user.classrooms?.name ? `${user.departments?.name || ''} (${user.classrooms.name})` : (user.departments?.name || stored.dept || 'วิทยาลัยการอาชีพองครักษ์');
         const resolvedAdvisor = user.classrooms?.advisor_name || user.advisor_name || stored.advisor || '-';
@@ -1409,16 +1404,15 @@ app.put('/api/profile', async (req, res) => {
         parent_phone: parent_phone ? String(parent_phone).trim() : null
       };
 
-      const { data: updated, error } = await supabase
-        .from('users')
-        .update(updatePayload)
-        .eq('username', username)
-        .select(`*, classrooms (name, advisor_name), departments (name)`)
-        .maybeSingle();
-
-      if (error) {
-        console.warn('PUT /api/profile supabase error:', error.message);
+      try {
+        await db.query(
+          'UPDATE users SET plate_no = ?, phone = ?, parent_phone = ? WHERE username = ?',
+          [updatePayload.plate_no, updatePayload.phone, updatePayload.parent_phone, username]
+        );
+      } catch (updErr) {
+        console.warn('PUT /api/profile db update error:', updErr.message);
       }
+      const updated = await db.getUserByUsernameWithRelations(username);
 
       saveStoredProfile(username, {
         plate: plate || '',
@@ -1476,11 +1470,11 @@ app.post('/api/register', async (req, res) => {
   if (supabase) {
     try {
       // 1. ตรวจสอบว่ามี studentCode หรือ email นี้ในฐานข้อมูลแล้วหรือไม่
-      const { data: existingUser } = await supabase
-        .from('users')
-        .select('id, username')
-        .or(`username.eq.${cleanCode},username.eq.${cleanEmail}`)
-        .maybeSingle();
+      const existingRows = await db.query(
+        'SELECT id, username FROM users WHERE username = ? OR username = ?',
+        [cleanCode, cleanEmail]
+      );
+      const existingUser = existingRows[0];
 
       if (existingUser) {
         return res.status(400).json({ success: false, message: 'รหัสนักศึกษาหรืออีเมลนี้มีอยู่ในระบบแล้ว' });
@@ -1501,13 +1495,17 @@ app.post('/api/register', async (req, res) => {
         phone: '-'
       };
 
-      let { data, error } = await supabase
-        .from('users')
-        .insert([insertUser])
-        .select();
+      let data = null;
+      let error = null;
+      try {
+        const inserted = await db.insertWithUuid('users', insertUser);
+        data = [inserted];
+      } catch (insErr) {
+        error = insErr;
+      }
 
       if (!error && data && data.length > 0) {
-        console.log(`✅ [SUPABASE] New student registered with bcrypt password: ${cleanCode} (${cleanName})`);
+        console.log(`✅ [MYSQL] New student registered with bcrypt password: ${cleanCode} (${cleanName})`);
         
         // 3. บันทึกโปรไฟล์เริ่มต้นลง profiles.json ทันที
         const newProf = {
@@ -1579,11 +1577,7 @@ app.post('/api/login', async (req, res) => {
       let candidateUser = null;
 
       // 1.1 ค้นหาด้วย username ตรงๆ (เช่น รหัสนักศึกษา หรือ username ของอาจารย์)
-      const { data: byUsername } = await supabase
-        .from('users')
-        .select(`*, classrooms (name, advisor_name), departments (name)`)
-        .eq('username', rawInput)
-        .maybeSingle();
+      const byUsername = await db.getUserByUsernameWithRelations(rawInput);
       if (byUsername) candidateUser = byUsername;
 
       // 1.2 ถ้าไม่เจอ ค้นหาจาก student_code, email หรือชื่อ ใน profiles.json เพื่อดึง username ที่ผูกไว้
@@ -1606,22 +1600,14 @@ app.post('/api/login', async (req, res) => {
         }
 
         if (targetUsername) {
-          const { data: byTarget } = await supabase
-            .from('users')
-            .select(`*, classrooms (name, advisor_name), departments (name)`)
-            .eq('username', targetUsername)
-            .maybeSingle();
+          const byTarget = await db.getUserByUsernameWithRelations(targetUsername);
           if (byTarget) candidateUser = byTarget;
         }
       }
 
-      // 1.3 ถ้ายังไม่เจอ ลองค้นจาก full_name ใน Supabase
+      // 1.3 ถ้ายังไม่เจอ ลองค้นจาก full_name ในฐานข้อมูล
       if (!candidateUser) {
-        const { data: byFullName } = await supabase
-          .from('users')
-          .select(`*, classrooms (name, advisor_name), departments (name)`)
-          .eq('full_name', rawInput)
-          .maybeSingle();
+        const byFullName = await db.getUserByFullNameWithRelations(rawInput);
         if (byFullName) candidateUser = byFullName;
       }
 
@@ -1635,10 +1621,7 @@ app.post('/api/login', async (req, res) => {
           if (storedPass && !isBcryptHash(storedPass) && cleanPass !== '1234') {
             try {
               const upgradedHash = await hashPassword(cleanPass);
-              await supabase
-                .from('users')
-                .update({ password: upgradedHash })
-                .eq('id', candidateUser.id);
+              await db.query('UPDATE users SET password = ? WHERE id = ?', [upgradedHash, candidateUser.id]);
               console.log(`🔒 [BCRYPT] Auto-upgraded password hash for user: ${candidateUser.username}`);
             } catch (upgradeErr) {
               console.warn('Auto-upgrade bcrypt warning:', upgradeErr.message);
@@ -1716,11 +1699,8 @@ app.post('/api/auth/token', async (req, res) => {
 
   if (supabase) {
     try {
-      const { data: user } = await supabase
-        .from('users')
-        .select('*')
-        .eq('username', rawInput)
-        .maybeSingle();
+      const rows = await db.query('SELECT * FROM users WHERE username = ?', [rawInput]);
+      const user = rows[0];
       if (user) {
         return res.json({ success: true, token: generateToken(user) });
       }
@@ -1798,7 +1778,7 @@ app.delete('/api/admin/departments/:id', authenticateToken, requireRole(['admin'
   }
   if (supabase) {
     try {
-      await supabase.from('departments').delete().eq('id', deptId);
+      await db.query('DELETE FROM departments WHERE id = ?', [deptId]);
     } catch (e) {}
   }
   return res.json({ success: true, message: 'ลบแผนกวิชาเรียบร้อย' });
@@ -1809,11 +1789,8 @@ app.get('/api/admin/users', authenticateToken, requireRole(['admin']), async (re
   try {
     let users = [];
     if (supabase) {
-      const { data, error } = await supabase
-        .from('users')
-        .select('*, departments(id, name), classrooms(id, name, advisor_name)')
-        .order('created_at', { ascending: false });
-      if (!error && data) {
+      const data = await db.queryUsersWithRelations('', [], 'u.created_at DESC');
+      if (data) {
         users = data.map(u => ({
           ...u,
           dept: u.departments?.name || u.dept || '',
@@ -1921,25 +1898,26 @@ app.post('/api/admin/users', authenticateToken, requireRole(['admin']), async (r
 
   if (supabase) {
     try {
-      // ลอง insert หรือ upsert
-      const { data, error } = await supabase.from('users').upsert([{
-        username: cleanUser,
-        password: userData.password,
-        full_name: finalFullName,
-        role: role,
-        student_code: userData.student_code,
-        plate_no: plate_no,
-        status: 'active'
-      }], { onConflict: 'username' }).select();
+      // ลอง insert หรือ upsert (ON DUPLICATE KEY UPDATE ตาม username)
+      const newId = crypto.randomUUID();
+      await db.query(
+        `INSERT INTO users (id, username, password, full_name, role, student_code, plate_no, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE password=VALUES(password), full_name=VALUES(full_name), role=VALUES(role),
+           student_code=VALUES(student_code), plate_no=VALUES(plate_no), status=VALUES(status)`,
+        [newId, cleanUser, userData.password, finalFullName, role, userData.student_code, plate_no, 'active']
+      );
+      const rows = await db.query('SELECT * FROM users WHERE username = ?', [cleanUser]);
+      const data = rows;
 
-      if (!error && data && data.length) {
+      if (data && data.length) {
         unmarkUserAsDeleted(cleanUser);
         saveStoredProfile(cleanUser, userData);
         console.log(`✅ [ADMIN] Created/Updated user @${cleanUser} (${finalFullName})`);
         return res.json({ success: true, message: `สร้างผู้ใช้งาน "${finalFullName}" สำเร็จแล้ว`, user: sanitizeUser({ ...userData, ...data[0] }) });
       }
     } catch (e) {
-      console.warn('Supabase insert user error:', e.message);
+      console.warn('MySQL insert user error:', e.message);
     }
   }
 
@@ -1962,20 +1940,22 @@ app.put('/api/admin/users/:id/reset-password', authenticateToken, requireRole(['
   if (supabase) {
     try {
       if (userId && userId.length === 36 && userId.includes('-')) {
-        const { data, error } = await supabase.from('users').update({ password: newPassword, password_hash: passHash }).eq('id', userId).select();
-        if (!error && data && data.length > 0) {
+        await db.query('UPDATE users SET password = ?, password_hash = ? WHERE id = ?', [newPassword, passHash, userId]);
+        const data = await db.query('SELECT * FROM users WHERE id = ?', [userId]);
+        if (data && data.length > 0) {
           updatedInSupabase = true;
           if (!resolvedUsername && data[0].username) resolvedUsername = data[0].username.toLowerCase();
         }
       }
       if (!updatedInSupabase && targetUsername) {
-        const { data, error } = await supabase.from('users').update({ password: newPassword, password_hash: passHash }).eq('username', targetUsername).select();
-        if (!error && data && data.length > 0) {
+        await db.query('UPDATE users SET password = ?, password_hash = ? WHERE username = ?', [newPassword, passHash, targetUsername]);
+        const data = await db.query('SELECT * FROM users WHERE username = ?', [targetUsername]);
+        if (data && data.length > 0) {
           updatedInSupabase = true;
         }
       }
     } catch (e) {
-      console.warn('Supabase reset password error:', e.message);
+      console.warn('MySQL reset password error:', e.message);
     }
   }
 
@@ -2076,31 +2056,37 @@ app.delete('/api/admin/users/:id', authenticateToken, requireRole(['admin']), as
     } catch (e) {}
   }
 
-  // 3. Supabase Cleanup (Safe delete without Foreign Key error)
+  // 3. MySQL Cleanup (Safe delete without Foreign Key error)
   if (supabase) {
     try {
       let sbUser = null;
       if (userId && userId.length === 36 && userId.includes('-')) {
-        const { data } = await supabase.from('users').select('id, username').eq('id', userId).maybeSingle();
-        if (data) sbUser = data;
+        const rows = await db.query('SELECT id, username FROM users WHERE id = ?', [userId]);
+        if (rows[0]) sbUser = rows[0];
       }
       if (!sbUser && targetUsername) {
-        const { data } = await supabase.from('users').select('id, username').eq('username', targetUsername).maybeSingle();
-        if (data) sbUser = data;
+        const rows = await db.query('SELECT id, username FROM users WHERE username = ?', [targetUsername]);
+        if (rows[0]) sbUser = rows[0];
       }
 
       if (sbUser) {
         const uid = sbUser.id;
         const uName = sbUser.username;
 
-        try { await supabase.from('approval_logs').delete().or(`approver_id.eq.${uid},student_id.eq.${uid}`); } catch (e) {}
-        try { await supabase.from('scan_logs').delete().eq('user_id', uid); } catch (e) {}
-        try { await supabase.from('leave_requests').delete().or(`student_id.eq.${uid},student_code.eq.${uName}`); } catch (e) {}
-        await supabase.from('users').delete().eq('id', uid);
-        console.log(`🗑️ [ADMIN] Deleted user @${uName} (${uid}) from Supabase`);
+        // NOTE: original Supabase code did `.or('approver_id.eq.X,student_id.eq.X')` on approval_logs,
+        // but approval_logs has no student_id column - that call always errored (silently caught) in the
+        // original app too, so only the approver_id condition ever had a chance of matching anything.
+        // NOTE: original Supabase code also did `.from('scan_logs').delete().eq('user_id', uid)`, but
+        // scan_logs has no user_id column either - that call always errored (silently caught) in the
+        // original app too. Kept as a faithful (intentionally no-op) translation rather than "fixing" it.
+        try { await db.query('DELETE FROM approval_logs WHERE approver_id = ?', [uid]); } catch (e) {}
+        try { await db.query('DELETE FROM scan_logs WHERE user_id = ?', [uid]); } catch (e) {}
+        try { await db.query('DELETE FROM leave_requests WHERE student_id = ? OR student_code = ?', [uid, uName]); } catch (e) {}
+        await db.query('DELETE FROM users WHERE id = ?', [uid]);
+        console.log(`🗑️ [ADMIN] Deleted user @${uName} (${uid}) from MySQL`);
       }
     } catch (err) {
-      console.warn('Supabase delete user error:', err.message);
+      console.warn('MySQL delete user error:', err.message);
     }
   }
 
@@ -3335,15 +3321,9 @@ function resolveStepApproversInfo(deptName, meta = {}, totalSteps = 4) {
 app.get('/api/requests', async (req, res) => {
   if (supabase) {
     try {
-      const { data, error } = await supabase
-        .from('leave_requests')
-        .select(`
-          *,
-          users:student_id (full_name, username, plate_no, phone, parent_phone, classrooms (name, advisor_name), departments (name))
-        `)
-        .order('created_at', { ascending: false });
+      const data = await db.getLeaveRequestsWithStudent('', [], 'lr.created_at DESC');
 
-      if (!error && data) {
+      if (data) {
         const nowMs = Date.now();
         // จัดโครงสร้างให้ Frontend ใช้งานง่าย รองรับทั้งคำร้อง 5 ขั้นตอนใหม่ และคำร้อง 3 ขั้นตอนเก่า (ข้อ 10)
         const formatted = data.map(r => {
@@ -3461,15 +3441,9 @@ app.get('/api/requests', async (req, res) => {
 app.get('/api/stats', async (req, res) => {
   if (supabase) {
     try {
-      const { data: requests, error } = await supabase
-        .from('leave_requests')
-        .select(`
-          *,
-          users:student_id (full_name, username, plate_no, classrooms (name), departments (name))
-        `)
-        .order('created_at', { ascending: false });
+      const requests = await db.getLeaveRequestsWithStudent('', [], 'lr.created_at DESC');
 
-      if (!error && requests) {
+      if (requests) {
         const total = requests.length;
         let approvedCount = 0;
         let pendingCount = 0;
@@ -3575,12 +3549,9 @@ app.get('/api/requests/:id/rotating-token', async (req, res) => {
     let request = null;
 
     if (supabase) {
-      const { data, error } = await supabase
-        .from('leave_requests')
-        .select('*')
-        .eq('id', requestId)
-        .single();
-      if (!error && data) {
+      const rows = await db.query('SELECT * FROM leave_requests WHERE id = ?', [requestId]);
+      const data = rows[0];
+      if (data) {
         request = data;
         baseToken = data.qr_token;
       }
@@ -3757,7 +3728,11 @@ app.post('/api/requests', async (req, res) => {
     try {
       let validStudentId = (studentId && studentId.length === 36) ? studentId : null;
       if (!validStudentId && studentCode) {
-        const { data: foundU } = await supabase.from('users').select('id').or(`student_code.eq.${studentCode},username.eq.${studentCode}`).maybeSingle();
+        const foundRows = await db.query(
+          'SELECT id FROM users WHERE student_code = ? OR username = ?',
+          [studentCode, studentCode]
+        );
+        const foundU = foundRows[0];
         if (foundU && foundU.id) {
           validStudentId = foundU.id;
         }
@@ -3767,20 +3742,22 @@ app.post('/api/requests', async (req, res) => {
       }
 
       // ตรวจสอบคำร้องเดิมที่ยังไม่หมดเวลา (ป้องกันการยื่นคำร้องซ้ำ)
-      let dupQuery = supabase
-        .from('leave_requests')
-        .select('*')
-        .in('status', ['pending_subject', 'pending_advisor', 'pending_dept_head', 'pending_discipline', 'pending_deputy', 'approved', 'exited']);
+      const statusList = ['pending_subject', 'pending_advisor', 'pending_dept_head', 'pending_discipline', 'pending_deputy', 'approved', 'exited'];
+      let dupSql = 'SELECT * FROM leave_requests WHERE status IN (?)';
+      let dupParams = [statusList];
 
       if (validStudentId !== '00000000-0000-0000-0000-000000000001') {
-        dupQuery = dupQuery.eq('student_id', validStudentId);
+        dupSql += ' AND student_id = ?';
+        dupParams.push(validStudentId);
       } else if (studentCode) {
-        dupQuery = dupQuery.eq('student_code', studentCode);
+        dupSql += ' AND student_code = ?';
+        dupParams.push(studentCode);
       } else {
-        dupQuery = dupQuery.eq('student_id', validStudentId);
+        dupSql += ' AND student_id = ?';
+        dupParams.push(validStudentId);
       }
 
-      const { data: existingRequests } = await dupQuery;
+      const existingRequests = await db.query(dupSql, dupParams);
       if (existingRequests && existingRequests.length > 0) {
         const thaiDate = getThaiDateStr();
         const bkkNow = getBangkokNow();
@@ -3831,10 +3808,17 @@ app.post('/api/requests', async (req, res) => {
       if (pickupName) insertPayload.pickup_name = pickupName;
       if (pickupPlate) insertPayload.pickup_plate = pickupPlate;
 
-      let { data, error } = await supabase.from('leave_requests').insert([insertPayload]).select();
+      let data = null;
+      let error = null;
+      try {
+        const inserted = await db.insertAutoIncrement('leave_requests', insertPayload);
+        data = [inserted];
+      } catch (insErr) {
+        error = insErr;
+      }
 
-      // Fallback ถ้าคอลัมน์ใหม่ยังไม่ได้สร้างบน Supabase
-      if (error && error.message && error.message.includes('column')) {
+      // Fallback ถ้าคอลัมน์ใหม่ยังไม่มีในตาราง (เช่น schema เก่ากว่าที่คาด)
+      if (error && db.isMissingColumnError(error)) {
         console.warn('Fallback inserting leave request without new columns:', error.message);
         delete insertPayload.destination;
         delete insertPayload.travel_mode;
@@ -3845,9 +3829,13 @@ app.post('/api/requests', async (req, res) => {
         delete insertPayload.student_code;
         delete insertPayload.plate_photo;
         delete insertPayload.parent_phone;
-        const fb = await supabase.from('leave_requests').insert([insertPayload]).select();
-        data = fb.data;
-        error = fb.error;
+        try {
+          const inserted = await db.insertAutoIncrement('leave_requests', insertPayload);
+          data = [inserted];
+          error = null;
+        } catch (fbErr) {
+          error = fbErr;
+        }
       }
 
       // บันทึก Snapshot 4 ขั้นตอนลงใน requests_meta.json
@@ -3942,11 +3930,7 @@ app.post('/api/requests/:id/approve', authenticateToken, requireRole(['subject_t
 
   if (supabase) {
     try {
-      const { data: request } = await supabase
-        .from('leave_requests')
-        .select(`*, users:student_id (full_name, username, classrooms (name), departments (name))`)
-        .eq('id', requestId)
-        .single();
+      const request = await db.getLeaveRequestWithStudent(requestId);
 
       if (!request) {
         return res.status(404).json({ success: false, message: 'ไม่พบคำร้องนี้ในระบบ' });
@@ -4196,13 +4180,11 @@ app.post('/api/requests/:id/approve', authenticateToken, requireRole(['subject_t
       }
 
       const nowIso = new Date().toISOString();
-      const { data: updated } = await supabase.from('leave_requests').update({
-        current_step: nextStep,
-        status: nextStatus,
-        qr_token: qrToken,
-        qr_generated_at: nextStatus === 'approved' ? nowIso : null,
-        updated_at: nowIso
-      }).eq('id', requestId).select();
+      await db.query(
+        'UPDATE leave_requests SET current_step = ?, status = ?, qr_token = ?, qr_generated_at = ?, updated_at = ? WHERE id = ?',
+        [nextStep, nextStatus, qrToken, nextStatus === 'approved' ? nowIso : null, nowIso, requestId]
+      );
+      const updated = await db.query('SELECT * FROM leave_requests WHERE id = ?', [requestId]);
 
       // บันทึกลง approvalHistory ใน meta (ข้อ 4, 6, 9)
       const historyList = Array.isArray(meta.approvalHistory) ? [...meta.approvalHistory] : [];
