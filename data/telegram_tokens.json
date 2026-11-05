@@ -1,0 +1,92 @@
+{
+  "171273": {
+    "userId": "00000000-0000-0000-0000-000000000121",
+    "username": "subject_electric",
+    "token": "e12d3ad8af2c5141eccc135ea7397ed4",
+    "shortCode": "171273",
+    "expiresAt": "2026-11-05T09:38:46.102Z",
+    "used": true,
+    "createdAt": "2026-11-05T09:28:46.676Z"
+  },
+  "174735": {
+    "userId": "56393d48-6587-4dfe-aa60-eaccfcac9c5f",
+    "username": "66202010001",
+    "token": "3793cafed8021d019d82e16b7ea397cf",
+    "shortCode": "174735",
+    "expiresAt": "2026-11-05T09:39:15.167Z",
+    "used": true,
+    "createdAt": "2026-11-05T09:29:15.255Z"
+  },
+  "404959": {
+    "userId": "u-teacher_auto",
+    "username": "teacher_auto",
+    "token": "acf5d7fc0fe96fc085d112fa0906a54e",
+    "shortCode": "404959",
+    "expiresAt": "2026-11-05T09:42:28.506Z",
+    "used": true,
+    "createdAt": "2026-11-05T09:32:28.636Z"
+  },
+  "413468": {
+    "userId": "u-teacher_electric",
+    "username": "teacher_electric",
+    "token": "98dcb4d8b1cd216cb237299104411f3a",
+    "shortCode": "413468",
+    "expiresAt": "2026-11-05T09:38:46.704Z",
+    "used": true,
+    "createdAt": "2026-11-05T09:28:46.776Z"
+  },
+  "930123": {
+    "userId": "00000000-0000-0000-0000-000000000111",
+    "username": "subject_auto",
+    "token": "058820842a6d5d8a4076ebe4c6dafac3",
+    "shortCode": "930123",
+    "expiresAt": "2026-11-05T09:43:15.786Z",
+    "used": true,
+    "createdAt": "2026-11-05T09:33:15.922Z"
+  },
+  "e12d3ad8af2c5141eccc135ea7397ed4": {
+    "userId": "00000000-0000-0000-0000-000000000121",
+    "username": "subject_electric",
+    "token": "e12d3ad8af2c5141eccc135ea7397ed4",
+    "shortCode": "171273",
+    "expiresAt": "2026-11-05T09:38:46.102Z",
+    "used": true,
+    "createdAt": "2026-11-05T09:28:46.676Z"
+  },
+  "98dcb4d8b1cd216cb237299104411f3a": {
+    "userId": "u-teacher_electric",
+    "username": "teacher_electric",
+    "token": "98dcb4d8b1cd216cb237299104411f3a",
+    "shortCode": "413468",
+    "expiresAt": "2026-11-05T09:38:46.704Z",
+    "used": true,
+    "createdAt": "2026-11-05T09:28:46.776Z"
+  },
+  "3793cafed8021d019d82e16b7ea397cf": {
+    "userId": "56393d48-6587-4dfe-aa60-eaccfcac9c5f",
+    "username": "66202010001",
+    "token": "3793cafed8021d019d82e16b7ea397cf",
+    "shortCode": "174735",
+    "expiresAt": "2026-11-05T09:39:15.167Z",
+    "used": true,
+    "createdAt": "2026-11-05T09:29:15.255Z"
+  },
+  "acf5d7fc0fe96fc085d112fa0906a54e": {
+    "userId": "u-teacher_auto",
+    "username": "teacher_auto",
+    "token": "acf5d7fc0fe96fc085d112fa0906a54e",
+    "shortCode": "404959",
+    "expiresAt": "2026-11-05T09:42:28.506Z",
+    "used": true,
+    "createdAt": "2026-11-05T09:32:28.636Z"
+  },
+  "058820842a6d5d8a4076ebe4c6dafac3": {
+    "userId": "00000000-0000-0000-0000-000000000111",
+    "username": "subject_auto",
+    "token": "058820842a6d5d8a4076ebe4c6dafac3",
+    "shortCode": "930123",
+    "expiresAt": "2026-11-05T09:43:15.786Z",
+    "used": true,
+    "createdAt": "2026-11-05T09:33:15.922Z"
+  }
+}

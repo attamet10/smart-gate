@@ -1,0 +1,37 @@
+[
+  {
+    "id": "auto",
+    "name": "แผนกวิชาช่างยนต์",
+    "subjectTeacher": { "username": "subject_auto", "name": "อ.ธีรพงศ์ เครื่องยนต์" },
+    "teacher": { "username": "teacher_auto", "name": "อ.อนุสรณ์ ช่างยนต์" },
+    "head": { "username": "head_auto", "name": "อ.ประสิทธิ์ ยานยนต์" }
+  },
+  {
+    "id": "electric",
+    "name": "แผนกวิชาช่างไฟฟ้า",
+    "subjectTeacher": { "username": "subject_electric", "name": "อ.วีระพล วงจรไฟฟ้า" },
+    "teacher": { "username": "teacher_electric", "name": "อ.กิตติศักดิ์ ไฟฟ้า" },
+    "head": { "username": "head_electric", "name": "อ.สมศักดิ์ พลังงาน" }
+  },
+  {
+    "id": "account",
+    "name": "แผนกวิชาการบัญชี",
+    "subjectTeacher": { "username": "subject_account", "name": "อ.ศิริพร การบัญชี" },
+    "teacher": { "username": "teacher_account", "name": "อ.พิมพา บัญชี" },
+    "head": { "username": "head_account", "name": "อ.วรรณา ยอดเงิน" }
+  },
+  {
+    "id": "digital",
+    "name": "แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล",
+    "subjectTeacher": { "username": "subject_digital", "name": "อ.ภาณุวัฒน์ โค้ดดิ้ง" },
+    "teacher": { "username": "teacher_digital", "name": "อ.ธนากร ดิจิทัล" },
+    "head": { "username": "head_digital", "name": "อ.ณัฐพงษ์ เทคโนโลยี" }
+  },
+  {
+    "id": "office",
+    "name": "แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล",
+    "subjectTeacher": { "username": "subject_office", "name": "อ.กนกวรรณ บริหาร" },
+    "teacher": { "username": "teacher_office", "name": "อ.นภาวรรณ สำนักงาน" },
+    "head": { "username": "head_office", "name": "อ.สุพรรณี การจัดการ" }
+  }
+]

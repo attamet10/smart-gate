@@ -1,0 +1,31 @@
+{
+  "38": {
+    "requestId": "38",
+    "requestNo": "TEST-GATE-PASS-8888",
+    "qrToken": "TEST-GATE-PASS-8888",
+    "studentName": "ผู้ทดสอบเปิดไม้กั้น (OnePass Test)",
+    "isTemporaryTest": true,
+    "status": "exited",
+    "totalSteps": 4,
+    "createdAt": "2026-11-05T10:38:15.988Z",
+    "gateOpenedAt": "2026-11-05T10:42:43.667Z",
+    "gateOpenTimeStr": "17:42",
+    "isNoReturn": false,
+    "updatedAt": "2026-11-05T10:43:19.559Z",
+    "actualOutTime": "2026-11-05T10:43:19.211Z",
+    "actualOutTimeStr": "17:43",
+    "gateCloseReason": "TIMEOUT_30S",
+    "isQrUsed": true,
+    "qrUsedAt": "2026-11-05T10:43:19.211Z"
+  },
+  "TEST-GATE-PASS-8888": {
+    "requestId": "38",
+    "requestNo": "TEST-GATE-PASS-8888",
+    "qrToken": "TEST-GATE-PASS-8888",
+    "studentName": "ผู้ทดสอบเปิดไม้กั้น (OnePass Test)",
+    "isTemporaryTest": true,
+    "status": "approved",
+    "totalSteps": 4,
+    "createdAt": "2026-11-05T10:38:15.988Z"
+  }
+}

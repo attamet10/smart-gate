@@ -1,0 +1,213 @@
+[
+  {
+    "id": "12ac80fd-fecf-40e3-8cf4-ebc6a61668ac",
+    "chat_id": 9147556045,
+    "notify_type": "account_linked",
+    "message_preview": "🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว (ถาวร)!</b>\n\n👤 <b>บัญชี:</b> undefined\n🏷️ <b>ตำแห",
+    "status": "success",
+    "created_at": "2026-11-05T09:33:18.188Z"
+  },
+  {
+    "id": "5d072f75-dbe3-4b08-a602-c43b23e11703",
+    "chat_id": 9188395845,
+    "notify_type": "account_linked",
+    "message_preview": "🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว (ถาวร)!</b>\n\n👤 <b>บัญชี:</b> undefined\n🏷️ <b>ตำแห",
+    "status": "success",
+    "created_at": "2026-11-05T09:32:32.131Z"
+  },
+  {
+    "id": "14aa2509-6306-40fb-8e9f-6167eeba821f",
+    "chat_id": 8615279678,
+    "notify_type": "account_linked",
+    "message_preview": "🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว (ถาวร)!</b>\n\n👤 <b>บัญชี:</b> นาย ชัยวัฒน์ อิเล็กโท",
+    "status": "success",
+    "created_at": "2026-11-05T09:29:18.111Z"
+  },
+  {
+    "id": "2498b0b4-5dcc-44ae-b994-5bbef0873cea",
+    "chat_id": 9188395845,
+    "notify_type": "account_linked",
+    "message_preview": "🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว (ถาวร)!</b>\n\n👤 <b>บัญชี:</b> undefined\n🏷️ <b>ตำแห",
+    "status": "success",
+    "created_at": "2026-11-05T09:28:53.386Z"
+  },
+  {
+    "id": "36d6a428-eb70-4db1-b17b-08322c75563a",
+    "chat_id": 9147556045,
+    "notify_type": "account_linked",
+    "message_preview": "🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว (ถาวร)!</b>\n\n👤 <b>บัญชี:</b> undefined\n🏷️ <b>ตำแห",
+    "status": "success",
+    "created_at": "2026-11-05T09:28:50.846Z"
+  },
+  {
+    "id": "187240a3-638a-4869-999a-be54bddb0981",
+    "chat_id": 9188395845,
+    "notify_type": "account_linked",
+    "message_preview": "🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว (ถาวร)!</b>\n\n👤 <b>บัญชี:</b> อ.กิตติศักดิ์ ไฟฟ้า\n\ud83c",
+    "status": "success",
+    "created_at": "2026-11-05T09:11:39.107Z"
+  },
+  {
+    "id": "dd18d534-84f3-46a7-b6f1-127ac6bcdd1f",
+    "chat_id": 9147556045,
+    "notify_type": "account_linked",
+    "message_preview": "🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว (ถาวร)!</b>\n\n👤 <b>บัญชี:</b> undefined\n🏷️ <b>ตำแห",
+    "status": "success",
+    "created_at": "2026-11-05T09:07:16.744Z"
+  },
+  {
+    "id": "07feab00-cf19-43ec-87ae-78899fbe0bed",
+    "chat_id": 8615279678,
+    "notify_type": "bot_status",
+    "message_preview": "✅ <b>บัญชีของคุณเชื่อมต่อกับ OnePass เรียบร้อยแล้ว (สถานะ: ถาวร)</b>\n\n👤 <b>บัญชีที่ผูก:</b> นาย รัช",
+    "status": "success",
+    "created_at": "2026-11-05T09:02:42.758Z"
+  },
+  {
+    "id": "472b86fd-ca89-4587-a6d9-c502da883dd0",
+    "chat_id": 8615279678,
+    "notify_type": "account_linked",
+    "message_preview": "🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว (ถาวร)!</b>\n\n👤 <b>บัญชี:</b> นาย รัชชานนท์ ไฟฟ้า\n\ud83c",
+    "status": "success",
+    "created_at": "2026-11-05T09:02:39.813Z"
+  },
+  {
+    "id": "43177174-5eed-492c-a918-515e63c1bc13",
+    "chat_id": 9188395845,
+    "notify_type": "general",
+    "message_preview": "🔔 <b>แจ้งเตือนความปลอดภัย OnePass</b>\n\nมีการเข้าสู่ระบบบัญชีของคุณจากอุปกรณ์:\n📱 <b>อุปกรณ์:</b> Wi",
+    "status": "success",
+    "created_at": "2026-11-05T04:47:47.483Z"
+  },
+  {
+    "id": "396f09eb-1137-41fe-8fc6-374b4545e233",
+    "chat_id": 9188395845,
+    "notify_type": "token_invalid",
+    "message_preview": "⚠️ <b>รหัสเชื่อมต่อไม่ถูกต้องหรือหมดอายุแล้ว</b>\n\nรหัส 6 หลักและลิงก์มีอายุ 10 นาที (เพื่อความปลอดภั",
+    "status": "success",
+    "created_at": "2026-11-05T04:29:21.705Z"
+  },
+  {
+    "id": "f2bd669a-8741-4114-90ef-aab683d0c3ec",
+    "chat_id": 8527824695,
+    "notify_type": "account_linked",
+    "message_preview": "🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว!</b>\n\n👤 <b>บัญชี:</b> subject_auto\n⏰ <b>เวลา:</b> ",
+    "status": "success",
+    "created_at": "2026-11-05T03:39:15.607Z"
+  },
+  {
+    "id": "0f2896d0-644f-4d17-82f4-559d4e4d7dce",
+    "chat_id": 8527824695,
+    "notify_type": "welcome_guide",
+    "message_preview": "👋 <b>ยินดีต้อนรับสู่ OnePass IoT Smart Gate Bot</b>\nวิทยาลัยการอาชีพองครักษ์\n\n🆔 <b>Telegram Chat I",
+    "status": "success",
+    "created_at": "2026-11-05T03:39:05.889Z"
+  },
+  {
+    "id": "de269336-6515-4cd9-b269-1a89d88f37ab",
+    "chat_id": 9188395845,
+    "notify_type": "bot_status",
+    "message_preview": "✅ <b>บัญชีของคุณเชื่อมต่อกับ OnePass เรียบร้อยแล้ว (สถานะ: ถาวร)</b>\n\n👤 <b>บัญชีที่ผูก:</b> นาย นรภ",
+    "status": "success",
+    "created_at": "2026-11-05T03:25:41.039Z"
+  },
+  {
+    "id": "a2b579ce-94e9-497a-ade1-fd7c1a8389dd",
+    "chat_id": 9188395845,
+    "notify_type": "bot_status",
+    "message_preview": "✅ <b>บัญชีของคุณเชื่อมต่อกับ OnePass เรียบร้อยแล้ว (สถานะ: ถาวร)</b>\n\n👤 <b>บัญชีที่ผูก:</b> นาย นรภ",
+    "status": "success",
+    "created_at": "2026-11-05T03:25:38.855Z"
+  },
+  {
+    "id": "ea4d7f0d-390b-46d9-ab8c-3c10f1f38512",
+    "chat_id": 9188395845,
+    "notify_type": "account_linked",
+    "message_preview": "🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว (ถาวร)!</b>\n\n👤 <b>บัญชี:</b> นาย นรภัทร ช่างกล\n🏷️",
+    "status": "success",
+    "created_at": "2026-11-05T03:25:32.321Z"
+  },
+  {
+    "id": "f9b347a9-09e3-4a95-b7a6-f8ffbaf7b72a",
+    "chat_id": 8615279678,
+    "notify_type": "account_linked",
+    "message_preview": "🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว (ถาวร)!</b>\n\n👤 <b>บัญชี:</b> นาย สรวิชญ์ ยานยนต์\n\ud83c",
+    "status": "success",
+    "created_at": "2026-11-05T03:15:29.853Z"
+  },
+  {
+    "id": "4d328d4e-d9dc-4b8e-8699-3f464a908fae",
+    "chat_id": 123456789,
+    "notify_type": "general",
+    "message_preview": "🔔 <b>แจ้งเตือนความปลอดภัย OnePass</b>\n\nมีการเข้าสู่ระบบบัญชีของคุณจากอุปกรณ์:\n📱 <b>อุปกรณ์:</b> Wi",
+    "status": "failed",
+    "error_message": "Bad Request: chat not found",
+    "created_at": "2026-11-05T03:00:30.207Z"
+  },
+  {
+    "id": "44374284-06ff-431b-b9a5-b93d0d36b1bb",
+    "chat_id": 9147556045,
+    "notify_type": "account_linked",
+    "message_preview": "🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว (ถาวร)!</b>\n\n👤 <b>บัญชี:</b> undefined\n🏷️ <b>ตำแห",
+    "status": "success",
+    "created_at": "2026-11-05T02:59:50.544Z"
+  },
+  {
+    "id": "d0964bd7-ff4f-403e-85b1-79dcf4c63448",
+    "chat_id": 123456789,
+    "notify_type": "account_linked",
+    "message_preview": "🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว!</b>\n\n👤 <b>บัญชี:</b> นายธนภัทร รัตนโชติ\n⏰ <b>เวลา",
+    "status": "failed",
+    "error_message": "Bad Request: chat not found",
+    "created_at": "2026-11-05T02:42:43.187Z"
+  },
+  {
+    "id": "7b9955ad-58b2-4573-83f6-1092e6f4ad4a",
+    "chat_id": 1122334455,
+    "notify_type": "account_linked",
+    "message_preview": "🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว (ถาวร)!</b>\n\n👤 <b>บัญชี:</b> นายธนภัทร รัตนโชติ\n🏷",
+    "status": "failed",
+    "error_message": "Bad Request: chat not found",
+    "created_at": "2026-11-05T02:36:54.748Z"
+  },
+  {
+    "id": "6b7f420b-25e2-4336-acdf-d52746902f26",
+    "chat_id": 9147556045,
+    "notify_type": "approver_queue",
+    "message_preview": "📋 <b>มีคำร้องขอออกนอกสถานศึกษาใหม่รอการอนุมัติ (ขั้นตอนที่ 2)</b>\n\n👤 <b>นักเรียน:</b> นายกิตติศักด",
+    "status": "success",
+    "created_at": "2026-11-04T19:55:08.232Z"
+  },
+  {
+    "id": "ab6ac7d8-0336-4d63-be69-43069130e12d",
+    "chat_id": 9147556045,
+    "notify_type": "approver_queue",
+    "message_preview": "📋 <b>มีคำร้องขอออกนอกสถานศึกษาใหม่รอการอนุมัติ (ขั้นตอนที่ 2)</b>\n\n👤 <b>นักเรียน:</b> นายธนภัทร รั",
+    "status": "success",
+    "created_at": "2026-11-04T19:54:06.575Z"
+  },
+  {
+    "id": "63a04795-c329-4a45-a3f1-065848bcf196",
+    "chat_id": 9147556045,
+    "notify_type": "general",
+    "message_preview": "🔔 <b>[OnePass ทดสอบการแจ้งเตือน]</b>\n\n📋 <b>มีคำร้องขอออกนอกสถานศึกษาใหม่รอการอนุมัติ (ขั้นตอนที่ 2",
+    "status": "success",
+    "created_at": "2026-11-04T19:47:22.743Z"
+  },
+  {
+    "id": "53b2cd84-5b17-4800-9b97-c48d9c376e5f",
+    "chat_id": 9147556045,
+    "notify_type": "token_invalid",
+    "message_preview": "⚠️ <b>รหัสเชื่อมต่อไม่ถูกต้องหรือหมดอายุแล้ว</b>\n\nรหัสเชื่อมต่อบัญชีมีอายุ 10 นาที และใช้ได้เพียงครั",
+    "status": "success",
+    "created_at": "2026-11-04T19:26:42.749Z"
+  },
+  {
+    "id": "410de589-bd76-4e46-b52e-013cde65b4e2",
+    "chat_id": 9147556045,
+    "notify_type": "account_linked",
+    "message_preview": "🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว!</b>\n\n👤 <b>บัญชี:</b> 00000000-0000-0000-0000-0000",
+    "status": "success",
+    "created_at": "2026-11-04T19:25:53.237Z"
+  }
+]

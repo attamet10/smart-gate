@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OnePass - QR Code ทดสอบเปิดไม้กั้น</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Prompt', sans-serif; }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen flex items-center justify-center p-4">
+  <div class="max-w-md w-full bg-slate-800 border border-slate-700 rounded-3xl p-6 sm:p-8 shadow-2xl space-y-6 text-center">
+    
+    <!-- Header -->
+    <div class="space-y-2">
+      <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-xs font-bold">
+        <span class="w-2 h-2 rounded-full bg-emerald-500 animate-ping"></span>
+        <span>QR PASS พร้อมสแกนเปิดไม้กั้น</span>
+      </div>
+      <h1 class="text-xl sm:text-2xl font-extrabold text-white">บัตรผ่านทดสอบเปิดไม้กั้น</h1>
+      <p class="text-xs text-slate-400">นำหน้าจอนี้ไปจ่อสแกนที่หัวอ่าน QR Code ที่ตู้หน้าไม้กั้น</p>
+    </div>
+
+    <!-- QR Code Container (High contrast white card) -->
+    <div class="bg-white p-6 rounded-2xl shadow-inner inline-block mx-auto border-4 border-emerald-500/30">
+      <div id="qrcode" class="flex justify-center"></div>
+      <p class="font-mono text-xs font-bold text-slate-900 mt-3 tracking-wider select-all">TEST-GATE-PASS-8888</p>
+    </div>
+
+    <!-- Info Box -->
+    <div class="p-3.5 bg-slate-900/80 rounded-2xl border border-slate-700/80 text-left text-xs space-y-2">
+      <div class="flex items-center justify-between text-slate-300">
+        <span class="text-slate-400">ฮาร์ดแวร์ปลายทาง:</span>
+        <span class="font-bold text-emerald-400"><i class="fa-solid fa-microchip"></i> ESP32 บน COM5</span>
+      </div>
+      <div class="flex items-center justify-between text-slate-300">
+        <span class="text-slate-400">ระยะเวลาเปิด:</span>
+        <span class="font-bold text-white">30 วินาที (หรือปิดเมื่อพ้นเซนเซอร์)</span>
+      </div>
+      <div class="flex items-center justify-between text-slate-300">
+        <span class="text-slate-400">เงื่อนไขพิเศษ:</span>
+        <span class="font-bold text-amber-400"><i class="fa-solid fa-trash-can"></i> ลบข้อมูลทิ้งทันทีเมื่อไม้กั้นปิดลง</span>
+      </div>
+    </div>
+
+    <!-- Live Status / Test Trigger -->
+    <div class="space-y-3">
+      <button type="button" onclick="triggerScanDirectly()" id="btn-trigger" class="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-sm shadow-lg shadow-blue-900/50 transition flex items-center justify-center gap-2 active:scale-98">
+        <i class="fa-solid fa-bolt text-amber-300"></i>
+        <span>กดเพื่อจำลองการสแกนเปิดไม้กั้นทันที (ไม่ต้องจ่อกล้อง)</span>
+      </button>
+      <div id="scan-result" class="hidden p-3 rounded-2xl text-xs font-medium"></div>
+    </div>
+
+    <!-- Footer Note -->
+    <p class="text-[11px] text-slate-500 leading-tight">
+      เมื่อไม้กั้นปิดลง ระบบจะลบคำขอนี้และประวัติทั้งหมดออกจากฐานข้อมูลอัตโนมัติ 100%
+    </p>
+  </div>
+
+  <script>
+    // สร้าง QR Code
+    new QRCode(document.getElementById('qrcode'), {
+      text: 'TEST-GATE-PASS-8888',
+      width: 220,
+      height: 220,
+      colorDark: '#0f172a',
+      colorLight: '#ffffff',
+      correctLevel: QRCode.CorrectLevel.H
+    });
+
+    // ปุ่มทดสอบจำลองการสแกนผ่าน API โดยตรง
+    async function triggerScanDirectly() {
+      const btn = document.getElementById('btn-trigger');
+      const resBox = document.getElementById('scan-result');
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> กำลังส่งคำสั่งเปิดไม้กั้น...';
+
+      try {
+        const res = await fetch('/api/gate/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: 'TEST-GATE-PASS-8888', scanType: 'exit' })
+        });
+        const data = await res.json();
+        resBox.classList.remove('hidden', 'bg-rose-950/80', 'text-rose-300', 'border-rose-700', 'bg-emerald-950/80', 'text-emerald-300', 'border-emerald-700');
+        
+        if (data.success) {
+          resBox.classList.add('bg-emerald-950/80', 'text-emerald-300', 'border', 'border-emerald-700');
+          resBox.innerHTML = `
+            <div class="font-bold flex items-center gap-1.5"><i class="fa-solid fa-circle-check text-emerald-400"></i> สั่งเปิดไม้กั้นสำเร็จ!</div>
+            <p class="mt-1 text-[11px]">${data.message || 'ไม้กั้นเปิดแล้ว 30 วินาที'}</p>
+            <p class="text-[10px] text-slate-400 mt-1">⏳ เมื่อไม้กั้นปิดลง คำขอนี้จะถูกลบออกจากฐานข้อมูลทันที</p>
+          `;
+        } else {
+          resBox.classList.add('bg-rose-950/80', 'text-rose-300', 'border', 'border-rose-700');
+          resBox.innerHTML = `
+            <div class="font-bold flex items-center gap-1.5"><i class="fa-solid fa-circle-xmark text-rose-400"></i> ${data.reason || 'สแกนไม่สำเร็จ'}</div>
+          `;
+        }
+      } catch (err) {
+        resBox.classList.remove('hidden');
+        resBox.classList.add('bg-rose-950/80', 'text-rose-300', 'border', 'border-rose-700');
+        resBox.innerHTML = `<div class="font-bold">❌ การเชื่อมต่อล้มเหลว: ${err.message}</div>`;
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-bolt text-amber-300"></i> <span>กดเพื่อจำลองการสแกนเปิดไม้กั้นทันที (ไม่ต้องจ่อกล้อง)</span>';
+      }
+    }
+  </script>
+</body>
+</html>

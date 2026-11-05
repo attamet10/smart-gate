@@ -1,0 +1,23 @@
+{
+  "entryTime": "08:00",
+  "lunchStart": "12:00",
+  "lunchEnd": "13:00",
+  "leaveMinTime": "08:00",
+  "leaveMaxTime": "22:00",
+  "dismissalTime": "22:00",
+  "gracePeriodMinutes": 15,
+  "preWarningMinutes": 30,
+  "approvalReminderMinutes": 15,
+  "autoExpireAfterDismissal": true,
+  "returnMaxDistanceCm": 60,
+  "returnNotifyMode": "all",
+  "returnRequireWifi": false,
+  "prewarnMinutes": 30,
+  "overdueAlertMinutes": 15,
+  "updatedAt": "2026-11-04T09:42:55.614Z",
+  "morningGateOpen": "06:30",
+  "morningGateClose": "08:00",
+  "nightGateClose": "18:00",
+  "minRequestMinutes": 30,
+  "maxRequestMinutes": 480
+}
