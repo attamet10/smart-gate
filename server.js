@@ -4702,14 +4702,14 @@ app.post('/api/gate/scan', async (req, res) => {
       // ตรวจสอบกรณีบัตรหมดอายุตาม Cron Job สิ้นวัน
       if (request.status === 'expired') {
         try {
-          await supabase.from('scan_logs').insert([{
+          await db.insertAutoIncrement('scan_logs', {
             request_id: request.id,
             qr_token: cleanToken,
             student_name: studentName,
             scan_type: scanType,
             result: 'denied',
             message: '❌ บัตรผ่านหมดอายุแล้ว (สิ้นสุดวันขออนุญาต)'
-          }]);
+          });
         } catch (e) {}
         return res.json({
           success: false,
@@ -4780,14 +4780,14 @@ app.post('/api/gate/scan', async (req, res) => {
         }
 
         if (request.status === 'exited') {
-          await supabase.from('scan_logs').insert([{
+          await db.insertAutoIncrement('scan_logs', {
             request_id: request.id,
             qr_token: cleanToken,
             student_name: studentName,
             scan_type: 'exit',
             result: 'denied',
             message: '⛔ Anti-Passback: บัตรถูกสแกนออกไปแล้ว ห้ามสแกนออกซ้ำ'
-          }]);
+          });
           return res.json({
             success: false,
             reason: '⛔ [Anti-Passback] บัตรนี้ถูกสแกนออกไปแล้ว ห้ามสแกนออกซ้ำ! หากกลับถึงวิทยาลัยแล้วให้กดปุ่ม "ฉันกลับถึงวิทยาลัยแล้ว" ในแอป'
@@ -4815,11 +4815,9 @@ app.post('/api/gate/scan', async (req, res) => {
 
         // อัปเดตสถานะเป็น gate_opened (ยังไม่ตัดสิทธิ์ QR code จนกว่าไม้กั้นจะปิด)
         try {
-          await supabase.from('leave_requests').update({
-            status: 'gate_opened'
-          }).eq('id', request.id);
+          await db.query('UPDATE leave_requests SET status = ? WHERE id = ?', ['gate_opened', request.id]);
         } catch (e) {
-          console.warn('Supabase update status=gate_opened error:', e.message);
+          console.warn('MySQL update status=gate_opened error:', e.message);
         }
 
         saveRequestMeta(request.id, {
@@ -4829,14 +4827,14 @@ app.post('/api/gate/scan', async (req, res) => {
           isNoReturn: isRequestNoReturn
         });
 
-        await supabase.from('scan_logs').insert([{
+        await db.insertAutoIncrement('scan_logs', {
           request_id: request.id,
           qr_token: cleanToken,
           student_name: studentName,
           scan_type: 'exit_gate_open',
           result: 'success',
           message: `อนุญาตผ่าน (ขาออก) - สั่งเปิดไม้กั้น 30 วินาที (รอเซนเซอร์ตรวจจับหรือครบ 30 วินาทีเพื่อตัดสิทธิ์ QR)`
-        }]);
+        });
 
         // ตั้งเวลา Fallback 35 วินาที ป้องกันกรณีเซนเซอร์ไม่ทำงาน
         const safetyTimer = setTimeout(() => {
@@ -4921,12 +4919,7 @@ app.post('/api/gate/return-button', authenticateToken, async (req, res) => {
 
     let request = null;
     if (supabase) {
-      const { data } = await supabase
-        .from('leave_requests')
-        .select(`*, users:student_id (full_name, username, phone, parent_phone, plate_no, classrooms (name), departments (name))`)
-        .eq('id', requestId)
-        .single();
-      request = data;
+      request = await db.getLeaveRequestWithStudent(requestId);
     }
 
     const meta = getRequestMeta(requestId) || {};
@@ -5030,16 +5023,26 @@ app.post('/api/gate/return-button', authenticateToken, async (req, res) => {
           return_note: verificationNote,
           qr_token: null // Anti-replay: เคลียร์ QR Code ทันที
         };
-        const { error: updErr } = await supabase.from('leave_requests').update(updatePayload).eq('id', requestId);
-        if (updErr && updErr.message && updErr.message.includes('column')) {
-          await supabase.from('leave_requests').update({
-            status: 'returned',
-            actual_return_time: inTimeStr,
-            qr_token: null
-          }).eq('id', requestId);
+        try {
+          await db.query(
+            `UPDATE leave_requests SET status=?, actual_return_time=?, actual_in_time=?, return_method=?,
+               return_verification_status=?, return_distance_cm=?, return_ip=?, return_note=?, qr_token=? WHERE id=?`,
+            [updatePayload.status, updatePayload.actual_return_time, updatePayload.actual_in_time, updatePayload.return_method,
+             updatePayload.return_verification_status, updatePayload.return_distance_cm, updatePayload.return_ip,
+             updatePayload.return_note, updatePayload.qr_token, requestId]
+          );
+        } catch (updErr) {
+          if (db.isMissingColumnError(updErr)) {
+            await db.query(
+              'UPDATE leave_requests SET status = ?, actual_return_time = ?, qr_token = ? WHERE id = ?',
+              ['returned', inTimeStr, null, requestId]
+            );
+          } else {
+            throw updErr;
+          }
         }
       } catch (err) {
-        console.warn('Supabase update return error:', err.message);
+        console.warn('MySQL update return error:', err.message);
       }
     }
 
@@ -5127,12 +5130,7 @@ app.post('/api/gate/discipline/return-manual', authenticateToken, requireRole(['
 
     let request = null;
     if (supabase) {
-      const { data } = await supabase
-        .from('leave_requests')
-        .select(`*, users:student_id (full_name, username, phone, plate_no, classrooms (name), departments (name))`)
-        .eq('id', requestId)
-        .single();
-      request = data;
+      request = await db.getLeaveRequestWithStudent(requestId);
     }
     const meta = getRequestMeta(requestId) || {};
 
@@ -5152,13 +5150,20 @@ app.post('/api/gate/discipline/return-manual', authenticateToken, requireRole(['
           return_note: note,
           qr_token: null
         };
-        const { error } = await supabase.from('leave_requests').update(payload).eq('id', requestId);
-        if (error && error.message && error.message.includes('column')) {
-          await supabase.from('leave_requests').update({
-            status: 'returned',
-            actual_return_time: inTimeStr,
-            qr_token: null
-          }).eq('id', requestId);
+        try {
+          await db.query(
+            `UPDATE leave_requests SET status=?, actual_return_time=?, actual_in_time=?, return_method=?,
+               return_verification_status=?, return_verified_by=?, return_note=?, qr_token=? WHERE id=?`,
+            [payload.status, payload.actual_return_time, payload.actual_in_time, payload.return_method,
+             payload.return_verification_status, payload.return_verified_by, payload.return_note, payload.qr_token, requestId]
+          );
+        } catch (error) {
+          if (db.isMissingColumnError(error)) {
+            await db.query(
+              'UPDATE leave_requests SET status = ?, actual_return_time = ?, qr_token = ? WHERE id = ?',
+              ['returned', inTimeStr, null, requestId]
+            );
+          }
         }
       } catch (e) {}
     }
@@ -5223,9 +5228,17 @@ app.post('/api/gate/discipline/return-revoke', authenticateToken, requireRole(['
           return_revoked_at: new Date().toISOString(),
           return_revoked_by: officer.id && officer.id.length === 36 ? officer.id : null
         };
-        const { error } = await supabase.from('leave_requests').update(payload).eq('id', requestId);
-        if (error && error.message && error.message.includes('column')) {
-          await supabase.from('leave_requests').update({ status: 'exited' }).eq('id', requestId);
+        try {
+          await db.query(
+            `UPDATE leave_requests SET status=?, actual_in_time=?, return_verification_status=?,
+               return_note=?, return_revoked_at=?, return_revoked_by=? WHERE id=?`,
+            [payload.status, payload.actual_in_time, payload.return_verification_status,
+             payload.return_note, payload.return_revoked_at, payload.return_revoked_by, requestId]
+          );
+        } catch (error) {
+          if (db.isMissingColumnError(error)) {
+            await db.query('UPDATE leave_requests SET status = ? WHERE id = ?', ['exited', requestId]);
+          }
         }
       } catch (e) {}
     }
@@ -5267,10 +5280,7 @@ app.get('/api/gate/discipline/live-returns', authenticateToken, async (req, res)
 
     let allRequests = [];
     if (supabase) {
-      const { data } = await supabase
-        .from('leave_requests')
-        .select(`*, users:student_id (full_name, username, phone, parent_phone, plate_no, classrooms (name), departments (name))`)
-        .order('updated_at', { ascending: false });
+      const data = await db.getLeaveRequestsWithStudent('', [], 'lr.updated_at DESC');
       if (data) allRequests = data;
     }
 
@@ -5378,7 +5388,7 @@ app.post('/api/gate/sensor-pass', async (req, res) => {
 // ดึงประวัติการสแกนจาก Supabase
 app.get('/api/gate/logs', async (req, res) => {
   if (supabase) {
-    const { data } = await supabase.from('scan_logs').select('*').order('scanned_at', { ascending: false }).limit(10);
+    const data = await db.query('SELECT * FROM scan_logs ORDER BY scanned_at DESC LIMIT ?', [10]);
     if (data) return res.json({ logs: data });
   }
   res.json({ logs: [] });
@@ -5405,15 +5415,9 @@ function getBangkokNow() {
 async function checkOverdueLeaveRequests() {
   if (!supabase) return;
   try {
-    const { data: exitedRequests, error } = await supabase
-      .from('leave_requests')
-      .select(`
-        *,
-        users:student_id (full_name, username, phone, parent_phone, plate_no, classrooms (name), departments (name))
-      `)
-      .eq('status', 'exited');
+    const exitedRequests = await db.getLeaveRequestsWithStudent('lr.status = ?', ['exited']);
 
-    if (error || !exitedRequests || exitedRequests.length === 0) return;
+    if (!exitedRequests || exitedRequests.length === 0) return;
 
     const bkkNow = getBangkokNow();
     const currentH = bkkNow.getHours();
@@ -5501,13 +5505,7 @@ setTimeout(checkOverdueLeaveRequests, 4000);
 app.get('/api/requests/overdue-status', async (req, res) => {
   if (!supabase) return res.json({ success: true, overdueCount: 0, warningCount: 0, items: [] });
   try {
-    const { data: exitedRequests } = await supabase
-      .from('leave_requests')
-      .select(`
-        *,
-        users:student_id (full_name, username, phone, parent_phone, plate_no, classrooms (name), departments (name))
-      `)
-      .eq('status', 'exited');
+    const exitedRequests = await db.getLeaveRequestsWithStudent('lr.status = ?', ['exited']);
 
     const bkkNow = getBangkokNow();
     const currentH = bkkNow.getHours();
@@ -5581,15 +5579,10 @@ async function checkPendingApprovalReminders() {
   try {
     const settings = loadSettings();
     const thresholdMins = Number(settings.approvalReminderMinutes || 15);
-    const { data: pendingReqs, error } = await supabase
-      .from('leave_requests')
-      .select(`
-        *,
-        users:student_id (full_name, username, classrooms (name), departments (name))
-      `)
-      .in('status', ['pending_subject', 'pending_advisor', 'pending_dept_head', 'pending_discipline', 'pending_deputy']);
+    const pendingStatusList = ['pending_subject', 'pending_advisor', 'pending_dept_head', 'pending_discipline', 'pending_deputy'];
+    const pendingReqs = await db.getLeaveRequestsWithStudent('lr.status IN (?)', [pendingStatusList]);
 
-    if (error || !pendingReqs || pendingReqs.length === 0) return { remindedCount: 0 };
+    if (!pendingReqs || pendingReqs.length === 0) return { remindedCount: 0 };
 
     const nowMs = Date.now();
     let remindedCount = 0;
@@ -5673,15 +5666,10 @@ async function autoExpireEndOfDayRequests(forceAllPastOrMidnight = false) {
 
   try {
     // ดึงคำร้องทั้งหมดที่ยังเปิดค้างอยู่ (รอตรวจทุกขั้น, อนุมัติแล้ว, หรือสแกนออกแล้วแต่ไม่กลับ)
-    const { data: openRequests, error } = await supabase
-      .from('leave_requests')
-      .select(`
-        *,
-        users:student_id (full_name, username, phone, parent_phone, plate_no, classrooms (name), departments (name))
-      `)
-      .in('status', ['pending_subject', 'pending_advisor', 'pending_dept_head', 'pending_discipline', 'pending_deputy', 'approved', 'exited']);
+    const openStatusList = ['pending_subject', 'pending_advisor', 'pending_dept_head', 'pending_discipline', 'pending_deputy', 'approved', 'exited'];
+    const openRequests = await db.getLeaveRequestsWithStudent('lr.status IN (?)', [openStatusList]);
 
-    if (error || !openRequests || !openRequests.length) {
+    if (!openRequests || !openRequests.length) {
       return { count: 0, expired: [] };
     }
 
@@ -5721,14 +5709,10 @@ async function autoExpireEndOfDayRequests(forceAllPastOrMidnight = false) {
 
     const nowIso = new Date().toISOString();
     for (const item of toExpire) {
-      await supabase
-        .from('leave_requests')
-        .update({
-          status: 'expired',
-          rejection_reason: item.expireReason,
-          updated_at: nowIso
-        })
-        .eq('id', item.id);
+      await db.query(
+        'UPDATE leave_requests SET status = ?, rejection_reason = ?, updated_at = ? WHERE id = ?',
+        ['expired', item.expireReason, nowIso, item.id]
+      );
 
       const meta = getRequestMeta(item.request_no) || getRequestMeta(item.id) || {};
       const historyList = Array.isArray(meta.approvalHistory) ? [...meta.approvalHistory] : [];
@@ -5947,8 +5931,8 @@ app.post('/api/admin/import-students-preview', requireAdminAuth, async (req, res
     let dbDepts = [];
     let dbClasses = [];
     if (supabase) {
-      const { data: dData } = await supabase.from('departments').select('id, name, code');
-      const { data: cData } = await supabase.from('classrooms').select('id, name, department_id, advisor_name');
+      const dData = await db.query('SELECT id, name, code FROM departments');
+      const cData = await db.query('SELECT id, name, department_id, advisor_name FROM classrooms');
       dbDepts = dData || [];
       dbClasses = cData || [];
     }
@@ -5956,7 +5940,7 @@ app.post('/api/admin/import-students-preview', requireAdminAuth, async (req, res
     // โหลดผู้ใช้ที่มีอยู่แล้วเพื่อตรวจสอบสถานะ
     let existingStudentsMap = new Map();
     if (supabase) {
-      const { data: uData } = await supabase.from('users').select('id, username, student_code, full_name, status, classroom_id');
+      const uData = await db.query('SELECT id, username, student_code, full_name, status, classroom_id FROM users');
       if (uData) {
         uData.forEach(u => {
           if (u.student_code) existingStudentsMap.set(u.student_code.trim(), u);
@@ -6114,11 +6098,11 @@ app.post('/api/admin/import-students-commit', requireAdminAuth, async (req, res)
 
       try {
         // ตรวจสอบว่ามีอยู่แล้วหรือไม่
-        const { data: exist } = await supabase
-          .from('users')
-          .select('id, username, status')
-          .or(`username.eq.${r.studentCode},student_code.eq.${r.studentCode}`)
-          .maybeSingle();
+        const existRows = await db.query(
+          'SELECT id, username, status FROM users WHERE username = ? OR student_code = ?',
+          [r.studentCode, r.studentCode]
+        );
+        const exist = existRows[0];
 
         if (exist) {
           if (exist.status === 'active') {
@@ -6130,20 +6114,11 @@ app.post('/api/admin/import-students-commit', requireAdminAuth, async (req, res)
 
           if (updateExistingPending) {
             // อัปเดตข้อมูลบัญชีที่ยังไม่เปิดใช้งาน
-            const { error: upErr } = await supabase
-              .from('users')
-              .update({
-                full_name: r.fullName,
-                department_id: r.deptId,
-                classroom_id: r.classroomId,
-                birth_date: r.birthDate,
-                phone: r.phone || null,
-                parent_phone: r.parentPhone || null,
-                status: 'pending_activation'
-              })
-              .eq('id', exist.id);
-
-            if (upErr) throw upErr;
+            await db.query(
+              `UPDATE users SET full_name=?, department_id=?, classroom_id=?, birth_date=?, phone=?,
+                 parent_phone=?, status=? WHERE id=?`,
+              [r.fullName, r.deptId, r.classroomId, r.birthDate, r.phone || null, r.parentPhone || null, 'pending_activation', exist.id]
+            );
             updatedCount++;
           } else {
             failedCount++;
@@ -6151,24 +6126,21 @@ app.post('/api/admin/import-students-commit', requireAdminAuth, async (req, res)
           }
         } else {
           // เพิ่มนักเรียนใหม่ สถานะ pending_activation
-          const { error: insErr } = await supabase
-            .from('users')
-            .insert([{
-              username: r.studentCode,
-              student_code: r.studentCode,
-              password: '', // ยังไม่มีรหัสผ่าน (รอ Activate)
-              full_name: r.fullName,
-              role: 'student',
-              department_id: r.deptId,
-              classroom_id: r.classroomId,
-              birth_date: r.birthDate,
-              phone: r.phone || null,
-              parent_phone: r.parentPhone || null,
-              status: 'pending_activation',
-              failed_attempts: 0
-            }]);
+          await db.insertWithUuid('users', {
+            username: r.studentCode,
+            student_code: r.studentCode,
+            password: '', // ยังไม่มีรหัสผ่าน (รอ Activate)
+            full_name: r.fullName,
+            role: 'student',
+            department_id: r.deptId,
+            classroom_id: r.classroomId,
+            birth_date: r.birthDate,
+            phone: r.phone || null,
+            parent_phone: r.parentPhone || null,
+            status: 'pending_activation',
+            failed_attempts: 0
+          });
 
-          if (insErr) throw insErr;
           successCount++;
         }
       } catch (rowErr) {
@@ -6179,7 +6151,7 @@ app.post('/api/admin/import-students-commit', requireAdminAuth, async (req, res)
 
     // บันทึก Audit Log ลงตาราง student_import_logs (ข้อกำหนด 10)
     try {
-      await supabase.from('student_import_logs').insert([{
+      await db.insertAutoIncrement('student_import_logs', {
         admin_id: req.adminUser.id || null,
         admin_username: req.adminUser.username || 'admin',
         file_name: fileName || 'Imported_File.xlsx',
@@ -6187,8 +6159,8 @@ app.post('/api/admin/import-students-commit', requireAdminAuth, async (req, res)
         success_rows: successCount,
         updated_rows: updatedCount,
         failed_rows: failedCount,
-        error_summary: errorDetails
-      }]);
+        error_summary: JSON.stringify(errorDetails)
+      });
     } catch (auditErr) {
       console.warn('Audit log write warning:', auditErr.message);
     }
@@ -6231,19 +6203,15 @@ app.post('/api/auth/student-login', async (req, res) => {
   try {
     let studentUser = null;
 
-    // 1. ค้นหาใน Supabase
+    // 1. ค้นหาในฐานข้อมูล
     if (supabase) {
       try {
-        const { data, error } = await supabase
-          .from('users')
-          .select('*, classrooms(name, advisor_name), departments(name)')
-          .or(`student_code.eq.${cleanCode},username.eq.${cleanCode}`)
-          .maybeSingle();
-        if (data && !error && data.role === 'student') {
+        const data = await db.getUserByCodeOrUsernameWithRelations(cleanCode);
+        if (data && data.role === 'student') {
           studentUser = data;
         }
       } catch (dbErr) {
-        console.warn('Supabase student lookup error:', dbErr.message);
+        console.warn('MySQL student lookup error:', dbErr.message);
       }
     }
 
@@ -6297,7 +6265,10 @@ app.post('/api/auth/student-login', async (req, res) => {
     saveStoredProfile(studentUser.username, bindData);
     if (supabase && studentUser.id) {
       try {
-        await supabase.from('users').update(bindData).eq('id', studentUser.id);
+        await db.query(
+          'UPDATE users SET bound_device_id = ?, bound_device_name = ?, bound_device_at = ? WHERE id = ?',
+          [bindData.bound_device_id, bindData.bound_device_name, bindData.bound_device_at, studentUser.id]
+        );
       } catch (e) {}
     }
 
@@ -6382,7 +6353,12 @@ app.post('/api/auth/verify-device-otp', async (req, res) => {
   saveStoredProfile(studentUser.username, bindData);
   if (supabase && studentUser.id) {
     try {
-      await supabase.from('users').update(bindData).eq('id', studentUser.id);
+      await db.query(
+        `UPDATE users SET bound_device_id = ?, bound_device_name = ?, bound_device_at = ?,
+           pending_device_otp = ?, pending_device_otp_expires = ? WHERE id = ?`,
+        [bindData.bound_device_id, bindData.bound_device_name, bindData.bound_device_at,
+         bindData.pending_device_otp, bindData.pending_device_otp_expires, studentUser.id]
+      );
     } catch (e) {}
   }
 
@@ -6446,9 +6422,14 @@ app.post('/api/student/onboarding', authenticateToken, async (req, res) => {
   saveStoredProfile(req.user.username, updateData);
   if (supabase && req.user.id) {
     try {
-      await supabase.from('users').update(updateData).eq('id', req.user.id);
+      await db.query(
+        `UPDATE users SET plate_no=?, vehicle_plate=?, phone=?, phone_number=?, plate_photo=?, vehicle_photo=?,
+           onboarding_completed=? WHERE id=?`,
+        [updateData.plate_no, updateData.vehicle_plate, updateData.phone, updateData.phone_number,
+         updateData.plate_photo, updateData.vehicle_photo, updateData.onboarding_completed, req.user.id]
+      );
     } catch (e) {
-      console.warn('Update onboarding to supabase error:', e.message);
+      console.warn('Update onboarding to MySQL error:', e.message);
     }
   }
 
@@ -6514,8 +6495,13 @@ app.post('/api/admin/devices/:id/approve', authenticateToken, async (req, res) =
 
   if (supabase && target.student_id) {
     try {
-      await supabase.from('users').update(bindData).eq('id', target.student_id);
-      await supabase.from('device_approval_requests').update({ status: 'approved' }).eq('id', target.id);
+      await db.query(
+        `UPDATE users SET bound_device_id = ?, bound_device_name = ?, bound_device_at = ?,
+           pending_device_otp = ?, pending_device_otp_expires = ? WHERE id = ?`,
+        [bindData.bound_device_id, bindData.bound_device_name, bindData.bound_device_at,
+         bindData.pending_device_otp, bindData.pending_device_otp_expires, target.student_id]
+      );
+      await db.query('UPDATE device_approval_requests SET status = ? WHERE id = ?', ['approved', target.id]);
     } catch (e) {}
   }
 
@@ -6582,7 +6568,12 @@ app.post('/api/admin/devices/reset', authenticateToken, async (req, res) => {
   saveStoredProfile(cleanCode, resetData);
   if (supabase) {
     try {
-      await supabase.from('users').update(resetData).or(`student_code.eq.${cleanCode},username.eq.${cleanCode}`);
+      await db.query(
+        `UPDATE users SET bound_device_id=?, bound_device_name=?, bound_device_at=?, pending_device_id=?,
+           pending_device_name=?, pending_device_otp=?, pending_device_otp_expires=? WHERE student_code=? OR username=?`,
+        [resetData.bound_device_id, resetData.bound_device_name, resetData.bound_device_at, resetData.pending_device_id,
+         resetData.pending_device_name, resetData.pending_device_otp, resetData.pending_device_otp_expires, cleanCode, cleanCode]
+      );
     } catch (e) {}
   }
 

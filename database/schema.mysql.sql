@@ -404,6 +404,9 @@ CREATE TABLE scan_logs (
 -- ไม่มี schema.sql เดิมเลย (Supabase-only, schema drift) - reverse-engineered จาก
 -- server.js การ insert (~6202-6216) และการ select (~6886-6899, order by imported_at desc limit 20)
 -- ----------------------------------------------------------------------------
+-- หมายเหตุ: ไม่ใส่ FOREIGN KEY บน admin_id โดยตั้งใจ (เหมือนในโปรเจกต์ Supabase เดิมที่ไม่มี schema.sql ของตารางนี้เลย)
+-- เพราะ admin_id อาจเป็นบัญชี ALL_SYSTEM_ACCOUNTS ที่ถูก hardcode ไว้ในแอป (เช่น id ของ 'admin' ดีฟอลต์)
+-- ซึ่งไม่ได้มีแถวจริงในตาราง users เสมอไป - ใส่ FK จะทำให้ insert audit log ล้มเหลวโดยไม่ตั้งใจ
 CREATE TABLE student_import_logs (
   id INT AUTO_INCREMENT PRIMARY KEY,
   admin_id CHAR(36) NULL,
@@ -414,6 +417,5 @@ CREATE TABLE student_import_logs (
   updated_rows INT NOT NULL DEFAULT 0,
   failed_rows INT NOT NULL DEFAULT 0,
   error_summary JSON NULL,
-  imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT fk_student_import_logs_admin FOREIGN KEY (admin_id) REFERENCES users(id) ON DELETE SET NULL
+  imported_at DATETIME DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
