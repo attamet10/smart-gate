@@ -5,6 +5,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const db = require('./db');
 
 // Local storage fallback for tokens and logs
 const DATA_DIR = path.join(__dirname, 'data');
@@ -47,7 +48,6 @@ function appendLocalLog(logEntry) {
   } catch (e) {}
 }
 
-let supabaseClient = null;
 let botPollingActive = false;
 let lastUpdateId = 0;
 
@@ -164,15 +164,11 @@ async function sendTelegramMessage(chatId, text, options = {}, retries = 2) {
 // When user blocks the bot, reset connection in DB and local store
 async function handleUserBlockedBot(chatId) {
   try {
-    if (supabaseClient) {
-      await supabaseClient
-        .from('users')
-        .update({
-          telegram_chat_id: null,
-          telegram_username: null,
-          telegram_connected_at: null
-        })
-        .eq('telegram_chat_id', chatId);
+    if (db.pool) {
+      await db.query(
+        'UPDATE users SET telegram_chat_id = NULL, telegram_username = NULL, telegram_connected_at = NULL WHERE telegram_chat_id = ?',
+        [chatId]
+      );
     }
   } catch (e) {
     console.error('Error unlinking blocked telegram user in DB:', e.message);
@@ -204,14 +200,14 @@ async function createLinkToken(userId, username) {
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 mins
 
   // Save to database
-  if (supabaseClient) {
+  if (db.pool) {
     try {
-      await supabaseClient.from('telegram_link_tokens').insert([{
+      await db.insertWithUuid('telegram_link_tokens', {
         user_id: userId,
         token: token,
         expires_at: expiresAt,
         used: false
-      }]);
+      });
     } catch (err) {
       console.warn('⚠️ [TELEGRAM] Fallback saving token locally:', err.message);
     }
@@ -252,23 +248,18 @@ async function verifyAndConsumeLinkToken(token) {
   const clean = String(token).trim();
   const now = new Date();
 
-  // Check Supabase first
-  if (supabaseClient) {
+  // Check database first
+  if (db.pool) {
     try {
-      const { data, error } = await supabaseClient
-        .from('telegram_link_tokens')
-        .select('*')
-        .eq('token', clean)
-        .eq('used', false)
-        .gt('expires_at', now.toISOString())
-        .maybeSingle();
+      const rows = await db.query(
+        'SELECT * FROM telegram_link_tokens WHERE token = ? AND used = FALSE AND expires_at > ?',
+        [clean, now.toISOString().slice(0, 19).replace('T', ' ')]
+      );
+      const data = rows[0];
 
-      if (!error && data) {
+      if (data) {
         // Mark as used
-        await supabaseClient
-          .from('telegram_link_tokens')
-          .update({ used: true })
-          .eq('id', data.id);
+        await db.query('UPDATE telegram_link_tokens SET used = TRUE WHERE id = ?', [data.id]);
         return data.user_id;
       }
     } catch (e) {}
@@ -296,39 +287,29 @@ async function linkTelegramAccount(userId, chatId, tgUsername, tgFullName) {
   let updatedUser = null;
 
   // 1. Check if another user has this chatId, unlink them first (Requirement: 1 TG = 1 User)
-  if (supabaseClient) {
+  if (db.pool) {
     try {
-      await supabaseClient
-        .from('users')
-        .update({
-          telegram_chat_id: null,
-          telegram_username: null,
-          telegram_connected_at: null
-        })
-        .eq('telegram_chat_id', chatId);
+      await db.query(
+        'UPDATE users SET telegram_chat_id = NULL, telegram_username = NULL, telegram_connected_at = NULL WHERE telegram_chat_id = ?',
+        [chatId]
+      );
     } catch (e) {}
   }
 
-  // 2. Link this user in Supabase (try both id and username)
-  if (supabaseClient) {
+  // 2. Link this user in the database (try both id and username)
+  if (db.pool) {
     try {
       const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId);
-      let query = supabaseClient.from('users').update({
-        telegram_chat_id: chatId,
-        telegram_username: tgUsername || tgFullName || 'Telegram User',
-        telegram_connected_at: connectedAt
-      });
+      const field = isUUID ? 'id' : 'username';
 
-      if (isUUID) {
-        query = query.eq('id', userId);
-      } else {
-        query = query.eq('username', userId);
-      }
-
-      const { data } = await query.select().maybeSingle();
-      if (data) updatedUser = data;
+      await db.query(
+        `UPDATE users SET telegram_chat_id = ?, telegram_username = ?, telegram_connected_at = ? WHERE ${field} = ?`,
+        [chatId, tgUsername || tgFullName || 'Telegram User', connectedAt, userId]
+      );
+      const rows = await db.query(`SELECT * FROM users WHERE ${field} = ?`, [userId]);
+      if (rows[0]) updatedUser = rows[0];
     } catch (e) {
-      console.warn('⚠️ [TELEGRAM] Update user in Supabase failed:', e.message);
+      console.warn('⚠️ [TELEGRAM] Update user in database failed:', e.message);
     }
   }
 
@@ -338,14 +319,14 @@ async function linkTelegramAccount(userId, chatId, tgUsername, tgFullName) {
     if (fs.existsSync(profPath)) {
       const profs = JSON.parse(fs.readFileSync(profPath, 'utf8') || '{}');
 
-      // Resolve user details from Supabase if available
+      // Resolve user details from the database if available
       let dbUser = null;
-      if (supabaseClient) {
+      if (db.pool) {
         try {
           const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId);
-          const q = supabaseClient.from('users').select('id, username, full_name, role');
-          const { data } = await (isUUID ? q.eq('id', userId) : q.eq('username', userId)).maybeSingle();
-          dbUser = data;
+          const field = isUUID ? 'id' : 'username';
+          const rows = await db.query(`SELECT id, username, full_name, role FROM users WHERE ${field} = ?`, [userId]);
+          dbUser = rows[0] || null;
         } catch (e) {}
       }
 
@@ -377,20 +358,14 @@ async function linkTelegramAccount(userId, chatId, tgUsername, tgFullName) {
 }
 
 async function unlinkTelegramAccount(userId) {
-  if (supabaseClient) {
+  if (db.pool) {
     try {
       const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId);
-      let query = supabaseClient.from('users').update({
-        telegram_chat_id: null,
-        telegram_username: null,
-        telegram_connected_at: null
-      });
-      if (isUUID) {
-        query = query.eq('id', userId);
-      } else {
-        query = query.eq('username', userId);
-      }
-      await query;
+      const field = isUUID ? 'id' : 'username';
+      await db.query(
+        `UPDATE users SET telegram_chat_id = NULL, telegram_username = NULL, telegram_connected_at = NULL WHERE ${field} = ?`,
+        [userId]
+      );
     } catch (e) {}
   }
 
@@ -412,14 +387,10 @@ async function unlinkTelegramAccount(userId) {
 
 async function findUserByChatId(chatId) {
   if (!chatId) return null;
-  if (supabaseClient) {
+  if (db.pool) {
     try {
-      const { data } = await supabaseClient
-        .from('users')
-        .select('*')
-        .eq('telegram_chat_id', chatId)
-        .maybeSingle();
-      if (data) return data;
+      const rows = await db.query('SELECT * FROM users WHERE telegram_chat_id = ?', [chatId]);
+      if (rows[0]) return rows[0];
     } catch (e) {}
   }
   try {
@@ -601,16 +572,11 @@ async function getUserTelegramInfo(ident) {
 
   // 1. Look up user record in DB to get both ID and username
   let dbUser = null;
-  if (supabaseClient) {
+  if (db.pool) {
     try {
-      let q = supabaseClient.from('users').select('id, username, full_name, role');
-      if (isUUID) {
-        q = q.eq('id', target);
-      } else {
-        q = q.eq('username', target);
-      }
-      const { data } = await q.maybeSingle();
-      if (data) dbUser = data;
+      const field = isUUID ? 'id' : 'username';
+      const rows = await db.query(`SELECT id, username, full_name, role FROM users WHERE ${field} = ?`, [target]);
+      if (rows[0]) dbUser = rows[0];
     } catch (e) {}
   }
 
@@ -761,14 +727,13 @@ async function notifyScanGateEvent(studentUser, type, timestamp, gateName) {
 async function notifyAdminAlert(alertTitle, alertMessage, severity = 'warning') {
   // Find all admin users with telegram connected
   let admins = [];
-  if (supabaseClient) {
+  if (db.pool) {
     try {
-      const { data } = await supabaseClient
-        .from('users')
-        .select('id, username, telegram_chat_id, telegram_notify_settings')
-        .eq('role', 'admin')
-        .not('telegram_chat_id', 'is', null);
-      if (data) admins = data;
+      const rows = await db.query(
+        "SELECT id, username, telegram_chat_id, telegram_notify_settings FROM users WHERE role = ? AND telegram_chat_id IS NOT NULL",
+        ['admin']
+      );
+      if (rows) admins = rows;
     } catch (e) {}
   }
 
@@ -824,14 +789,13 @@ async function notifyDisciplineStudentReturn({
   }
 
   let recipients = [];
-  if (supabaseClient) {
+  if (db.pool) {
     try {
-      const { data } = await supabaseClient
-        .from('users')
-        .select('id, username, role, telegram_chat_id, telegram_notify_settings')
-        .in('role', ['discipline_head', 'admin'])
-        .not('telegram_chat_id', 'is', null);
-      if (data) recipients = data;
+      const rows = await db.query(
+        "SELECT id, username, role, telegram_chat_id, telegram_notify_settings FROM users WHERE role IN (?) AND telegram_chat_id IS NOT NULL",
+        [['discipline_head', 'admin']]
+      );
+      if (rows) recipients = rows;
     } catch (e) {}
   }
 
@@ -983,11 +947,11 @@ function createTelegramRouter(authenticateToken) {
         return res.status(400).json({ success: false, message: 'Invalid settings payload' });
       }
 
-      if (supabaseClient) {
-        await supabaseClient
-          .from('users')
-          .update({ telegram_notify_settings: newSettings })
-          .eq('id', userId);
+      if (db.pool) {
+        await db.query(
+          'UPDATE users SET telegram_notify_settings = ? WHERE id = ?',
+          [JSON.stringify(newSettings), userId]
+        );
       }
 
       // Local fallback
@@ -1048,18 +1012,19 @@ function createTelegramRouter(authenticateToken) {
 // ----------------------------------------------------------------------------
 // Module Initialization
 // ----------------------------------------------------------------------------
-function initTelegramBot(supabaseInstance) {
-  supabaseClient = supabaseInstance;
+// เดิมรับ Supabase client ผ่าน initTelegramBot(supabaseInstance) จาก server.js แล้วเก็บไว้ที่ supabaseClient
+// ตอนนี้ db.js เป็น singleton module เหมือน require('@supabase/supabase-js') เดิม จึง require('./db') ตรงนี้ได้เลย
+// ไม่ต้องรับการ inject client จากภายนอกอีกต่อไป - เริ่ม Bot Polling ทันทีที่โมดูลนี้ถูก require
+(function initTelegramBot() {
   const token = getBotToken();
   if (token) {
     startBotPolling();
   } else {
     console.log('ℹ️ [TELEGRAM] Bot ready in Simulation Mode (Add TELEGRAM_BOT_TOKEN in .env to activate live bot)');
   }
-}
+})();
 
 module.exports = {
-  initTelegramBot,
   createTelegramRouter,
   sendTelegramMessage,
   notifyApproverQueue,

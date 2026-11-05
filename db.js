@@ -12,6 +12,8 @@
 
 const mysql = require('mysql2/promise');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 const DB_HOST = process.env.DB_HOST;
 const DB_PORT = process.env.DB_PORT ? Number(process.env.DB_PORT) : 3306;
@@ -43,11 +45,98 @@ if (DB_HOST && DB_USER) {
 const pool = rawPool;
 
 // ----------------------------------------------------------------------------
+// Self-bootstrap schema: สร้างตารางทั้งหมดอัตโนมัติตอนแอปสตาร์ทครั้งแรก (ถ้ายังไม่มี)
+// ----------------------------------------------------------------------------
+// เซิร์ฟเวอร์ production (Plesk shared hosting) ไม่มี SSH/shell ให้รัน `mysql < schema.mysql.sql` เอง
+// จึงให้แอปอ่านไฟล์ database/schema.mysql.sql แล้วรันเฉพาะคำสั่ง CREATE TABLE/CREATE INDEX เองตอนบูท
+// (ข้าม DROP TABLE เสมอ - ไม่ลบข้อมูลที่มีอยู่แล้วเด็ดขาด, แปลง CREATE TABLE ให้เป็น IF NOT EXISTS, และ
+//  ignore error "duplicate key name" ของ CREATE INDEX เพราะ MySQL ไม่รองรับ CREATE INDEX IF NOT EXISTS)
+async function bootstrapSchema() {
+  if (!rawPool) return;
+  const schemaPath = path.join(__dirname, 'database', 'schema.mysql.sql');
+  let sql;
+  try {
+    sql = fs.readFileSync(schemaPath, 'utf8');
+  } catch (err) {
+    console.warn('⚠️ [MYSQL] Skip schema bootstrap: cannot read', schemaPath, err.message);
+    return;
+  }
+
+  const statements = sql
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('--'))
+    .join('\n')
+    .split(';')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  for (const stmt of statements) {
+    const upper = stmt.toUpperCase();
+    if (upper.startsWith('DROP TABLE')) continue; // ไม่ลบข้อมูลที่มีอยู่แล้วเด็ดขาด
+    try {
+      if (upper.startsWith('CREATE TABLE') && !upper.includes('IF NOT EXISTS')) {
+        await rawPool.query(stmt.replace(/CREATE TABLE/i, 'CREATE TABLE IF NOT EXISTS'));
+      } else {
+        await rawPool.query(stmt);
+      }
+    } catch (err) {
+      // CREATE INDEX ไม่มี IF NOT EXISTS ใน MySQL - ถ้ามี index ชื่อนี้อยู่แล้วให้ข้ามไปเงียบๆ
+      if (err.code === 'ER_DUP_KEYNAME' || err.code === 'ER_TABLE_EXISTS_ERROR') continue;
+      console.warn('⚠️ [MYSQL] Schema bootstrap statement failed:', err.message, '\n  SQL:', stmt.slice(0, 100));
+    }
+  }
+  console.log('✅ [MYSQL] Schema bootstrap complete (ตรวจสอบ/สร้างตารางที่ยังไม่มีเรียบร้อย)');
+}
+
+if (rawPool) {
+  bootstrapSchema().catch((err) => console.warn('⚠️ [MYSQL] Schema bootstrap error:', err.message));
+}
+
+// ----------------------------------------------------------------------------
 // Core query helper: คืนเฉพาะ rows (mysql2 คืน [rows, fields])
 // ----------------------------------------------------------------------------
+// รองรับ WHERE col IN (?) โดยส่ง array เป็น param ตัวเดียว (เช่น .in('status', [...]) เดิมของ Supabase)
+// ขยาย placeholder ให้ตรงกับจำนวนสมาชิกใน array เองก่อนส่งเข้า pool.execute() (prepared statement) เพื่อไม่พึ่งพา
+// behavior เฉพาะเวอร์ชันของ mysql2 ในการขยาย IN (?) อัตโนมัติ
+function expandArrayParams(sql, params) {
+  if (!params.some((p) => Array.isArray(p))) return { sql, params };
+  let paramIndex = 0;
+  const flatParams = [];
+  const expandedSql = sql.replace(/\?/g, () => {
+    const p = params[paramIndex++];
+    if (Array.isArray(p)) {
+      flatParams.push(...p);
+      return p.map(() => '?').join(', ');
+    }
+    flatParams.push(p);
+    return '?';
+  });
+  return { sql: expandedSql, params: flatParams };
+}
+
+// Postgres/Supabase เดิมรับค่า ISO-8601 (เช่น new Date().toISOString() -> "2026-11-05T14:23:20.217Z")
+// ใส่ลงคอลัมน์ TIMESTAMPTZ ได้ตรงๆ แต่ MySQL DATETIME ไม่รับรูปแบบที่มี "T"/"Z"/มิลลิวินาที
+// แปลงทุก param ที่เป็น Date object หรือ string รูปแบบ ISO-8601 ให้เป็น "YYYY-MM-DD HH:MM:SS" ก่อนส่งเข้า query เสมอ
+// เพื่อไม่ต้องแก้ไขทุกจุดใน server.js/telegram.js ที่เคยสร้างค่าด้วย .toISOString()
+const ISO_DATETIME_RE = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(\.\d+)?Z?$/;
+function toMysqlDateTime(value) {
+  if (value instanceof Date) {
+    return value.toISOString().replace('T', ' ').replace(/\.\d+Z?$/, '');
+  }
+  if (typeof value === 'string') {
+    const m = value.match(ISO_DATETIME_RE);
+    if (m) return `${m[1]} ${m[2]}`;
+  }
+  return value;
+}
+function normalizeParams(params) {
+  return params.map((p) => (Array.isArray(p) ? p.map(toMysqlDateTime) : toMysqlDateTime(p)));
+}
+
 async function query(sql, params = []) {
   if (!pool) throw new Error('MySQL pool is not configured (missing DB_HOST/DB_USER env vars)');
-  const [rows] = await pool.execute(sql, params);
+  const { sql: finalSql, params: finalParams } = expandArrayParams(sql, normalizeParams(params));
+  const [rows] = await pool.execute(finalSql, finalParams);
   return rows;
 }
 
@@ -72,7 +161,7 @@ async function insertWithUuid(table, data) {
 async function insertAutoIncrement(table, data) {
   const columns = Object.keys(data);
   const placeholders = columns.map(() => '?').join(', ');
-  const values = columns.map((c) => data[c]);
+  const values = normalizeParams(columns.map((c) => data[c]));
   const sql = `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${placeholders})`;
   const [result] = await pool.execute(sql, values);
   const rows = await query(`SELECT * FROM ${table} WHERE id = ?`, [result.insertId]);

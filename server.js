@@ -1,3 +1,7 @@
+// ต้องโหลด .env ก่อน require('./db') และ require('./telegram') เสมอ เพราะทั้งสองไฟล์อ่าน
+// process.env (DB_HOST/DB_USER, TELEGRAM_BOT_TOKEN ฯลฯ) ทันทีตอนถูก require เข้ามา (module load time)
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -18,7 +22,6 @@ const {
 const mqtt = require('mqtt');
 const db = require('./db');
 const fs = require('fs');
-require('dotenv').config();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'onepass_jwt_secret_key_2026_smartgate_secure_token';
 const BCRYPT_ROUNDS = 10;
@@ -1340,7 +1343,7 @@ let simulatorState = {
 };
 
 // ============================================================================
-// 3. API ENDPOINTS (ผูกกับ SUPABASE DB ตรง 100%)
+// 3. API ENDPOINTS (ผูกกับ MYSQL DB ตรง 100%)
 // ============================================================================
 
 // ดึงรายชื่อผู้ใช้
@@ -1531,7 +1534,7 @@ app.post('/api/register', async (req, res) => {
           token
         });
       } else {
-        console.error('Supabase registration error:', error);
+        console.error('MySQL registration error:', error);
         return res.status(500).json({ success: false, message: error ? error.message : 'เกิดข้อผิดพลาดในการลงทะเบียน' });
       }
     } catch (err) {
@@ -1651,7 +1654,7 @@ app.post('/api/login', async (req, res) => {
         }
       }
     } catch (err) {
-      console.warn('Supabase login check error:', err.message);
+      console.warn('MySQL login check error:', err.message);
     }
   }
 
@@ -3906,14 +3909,14 @@ app.post('/api/requests', async (req, res) => {
       }
 
       if (!error && data && data.length > 0) {
-        console.log(`✅ [SUPABASE] Inserted 5-step leave request ${requestNo} (initialStep=${initialStep}, status=${initialStatus})`);
+        console.log(`✅ [MYSQL] Inserted 5-step leave request ${requestNo} (initialStep=${initialStep}, status=${initialStatus})`);
         return res.json({
           success: true,
           request: { ...data[0], ...metaPayload, currentStep: initialStep, status: initialStatus },
           match: ttMatch
         });
       } else if (error) {
-        console.error('Supabase request insert error:', error);
+        console.error('MySQL request insert error:', error);
       }
     } catch (err) {
       console.error('Create request error:', err);
@@ -6081,7 +6084,7 @@ app.post('/api/admin/import-students-commit', requireAdminAuth, async (req, res)
     }
 
     if (!supabase) {
-      return res.status(500).json({ success: false, message: 'ไม่ได้เชื่อมต่อ Supabase Database' });
+      return res.status(500).json({ success: false, message: 'ไม่ได้เชื่อมต่อฐานข้อมูล MySQL' });
     }
 
     let successCount = 0;
@@ -6752,11 +6755,11 @@ app.post('/api/auth/request-pending-account', async (req, res) => {
   try {
     const cleanCode = String(studentCode).trim();
     // ตรวจสอบว่ามีรหัสนี้อยู่แล้วหรือไม่
-    const { data: exist } = await supabase
-      .from('users')
-      .select('id, status')
-      .or(`username.eq.${cleanCode},student_code.eq.${cleanCode}`)
-      .maybeSingle();
+    const existRows = await db.query(
+      'SELECT id, status FROM users WHERE username = ? OR student_code = ?',
+      [cleanCode, cleanCode]
+    );
+    const exist = existRows[0];
 
     if (exist) {
       return res.status(400).json({ success: false, message: 'รหัสนักศึกษานี้มีอยู่ในระบบแล้ว' });
@@ -6765,7 +6768,7 @@ app.post('/api/auth/request-pending-account', async (req, res) => {
     const isoBirth = parseThaiBirthDateToIso(birthDate);
 
     // บันทึกสถานะ pending_approval
-    const { error: insErr } = await supabase.from('users').insert([{
+    await db.insertWithUuid('users', {
       username: cleanCode,
       student_code: cleanCode,
       password: '',
@@ -6778,9 +6781,7 @@ app.post('/api/auth/request-pending-account', async (req, res) => {
       parent_phone: parentPhone || null,
       status: 'pending_approval',
       college: 'วิทยาลัยการอาชีพองครักษ์'
-    }]);
-
-    if (insErr) throw insErr;
+    });
 
     res.json({
       success: true,
@@ -6798,20 +6799,17 @@ app.post('/api/auth/request-pending-account', async (req, res) => {
 app.get('/api/admin/pending-approvals', requireApproverOrAdminAuth, async (req, res) => {
   if (!supabase) return res.json({ success: true, students: [] });
   try {
-    let query = supabase
-      .from('users')
-      .select('id, student_code, full_name, role, department_id, classroom_id, phone, parent_phone, created_at, departments(name), classrooms(name, advisor_name)')
-      .eq('status', 'pending_approval')
-      .order('created_at', { ascending: false });
+    let whereClause = 'u.status = ?';
+    const params = ['pending_approval'];
 
     // ถ้าเป็นครูที่ปรึกษา ให้ดูเฉพาะห้องที่ตัวเองเป็นที่ปรึกษา
     if (req.authUser.role === 'advisor' && req.authUser.classroom_id) {
-      query = query.eq('classroom_id', req.authUser.classroom_id);
+      whereClause += ' AND u.classroom_id = ?';
+      params.push(req.authUser.classroom_id);
     }
 
-    const { data, error } = await query;
-    if (error) throw error;
-    res.json({ success: true, students: data || [] });
+    const data = await db.queryUsersWithRelations(whereClause, params, 'u.created_at DESC');
+    res.json({ success: true, students: (data || []).map(sanitizeUser) });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -6828,17 +6826,11 @@ app.post('/api/admin/approve-pending-student', requireApproverOrAdminAuth, async
   try {
     if (action === 'approve') {
       // อนุมัติ: ให้เป็น pending_activation เพื่อให้นักเรียนตั้งรหัสผ่านเอง
-      await supabase
-        .from('users')
-        .update({ status: 'pending_activation' })
-        .eq('id', studentId);
+      await db.query('UPDATE users SET status = ? WHERE id = ?', ['pending_activation', studentId]);
       res.json({ success: true, message: 'อนุมัติบัญชีนักเรียนเรียบร้อยแล้ว (นักเรียนสามารถยืนยันตัวตนและตั้งรหัสผ่านได้แล้ว)' });
     } else {
       // ปฏิเสธ: ลบหรือระงับ
-      await supabase
-        .from('users')
-        .delete()
-        .eq('id', studentId);
+      await db.query('DELETE FROM users WHERE id = ?', [studentId]);
       res.json({ success: true, message: 'ปฏิเสธและลบคำขอเรียบร้อยแล้ว' });
     }
   } catch (err) {
@@ -6852,12 +6844,7 @@ app.post('/api/admin/approve-pending-student', requireApproverOrAdminAuth, async
 app.get('/api/admin/import-logs', requireAdminAuth, async (req, res) => {
   if (!supabase) return res.json({ success: true, logs: [] });
   try {
-    const { data, error } = await supabase
-      .from('student_import_logs')
-      .select('*')
-      .order('imported_at', { ascending: false })
-      .limit(20);
-    if (error) throw error;
+    const data = await db.query('SELECT * FROM student_import_logs ORDER BY imported_at DESC LIMIT ?', [20]);
     res.json({ success: true, logs: data || [] });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -6867,6 +6854,6 @@ app.get('/api/admin/import-logs', requireAdminAuth, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`=======================================================`);
   console.log(`🚀 Smart Gate System running at: http://localhost:${PORT}`);
-  console.log(`☁️ Supabase PostgreSQL Database: CONNECTED!`);
+  console.log(`☁️ MySQL Database: ${supabase ? 'CONNECTED!' : 'NOT CONFIGURED (local JSON fallback mode)'}`);
   console.log(`=======================================================`);
 });
