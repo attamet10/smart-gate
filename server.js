@@ -5,7 +5,6 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const {
-  initTelegramBot,
   createTelegramRouter,
   notifyApproverQueue,
   notifyApproverOverdueReminder,
@@ -17,7 +16,7 @@ const {
   sendTelegramMessage
 } = require('./telegram');
 const mqtt = require('mqtt');
-const { createClient } = require('@supabase/supabase-js');
+const db = require('./db');
 const fs = require('fs');
 require('dotenv').config();
 
@@ -678,14 +677,13 @@ async function ensureTeacherAccountProvisioned({ teacherUsername, teacherName, d
   if (supabase) {
     try {
       const passHash = await hashPassword('1234');
-      await supabase.from('users').upsert([{
-        username: newUsername,
-        password: '1234',
-        password_hash: passHash,
-        full_name: finalFullName,
-        role: 'subject_teacher',
-        plate_no: '-'
-      }], { onConflict: 'username' });
+      await db.query(
+        `INSERT INTO users (id, username, password, password_hash, full_name, role, plate_no)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE password=VALUES(password), password_hash=VALUES(password_hash),
+           full_name=VALUES(full_name), role=VALUES(role), plate_no=VALUES(plate_no)`,
+        [crypto.randomUUID(), newUsername, '1234', passHash, finalFullName, 'subject_teacher', '-']
+      );
     } catch (e) {}
   }
 
@@ -1186,17 +1184,15 @@ app.get(['/college-logo.png', '/college-logo.jpg'], (req, res) => {
 });
 
 // ============================================================================
-// 1. SUPABASE CLIENT (PostgreSQL Cloud Database)
+// 1. MYSQL CONNECTION POOL (เดิมเป็น Supabase/PostgreSQL Client)
 // ============================================================================
-let supabase = null;
-if (process.env.SUPABASE_URL && process.env.SUPABASE_KEY) {
-  try {
-    supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-    console.log('✅ [SUPABASE] Connected to Cloud Database successfully!');
-    try { initTelegramBot(supabase); } catch (e) { console.warn('Telegram init error:', e.message); }
-  } catch (err) {
-    console.warn('⚠️ [SUPABASE] Setup error:', err.message);
-  }
+// ตัวแปร `supabase` ถูกเก็บชื่อไว้เหมือนเดิมเพื่อลด diff ของโค้ดทั้งไฟล์ (if (supabase) {...} ทำงานเหมือนเดิมทุกจุด)
+// แต่ตอนนี้อ้างอิง db.pool (mysql2 pool) จาก db.js แทน Supabase client - เป็น null ถ้ายังไม่ได้ตั้งค่า DB_HOST/DB_USER
+const supabase = db.pool;
+if (supabase) {
+  console.log('✅ [MYSQL] Connected to Database successfully!');
+} else {
+  console.log('⚠️ [MYSQL] Not configured (missing DB_HOST/DB_USER in .env) - running in local JSON fallback mode');
 }
 
 // ============================================================================
@@ -2126,7 +2122,7 @@ app.get('/api/gate/status', (req, res) => {
 
   res.json({
     mqtt: { connected: isMqttConnected, broker: process.env.MQTT_BROKER || 'Simulation Mode' },
-    supabase: { connected: !!supabase, url: process.env.SUPABASE_URL },
+    database: { connected: !!supabase, host: process.env.DB_HOST || null },
     simulator: simulatorState,
     activeSessions: sessions,
     gate: {
