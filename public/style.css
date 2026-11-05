@@ -274,6 +274,39 @@ html.dark textarea {
 }
 
 /* ============================================================================
+   READABILITY FIX: ตัวอักษรเล็กเกินไปบนมือถือ
+   โค้ดเดิมใช้ Tailwind class ตัวอักษรเล็กมาก (7-11px) กว่า 600 จุดทั่วแอป
+   แก้แบบรวมศูนย์ที่นี่ที่เดียว (ใช้ !important ชนะ CSS ที่ Tailwind CDN inject เข้ามาทีหลัง)
+   แทนที่จะไล่แก้ทีละจุดใน public/app.js (11,000+ บรรทัด)
+   ============================================================================ */
+.text-\[7px\], .text-\[8px\], .text-\[9px\] {
+  font-size: 0.75rem !important;   /* 12px (เดิม 7-9px) */
+  line-height: 1rem !important;
+}
+.text-\[10px\], .text-\[11px\] {
+  font-size: 0.8125rem !important; /* 13px (เดิม 10-11px) */
+  line-height: 1.125rem !important;
+}
+.text-xs {
+  font-size: 0.85rem !important;   /* 13.6px (เดิม 12px) */
+  line-height: 1.3rem !important;
+}
+.text-sm {
+  font-size: 0.95rem !important;   /* 15.2px (เดิม 14px) */
+  line-height: 1.5rem !important;
+}
+
+/* ================= Mobile: ปรับระยะห่างตัวอักษร/เป้าสัมผัสให้กดง่ายขึ้นบนจอเล็ก ================= */
+@media (max-width: 640px) {
+  button, a[role="button"], [role="button"] {
+    min-height: 2.25rem; /* เป้าสัมผัสขั้นต่ำ ~36px กันกดพลาด */
+  }
+  h1 { font-size: 1.4rem !important; }
+  h2 { font-size: 1.2rem !important; }
+  h3 { font-size: 1.05rem !important; }
+}
+
+/* ============================================================================
    หน้า Kiosk (public/kiosk.html) - ตู้สแกน QR หน้าประตู
    ============================================================================ */
 body.kiosk-page {
@@ -303,4 +336,50 @@ body.test-qr-page {
 }
 body.test-qr-page .font-mono {
   font-family: 'JetBrains Mono', monospace;
+}
+
+/* ============================================================================
+   หน้า Login / Welcome - โลโก้ OnePass แบบพรีเมียม พร้อมเอฟเฟกต์แสงวิ่งผ่าน (Shimmer)
+   ============================================================================ */
+.onepass-brand-shimmer {
+  background: linear-gradient(110deg, #ffffff 25%, #bfdbfe 42%, #ffffff 50%, #bfdbfe 58%, #ffffff 75%);
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: onepass-shimmer 3.2s linear infinite;
+}
+@keyframes onepass-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .onepass-brand-shimmer {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: #ffffff;
+    color: #ffffff;
+  }
+}
+
+/* แสงเรืองนุ่มๆ ลอยอยู่หลังโลโก้ ให้ความรู้สึกหรูหรา มีมิติ */
+.onepass-glow-orb {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 220px;
+  height: 220px;
+  background: radial-gradient(circle, rgba(147, 197, 253, 0.45) 0%, rgba(147, 197, 253, 0) 70%);
+  filter: blur(8px);
+  pointer-events: none;
+  animation: onepass-glow-pulse 4s ease-in-out infinite;
+  z-index: 0;
+}
+@keyframes onepass-glow-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(0.92); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .onepass-glow-orb { animation: none; opacity: 0.7; }
 }

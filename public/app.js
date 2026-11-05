@@ -1094,6 +1094,15 @@ function checkAuth() {
       ensureAuthToken();
     }
     setViewMode(u && u.role === 'admin' ? 'admin' : 'home');
+
+    // บังคับโหมดเต็มจอทุกครั้งหลัง Login: พยายาม Fullscreen API ก่อน (ได้ผลดีบน Android)
+    // ถ้าใช้ไม่ได้ (เช่น iOS Safari) ให้เลื่อนจอขึ้น 1px เพื่อซ่อน Address Bar แทน (รองรับทุกเบราว์เซอร์มือถือ)
+    requestAppFullscreen();
+    setTimeout(() => {
+      if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+        window.scrollTo(0, 1);
+      }
+    }, 300);
   } else {
     if (authScreen) authScreen.classList.remove('hidden');
     if (appShell) appShell.classList.add('hidden');
@@ -1101,8 +1110,23 @@ function checkAuth() {
   }
 }
 
+// ขอเข้าสู่โหมดเต็มจอ (ซ่อน Address Bar) ทันทีที่มีการแตะปุ่ม Login
+// ต้องเรียกแบบ synchronous ภายใน event handler เดิม (ก่อน await ใดๆ) เบราว์เซอร์ถึงจะยอมให้ fullscreen
+// ได้ผลดีบน Android Chrome; iOS Safari ไม่รองรับ Fullscreen API จึงจะไม่มีผล (เงียบๆ ไม่ error)
+function requestAppFullscreen() {
+  try {
+    const el = document.documentElement;
+    const req = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+    if (req) {
+      req.call(el).catch(() => {});
+    }
+  } catch (e) {}
+}
+window.requestAppFullscreen = requestAppFullscreen;
+
 async function handleLoginSubmit(e) {
   if (e) e.preventDefault();
+  requestAppFullscreen();
   const usernameInput = document.getElementById('login-username');
   const passwordInput = document.getElementById('login-password');
   const errorAlert = document.getElementById('login-error-alert');
@@ -1560,14 +1584,10 @@ function setViewMode(mode) {
   // ล็อคและรักษาสิทธิ์การแสดง/ซ่อนแท็บเมนูล่างตาม Role เสมอ 100% ทุกครั้งที่มีการเปลี่ยนหน้า
   updateBottomNavVisibility(u);
 
-  // ซ่อนแถบเมนูด้านล่างเมื่อเข้าสู่หน้ายื่นคำร้อง (screen-form) หรือหน้าติดตามสถานะ หรือหน้า Admin
+  // แถบเมนูด้านล่างแสดงตลอดทุกหน้าหลัง Login (ตามคำขอ - ไม่ซ่อนแม้แต่หน้าฟอร์ม/Admin)
   const mobileBottomNav = document.getElementById('mobile-bottom-nav');
   if (mobileBottomNav) {
-    if (['form', 'status', 'workflow', 'history-detail', 'admin'].includes(mode) || (u && u.role === 'admin')) {
-      mobileBottomNav.classList.add('hidden');
-    } else {
-      mobileBottomNav.classList.remove('hidden');
-    }
+    mobileBottomNav.classList.remove('hidden');
   }
 
   // หยุด Timer หมุนเวียน QR เมื่อสลับไปหน้าอื่น
@@ -5012,7 +5032,14 @@ async function submitOnePassForm() {
     return;
   }
 
-  const studentId = (user && user.id && user.id.length === 36) ? user.id : '00000000-0000-0000-0000-000000000001';
+  // ต้องมี user.id จริงจากฐานข้อมูล (UUID 36 ตัวอักษร) เท่านั้น - ห้าม fallback ไปใช้ ID บัญชีสาธิตที่ตายแล้ว
+  // เพราะจะทำให้บันทึกคำร้องลง MySQL ไม่ได้ (Foreign Key ไม่มีแถวอ้างอิงจริง) แต่ UI จะไม่รู้ตัวเพราะ error ถูกปิดบังไว้
+  if (!user || !user.id || user.id.length !== 36) {
+    resetBtn();
+    alert('⚠️ ไม่พบข้อมูลบัญชีผู้ใช้ที่ถูกต้อง กรุณาออกจากระบบแล้วเข้าสู่ระบบใหม่อีกครั้งก่อนยื่นคำร้อง');
+    return;
+  }
+  const studentId = user.id;
 
   // ตรวจสอบความปลอดภัยฝั่ง Client ป้องกันการกดยื่นซ้ำ
   if (user && user.role === 'student') {
@@ -6588,12 +6615,12 @@ function renderReasonsChart(reasonsData) {
       datasets: [{
         data: finalValues,
         backgroundColor: [
-          '#0ea5e9', // Sky blue
-          '#6366f1', // Indigo
-          '#10b981', // Emerald
-          '#f59e0b', // Amber
-          '#ec4899', // Pink
-          '#8b5cf6'  // Purple
+          '#1e3a8a', // Blue 900
+          '#1d4ed8', // Blue 700
+          '#2563eb', // Blue 600
+          '#3b82f6', // Blue 500
+          '#60a5fa', // Blue 400
+          '#93c5fd'  // Blue 300
         ],
         borderWidth: 2,
         borderColor: '#ffffff'
@@ -6641,7 +6668,7 @@ function renderDepartmentsChart(deptsData) {
       datasets: [{
         label: 'จำนวนคำขอ (ใบ)',
         data: finalValues,
-        backgroundColor: '#4f46e5',
+        backgroundColor: '#2563eb',
         borderRadius: 8,
         barThickness: 18
       }]
@@ -9357,12 +9384,22 @@ function applyAppTheme(theme) {
     root.classList.remove('dark');
     if (body) body.classList.remove('dark');
   }
+  const headerIcon = document.getElementById('header-theme-toggle-icon');
+  if (headerIcon) {
+    headerIcon.className = theme === 'dark' ? 'fa-solid fa-sun text-sm' : 'fa-solid fa-moon text-sm';
+  }
   syncSettingsModalUI();
 }
 
 function initAppTheme() {
   const savedTheme = getAppTheme();
   applyAppTheme(savedTheme);
+}
+
+// ปุ่มสลับธีมด่วนที่ header (เข้าถึงได้ทันทีทุกหน้า ไม่ต้องเปิดเมนูตั้งค่า)
+function toggleAppTheme() {
+  const next = getAppTheme() === 'dark' ? 'light' : 'dark';
+  setAppTheme(next);
 }
 
 // 4. Language Toggle (Thai / English)
@@ -9399,7 +9436,30 @@ const I18N_DICTIONARY = {
     status_card_title: "สถานะคำขอปัจจุบัน",
     status_card_sub: "ระบบขออนุญาต OnePass",
     status_no_request: "ไม่มีคำขอ",
-    status_no_request_desc: "ยังไม่มีคำร้องที่เปิดใช้งาน หรือกลับเข้าสถานศึกษาเรียบร้อยแล้ว"
+    status_no_request_desc: "ยังไม่มีคำร้องที่เปิดใช้งาน หรือกลับเข้าสถานศึกษาเรียบร้อยแล้ว",
+
+    auth_welcome_subtitle: "ระบบขออนุญาตออกนอกสถานศึกษา",
+    auth_welcome_college: "วิทยาลัยการอาชีพองครักษ์",
+    auth_welcome_login_btn: "เข้าสู่ระบบ OnePass IoT Gate",
+    auth_welcome_hint_title: "นักเรียนเข้าสู่ระบบด้วยรหัสนักศึกษาอย่างเดียว",
+    auth_welcome_hint_sub: "ระบบผูกเครื่องอัตโนมัติ ปลอดภัย ไม่ต้องใช้รหัสผ่าน",
+    auth_welcome_footer: "OnePass IoT Smart Gate System • วิทยาลัยการอาชีพองครักษ์",
+    auth_login_title: "เข้าสู่ระบบ",
+    auth_login_subtitle: "OnePass Secure Smart Gate Access",
+    auth_tab_student: "นักเรียน",
+    auth_tab_staff: "ครู / เจ้าหน้าที่",
+    auth_student_error: "รหัสนักศึกษาไม่ถูกต้อง หรือไม่พบบัญชีในระบบ กรุณาติดต่อครูที่ปรึกษาหรือฝ่ายทะเบียน",
+    auth_student_code_label: "รหัสนักศึกษา (11 หลัก)",
+    auth_student_code_badge: "ผูกอุปกรณ์อัตโนมัติ",
+    auth_student_code_placeholder: "เช่น 66209010012",
+    auth_student_code_hint: "ไม่ต้องใช้รหัสผ่าน เข้าครั้งแรกระบบจะผูกกับเครื่องนี้ทันที",
+    auth_student_submit: "เข้าสู่ระบบ OnePass",
+    auth_staff_error_title: "เข้าสู่ระบบไม่สำเร็จ",
+    auth_staff_error_sub: "ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง",
+    auth_staff_username_label: "ชื่อผู้ใช้งาน (USERNAME)",
+    auth_staff_username_placeholder: "เช่น teacher_auto หรือ admin",
+    auth_staff_password_label: "รหัสผ่าน (PASSWORD)",
+    auth_staff_submit: "เข้าสู่ระบบเจ้าหน้าที่"
   },
   en: {
     settings_btn: "Settings",
@@ -9433,7 +9493,30 @@ const I18N_DICTIONARY = {
     status_card_title: "Current Request Status",
     status_card_sub: "OnePass Authorization System",
     status_no_request: "No Active Request",
-    status_no_request_desc: "No pending or active request found, or student already returned to campus."
+    status_no_request_desc: "No pending or active request found, or student already returned to campus.",
+
+    auth_welcome_subtitle: "Campus Exit Authorization System",
+    auth_welcome_college: "Ongkharak Industrial and Community Education College",
+    auth_welcome_login_btn: "Sign in to OnePass IoT Gate",
+    auth_welcome_hint_title: "Students sign in with their student ID only",
+    auth_welcome_hint_sub: "Automatic device binding, secure, no password needed",
+    auth_welcome_footer: "OnePass IoT Smart Gate System • Ongkharak College",
+    auth_login_title: "Sign In",
+    auth_login_subtitle: "OnePass Secure Smart Gate Access",
+    auth_tab_student: "Student",
+    auth_tab_staff: "Teacher / Staff",
+    auth_student_error: "Invalid student ID or account not found. Please contact your advisor or the registrar office.",
+    auth_student_code_label: "Student ID (11 digits)",
+    auth_student_code_badge: "Auto device binding",
+    auth_student_code_placeholder: "e.g. 66209010012",
+    auth_student_code_hint: "No password needed — your first login binds this device automatically",
+    auth_student_submit: "Sign in to OnePass",
+    auth_staff_error_title: "Sign In Failed",
+    auth_staff_error_sub: "Incorrect username or password",
+    auth_staff_username_label: "USERNAME",
+    auth_staff_username_placeholder: "e.g. teacher_auto or admin",
+    auth_staff_password_label: "PASSWORD",
+    auth_staff_submit: "Sign In as Staff"
   }
 };
 
@@ -9455,6 +9538,14 @@ function applyAppLanguage(lang) {
     const key = el.getAttribute('data-i18n');
     if (dict[key]) {
       el.textContent = dict[key];
+    }
+  });
+
+  // 1.1 Translate placeholder text ([data-i18n-placeholder])
+  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+    const key = el.getAttribute('data-i18n-placeholder');
+    if (dict[key]) {
+      el.setAttribute('placeholder', dict[key]);
     }
   });
 
@@ -9541,6 +9632,19 @@ function syncSettingsModalUI() {
       }
     }
   }
+
+  // ปุ่มสลับภาษาด่วนที่หน้า Login/Welcome
+  const authBtnLangTh = document.getElementById('auth-btn-lang-th');
+  const authBtnLangEn = document.getElementById('auth-btn-lang-en');
+  if (authBtnLangTh && authBtnLangEn) {
+    if (lang === 'en') {
+      authBtnLangEn.className = 'px-3 py-1.5 rounded-full text-xs font-bold transition bg-white text-blue-700';
+      authBtnLangTh.className = 'px-3 py-1.5 rounded-full text-xs font-bold transition text-white/70 hover:text-white';
+    } else {
+      authBtnLangTh.className = 'px-3 py-1.5 rounded-full text-xs font-bold transition bg-white text-blue-700';
+      authBtnLangEn.className = 'px-3 py-1.5 rounded-full text-xs font-bold transition text-white/70 hover:text-white';
+    }
+  }
 }
 
 // Expose Settings functions globally for inline onclick handlers
@@ -9593,7 +9697,7 @@ function switchLoginRoleTab(role) {
 
   if (role === 'student') {
     if (tabStudent) {
-      tabStudent.className = 'py-2.5 rounded-xl font-bold text-xs transition flex items-center justify-center gap-2 bg-[#4f46e5] text-white shadow-md';
+      tabStudent.className = 'py-2.5 rounded-xl font-bold text-xs transition flex items-center justify-center gap-2 bg-[#2563eb] text-white shadow-md';
     }
     if (tabStaff) {
       tabStaff.className = 'py-2.5 rounded-xl font-medium text-xs text-slate-400 hover:text-white transition flex items-center justify-center gap-2';
@@ -9605,7 +9709,7 @@ function switchLoginRoleTab(role) {
       tabStudent.className = 'py-2.5 rounded-xl font-medium text-xs text-slate-400 hover:text-white transition flex items-center justify-center gap-2';
     }
     if (tabStaff) {
-      tabStaff.className = 'py-2.5 rounded-xl font-bold text-xs transition flex items-center justify-center gap-2 bg-[#4f46e5] text-white shadow-md';
+      tabStaff.className = 'py-2.5 rounded-xl font-bold text-xs transition flex items-center justify-center gap-2 bg-[#2563eb] text-white shadow-md';
     }
     if (secStudent) secStudent.classList.add('hidden');
     if (secStaff) secStaff.classList.remove('hidden');
@@ -9620,6 +9724,7 @@ function fillStudentCode(code) {
 // 1. เข้าสู่ระบบของนักเรียนด้วยรหัสนักศึกษาอย่างเดียว
 async function handleStudentLogin(e) {
   if (e) e.preventDefault();
+  requestAppFullscreen();
   const codeInput = document.getElementById('login-student-code');
   const errBox = document.getElementById('student-login-error');
   const errMsg = document.getElementById('student-login-error-msg');

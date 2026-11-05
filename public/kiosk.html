@@ -7,6 +7,24 @@
 
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // ธีมสีหลักของแอป: ฟ้าเข้ม + ขาวเท่านั้น
+    const ONEPASS_BLUE_PALETTE = { 50:'#eff6ff',100:'#dbeafe',200:'#bfdbfe',300:'#93c5fd',400:'#60a5fa',500:'#3b82f6',600:'#2563eb',700:'#1d4ed8',800:'#1e40af',900:'#1e3a8a',950:'#172554' };
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            cyan: ONEPASS_BLUE_PALETTE,
+            sky: ONEPASS_BLUE_PALETTE,
+            indigo: ONEPASS_BLUE_PALETTE,
+            purple: ONEPASS_BLUE_PALETTE,
+            violet: ONEPASS_BLUE_PALETTE,
+            teal: ONEPASS_BLUE_PALETTE
+          }
+        }
+      }
+    };
+  </script>
 
   <!-- Google Fonts: Sarabun (TH Sarabun Web & Local Fallback) -->
   <link rel="preconnect" href="https://fonts.googleapis.com">

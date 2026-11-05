@@ -5,6 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OnePass - QR Code ทดสอบเปิดไม้กั้น</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // ธีมสีหลักของแอป: ฟ้าเข้ม + ขาวเท่านั้น
+    const ONEPASS_BLUE_PALETTE = { 50:'#eff6ff',100:'#dbeafe',200:'#bfdbfe',300:'#93c5fd',400:'#60a5fa',500:'#3b82f6',600:'#2563eb',700:'#1d4ed8',800:'#1e40af',900:'#1e3a8a',950:'#172554' };
+    tailwind.config = {
+      theme: { extend: { colors: { cyan: ONEPASS_BLUE_PALETTE, sky: ONEPASS_BLUE_PALETTE, indigo: ONEPASS_BLUE_PALETTE, purple: ONEPASS_BLUE_PALETTE, violet: ONEPASS_BLUE_PALETTE, teal: ONEPASS_BLUE_PALETTE } }
+      }
+    };
+  </script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">

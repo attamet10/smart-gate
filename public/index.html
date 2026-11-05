@@ -42,6 +42,25 @@
 
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // ธีมสีหลักของแอป: ฟ้าเข้ม + ขาวเท่านั้น (คงสีสถานะ เขียว/แดง/ส้ม/เหลือง ไว้ตามเดิมเพื่อบอกสถานะคำร้อง)
+    // สีตกแต่งอื่นที่เคยใช้ (cyan/sky/indigo/purple/violet/teal) ถูก remap มาเป็นชุดสีน้ำเงินเดียวกันทั้งหมด
+    const ONEPASS_BLUE_PALETTE = { 50:'#eff6ff',100:'#dbeafe',200:'#bfdbfe',300:'#93c5fd',400:'#60a5fa',500:'#3b82f6',600:'#2563eb',700:'#1d4ed8',800:'#1e40af',900:'#1e3a8a',950:'#172554' };
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            cyan: ONEPASS_BLUE_PALETTE,
+            sky: ONEPASS_BLUE_PALETTE,
+            indigo: ONEPASS_BLUE_PALETTE,
+            purple: ONEPASS_BLUE_PALETTE,
+            violet: ONEPASS_BLUE_PALETTE,
+            teal: ONEPASS_BLUE_PALETTE
+          }
+        }
+      }
+    };
+  </script>
 
   <!-- Google Fonts: Sarabun (TH Sarabun Web & Local Fallback) -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -71,45 +90,54 @@
 <body class="app-page text-slate-800 min-h-screen bg-[#0d55cf] select-none">
 
   <!-- ================= 0. AUTH CONTAINER (หน้าจอต้อนรับ, เข้าสู่ระบบ, และสมัครสมาชิก) ================= -->
-  <div id="screen-auth" class="min-h-screen flex flex-col justify-between bg-gradient-to-b from-[#0842a0] via-[#0b56d0] to-[#0d55cf]">
-    
+  <div id="screen-auth" class="min-h-screen flex flex-col justify-between bg-gradient-to-b from-[#0842a0] via-[#0b56d0] to-[#0d55cf] relative overflow-hidden">
+
+    <!-- ปุ่มสลับภาษา ไทย/English (ลอยมุมขวาบน มองเห็นได้ทันทีตั้งแต่หน้าแรก) -->
+    <div class="absolute top-4 right-4 z-20 flex items-center bg-white/10 border border-white/25 backdrop-blur-md rounded-full p-1 gap-0.5">
+      <button type="button" id="auth-btn-lang-th" onclick="setAppLanguage('th')" class="px-3 py-1.5 rounded-full text-xs font-bold transition">ไทย</button>
+      <button type="button" id="auth-btn-lang-en" onclick="setAppLanguage('en')" class="px-3 py-1.5 rounded-full text-xs font-bold transition">EN</button>
+    </div>
+
     <!-- ================= 0.1 VIEW: WELCOME SCREEN (หน้าจอเริ่มต้นตามแบบร่าง รูปที่ 3) ================= -->
     <div id="auth-view-welcome" class="w-full flex-1 flex flex-col justify-between">
-      <!-- ส่วนบน: โลโก้ OnePass ขนาดสมส่วน สง่างาม -->
-      <div class="pt-16 pb-12 px-6 flex flex-col items-center justify-center text-center text-white flex-1 relative">
-        <div class="relative mb-4">
-          <div class="w-24 h-24 rounded-3xl bg-white/15 border-2 border-white/30 backdrop-blur-md shadow-2xl flex items-center justify-center text-white text-4xl">
+      <!-- ส่วนบน: โลโก้ OnePass ขนาดใหญ่ สง่างาม พร้อมเอฟเฟกต์แสงวิ่งผ่าน -->
+      <div class="pt-20 pb-12 px-6 flex flex-col items-center justify-center text-center text-white flex-1 relative">
+        <div class="relative mb-5">
+          <div class="onepass-glow-orb"></div>
+          <div class="relative z-10 w-24 h-24 rounded-3xl bg-white/15 border-2 border-white/30 backdrop-blur-md shadow-2xl flex items-center justify-center text-white text-4xl">
             <i class="fa-solid fa-door-open"></i>
           </div>
           <!-- ตราวิทยาลัยการอาชีพองครักษ์ -->
-          <div class="absolute -bottom-2 -right-2 w-9 h-9 rounded-full border-2 border-white shadow-md overflow-hidden bg-white flex items-center justify-center">
+          <div class="absolute -bottom-2 -right-2 z-10 w-9 h-9 rounded-full border-2 border-white shadow-md overflow-hidden bg-white flex items-center justify-center">
             <img src="/college-logo.png" alt="วิทยาลัยการอาชีพองครักษ์" class="w-full h-full object-cover">
           </div>
         </div>
 
-        <div class="flex items-center gap-2 mb-1.5">
-          <h1 class="text-3xl sm:text-4xl font-extrabold tracking-tight">OnePass</h1>
-          <span class="text-xs bg-white/20 border border-white/30 px-2.5 py-0.5 rounded-full font-semibold">IoT Gate</span>
+        <h1 class="onepass-brand-shimmer text-6xl sm:text-7xl font-black tracking-tight leading-none mb-2 relative z-10">OnePass</h1>
+        <div class="flex items-center gap-2 mb-2 relative z-10">
+          <span class="h-px w-6 bg-white/40"></span>
+          <span class="text-[11px] tracking-[0.25em] uppercase text-white/80 font-semibold">IoT Smart Gate</span>
+          <span class="h-px w-6 bg-white/40"></span>
         </div>
-        <p class="text-sm font-medium text-white/95">ระบบขออนุญาตออกนอกสถานศึกษา</p>
-        <p class="text-xs text-white/80">วิทยาลัยการอาชีพองครักษ์</p>
+        <p data-i18n="auth_welcome_subtitle" class="text-sm font-medium text-white/95 relative z-10">ระบบขออนุญาตออกนอกสถานศึกษา</p>
+        <p data-i18n="auth_welcome_college" class="text-xs text-white/80 relative z-10">วิทยาลัยการอาชีพองครักษ์</p>
       </div>
 
       <!-- ส่วนล่าง: การ์ดโค้งมนสีเข้ม พร้อมปุ่มเข้าสู่ระบบ OnePass -->
       <div class="bg-[#181d31] text-white rounded-t-[36px] sm:rounded-t-[44px] px-6 sm:px-10 pt-10 pb-12 shadow-[0_-12px_40px_rgba(0,0,0,0.35)] max-w-md w-full mx-auto space-y-4">
         <!-- ปุ่มหลัก: เข้าสู่ระบบ OnePass -->
-        <button type="button" id="btn-welcome-login" onclick="setAuthView('login')" class="w-full py-4 bg-[#4f46e5] hover:bg-[#4338ca] active:bg-[#3730a3] text-white font-bold rounded-2xl text-base shadow-lg shadow-indigo-950/50 transition active:scale-95 cursor-pointer touch-manipulation select-none flex items-center justify-center gap-2">
+        <button type="button" id="btn-welcome-login" onclick="setAuthView('login')" class="w-full py-4 bg-gradient-to-r from-[#2563eb] to-[#1d4ed8] hover:brightness-110 active:scale-95 text-white font-bold rounded-2xl text-base shadow-lg shadow-blue-950/50 transition cursor-pointer touch-manipulation select-none flex items-center justify-center gap-2">
           <i class="fa-solid fa-right-to-bracket"></i>
-          <span>เข้าสู่ระบบ OnePass IoT Gate</span>
+          <span data-i18n="auth_welcome_login_btn">เข้าสู่ระบบ OnePass IoT Gate</span>
         </button>
 
         <div class="p-3 rounded-2xl bg-slate-800/60 border border-slate-700/60 text-center space-y-1">
-          <p class="text-xs text-blue-300 font-semibold"><i class="fa-solid fa-shield-halved text-emerald-400 mr-1"></i> นักเรียนเข้าสู่ระบบด้วยรหัสนักศึกษาอย่างเดียว</p>
-          <p class="text-[11px] text-slate-400">ระบบผูกเครื่องอัตโนมัติ ปลอดภัย ไม่ต้องใช้รหัสผ่าน</p>
+          <p class="text-xs text-blue-300 font-semibold"><i class="fa-solid fa-shield-halved text-emerald-400 mr-1"></i> <span data-i18n="auth_welcome_hint_title">นักเรียนเข้าสู่ระบบด้วยรหัสนักศึกษาอย่างเดียว</span></p>
+          <p data-i18n="auth_welcome_hint_sub" class="text-[11px] text-slate-400">ระบบผูกเครื่องอัตโนมัติ ปลอดภัย ไม่ต้องใช้รหัสผ่าน</p>
         </div>
 
         <div class="pt-2 text-center text-[11px] text-slate-500">
-          <p>OnePass IoT Smart Gate System • วิทยาลัยการอาชีพองครักษ์</p>
+          <p data-i18n="auth_welcome_footer">OnePass IoT Smart Gate System • วิทยาลัยการอาชีพองครักษ์</p>
         </div>
       </div>
     </div>
@@ -117,51 +145,49 @@
     <!-- ================= 0.2 VIEW: LOGIN SCREEN (หน้าเข้าสู่ระบบ) ================= -->
     <div id="auth-view-login" class="w-full flex-1 flex flex-col justify-between hidden">
       <!-- ส่วนบน: โลโก้ขนาดกะทัดรัด ให้พื้นที่ฟอร์มบนมือถือ -->
-      <div class="pt-8 pb-6 px-6 flex flex-col items-center justify-center text-center text-white flex-1">
+      <div class="pt-10 pb-6 px-6 flex flex-col items-center justify-center text-center text-white flex-1 relative">
         <div class="relative mb-2">
-          <div class="w-16 h-16 rounded-2xl bg-white/15 border-2 border-white/30 backdrop-blur-md shadow-xl flex items-center justify-center text-white text-2xl">
+          <div class="onepass-glow-orb" style="width:150px;height:150px;"></div>
+          <div class="relative z-10 w-16 h-16 rounded-2xl bg-white/15 border-2 border-white/30 backdrop-blur-md shadow-xl flex items-center justify-center text-white text-2xl">
             <i class="fa-solid fa-door-open"></i>
           </div>
-          <div class="absolute -bottom-1.5 -right-1.5 w-7 h-7 rounded-full border-2 border-white shadow-md overflow-hidden bg-white flex items-center justify-center">
+          <div class="absolute -bottom-1.5 -right-1.5 z-10 w-7 h-7 rounded-full border-2 border-white shadow-md overflow-hidden bg-white flex items-center justify-center">
             <img src="/college-logo.png" alt="วิทยาลัยการอาชีพองครักษ์" class="w-full h-full object-cover">
           </div>
         </div>
-        <div class="flex items-center gap-2 mb-0.5">
-          <h1 class="text-2xl font-extrabold tracking-tight">OnePass</h1>
-          <span class="text-[10px] bg-white/20 border border-white/30 px-2 py-0.5 rounded-full font-semibold">IoT Gate</span>
-        </div>
-        <p class="text-xs text-white/90">วิทยาลัยการอาชีพองครักษ์</p>
+        <h1 class="onepass-brand-shimmer text-4xl sm:text-5xl font-black tracking-tight leading-none mb-1 relative z-10">OnePass</h1>
+        <p data-i18n="auth_welcome_college" class="text-xs text-white/90 relative z-10">วิทยาลัยการอาชีพองครักษ์</p>
       </div>
 
       <!-- ส่วนล่าง: การ์ดฟอร์ม Login แบบเลือกบทบาท (นักเรียน / บุคลากร) -->
       <div class="bg-[#181d31] text-white rounded-t-[36px] sm:rounded-t-[44px] px-6 sm:px-10 pt-7 pb-8 shadow-[0_-12px_40px_rgba(0,0,0,0.35)] max-w-md w-full mx-auto space-y-4">
-        
+
         <div class="flex items-center justify-between">
           <button onclick="setAuthView('welcome')" title="กลับหน้าต้อนรับ" class="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-slate-300 flex items-center justify-center text-xs transition">
             <i class="fa-solid fa-arrow-left"></i>
           </button>
           <div class="text-center flex-1 pr-8">
-            <h2 class="text-2xl sm:text-3xl font-extrabold tracking-tight text-white">เข้าสู่ระบบ</h2>
-            <p class="text-xs text-slate-400">OnePass Secure Smart Gate Access</p>
+            <h2 data-i18n="auth_login_title" class="text-2xl sm:text-3xl font-extrabold tracking-tight text-white">เข้าสู่ระบบ</h2>
+            <p data-i18n="auth_login_subtitle" class="text-xs text-slate-400">OnePass Secure Smart Gate Access</p>
           </div>
         </div>
 
         <!-- แท็บสลับประเภทผู้ใช้งาน: นักเรียน VS บุคลากร/แอดมิน -->
         <div class="grid grid-cols-2 p-1 bg-[#272d45] rounded-2xl border border-slate-700">
-          <button type="button" id="tab-auth-student" onclick="switchLoginRoleTab('student')" class="py-2.5 rounded-xl font-bold text-xs transition flex items-center justify-center gap-2 bg-[#4f46e5] text-white shadow-md">
+          <button type="button" id="tab-auth-student" onclick="switchLoginRoleTab('student')" class="py-2.5 rounded-xl font-bold text-xs transition flex items-center justify-center gap-2 bg-[#2563eb] text-white shadow-md">
             <i class="fa-solid fa-graduation-cap"></i>
-            <span>นักเรียน</span>
+            <span data-i18n="auth_tab_student">นักเรียน</span>
           </button>
           <button type="button" id="tab-auth-staff" onclick="switchLoginRoleTab('staff')" class="py-2.5 rounded-xl font-medium text-xs text-slate-400 hover:text-white transition flex items-center justify-center gap-2">
             <i class="fa-solid fa-chalkboard-user"></i>
-            <span>ครู / เจ้าหน้าที่</span>
+            <span data-i18n="auth_tab_staff">ครู / เจ้าหน้าที่</span>
           </button>
         </div>
 
         <!-- กล่องแจ้งเตือนความผิดพลาด (ข้อความเหมือนกันทุกกรณี ป้องกันการสุ่มรหัส) -->
         <div id="student-login-error" class="hidden p-3 rounded-2xl bg-rose-950/80 border border-rose-500 text-rose-200 text-xs flex items-center gap-2">
           <i class="fa-solid fa-circle-exclamation text-rose-400 text-base shrink-0"></i>
-          <p id="student-login-error-msg" class="leading-tight">รหัสนักศึกษาไม่ถูกต้อง หรือไม่พบบัญชีในระบบ กรุณาติดต่อครูที่ปรึกษาหรือฝ่ายทะเบียน</p>
+          <p id="student-login-error-msg" data-i18n="auth_student_error" class="leading-tight">รหัสนักศึกษาไม่ถูกต้อง หรือไม่พบบัญชีในระบบ กรุณาติดต่อครูที่ปรึกษาหรือฝ่ายทะเบียน</p>
         </div>
 
         <!-- ================= 1. ฟอร์มนักเรียน: ช่องเดียว รหัสนักศึกษา ================= -->
@@ -169,20 +195,21 @@
           <form id="form-student-login" onsubmit="handleStudentLogin(event)" class="space-y-3.5">
             <div class="space-y-1">
               <label class="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center justify-between">
-                <span>รหัสนักศึกษา (11 หลัก)</span>
-                <span class="text-emerald-400 font-normal text-[10px]"><i class="fa-solid fa-link mr-1"></i> ผูกอุปกรณ์อัตโนมัติ</span>
+                <span data-i18n="auth_student_code_label">รหัสนักศึกษา (11 หลัก)</span>
+                <span class="text-emerald-400 font-normal text-[10px]"><i class="fa-solid fa-link mr-1"></i> <span data-i18n="auth_student_code_badge">ผูกอุปกรณ์อัตโนมัติ</span></span>
               </label>
               <div class="relative">
-                <input type="text" id="login-student-code" required placeholder="เช่น 66209010012" maxlength="15" autocomplete="off"
+                <input type="text" id="login-student-code" required placeholder="เช่น 66209010012" data-i18n-placeholder="auth_student_code_placeholder" maxlength="11" autocomplete="off"
+                       inputmode="numeric" pattern="[0-9]*" oninput="this.value = this.value.replace(/[^0-9]/g, '')"
                        class="w-full bg-[#272d45] border border-slate-700/80 focus:border-blue-400 focus:ring-2 focus:ring-blue-500/40 rounded-2xl px-4 py-3 text-sm text-white placeholder-slate-500 outline-none transition font-mono tracking-wide">
                 <i class="fa-solid fa-id-card absolute right-4 top-3.5 text-slate-500 text-sm"></i>
               </div>
-              <p class="text-[10px] text-slate-400 pt-0.5">ไม่ต้องใช้รหัสผ่าน เข้าครั้งแรกระบบจะผูกกับเครื่องนี้ทันที</p>
+              <p data-i18n="auth_student_code_hint" class="text-[10px] text-slate-400 pt-0.5">ไม่ต้องใช้รหัสผ่าน เข้าครั้งแรกระบบจะผูกกับเครื่องนี้ทันที</p>
             </div>
 
-            <button type="submit" id="btn-student-login" class="w-full py-3.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold rounded-2xl text-base shadow-lg shadow-indigo-950/50 transition hover:scale-[1.01] flex items-center justify-center gap-2 mt-2">
+            <button type="submit" id="btn-student-login" class="w-full py-3.5 bg-gradient-to-r from-blue-600 to-blue-800 hover:brightness-110 text-white font-bold rounded-2xl text-base shadow-lg shadow-blue-950/50 transition hover:scale-[1.01] flex items-center justify-center gap-2 mt-2">
               <i class="fa-solid fa-right-to-bracket"></i>
-              <span>เข้าสู่ระบบ OnePass</span>
+              <span data-i18n="auth_student_submit">เข้าสู่ระบบ OnePass</span>
             </button>
           </form>
         </div>
@@ -193,17 +220,17 @@
           <div id="login-error-alert" class="hidden p-3 rounded-2xl bg-rose-950/80 border border-rose-500 text-rose-200 text-xs flex items-center gap-2">
             <i class="fa-solid fa-circle-exclamation text-rose-400 text-base shrink-0"></i>
             <div>
-              <p class="font-bold text-white">เข้าสู่ระบบไม่สำเร็จ</p>
-              <p class="text-[11px] text-rose-300">ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง</p>
+              <p data-i18n="auth_staff_error_title" class="font-bold text-white">เข้าสู่ระบบไม่สำเร็จ</p>
+              <p data-i18n="auth_staff_error_sub" class="text-[11px] text-rose-300">ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง</p>
             </div>
           </div>
 
           <form id="form-login" onsubmit="handleLoginSubmit(event)" class="space-y-3.5">
             <!-- USERNAME -->
             <div class="space-y-1">
-              <label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">ชื่อผู้ใช้งาน (USERNAME)</label>
+              <label data-i18n="auth_staff_username_label" class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">ชื่อผู้ใช้งาน (USERNAME)</label>
               <div class="relative">
-                <input type="text" id="login-username" placeholder="เช่น teacher_auto หรือ admin" autocomplete="username"
+                <input type="text" id="login-username" placeholder="เช่น teacher_auto หรือ admin" data-i18n-placeholder="auth_staff_username_placeholder" autocomplete="username"
                        class="w-full bg-[#272d45] border border-slate-700/80 focus:border-blue-400 focus:ring-2 focus:ring-blue-500/40 rounded-2xl px-4 py-3 text-sm text-white placeholder-slate-500 outline-none transition">
                 <i class="fa-solid fa-user absolute right-4 top-3.5 text-slate-500 text-sm"></i>
               </div>
@@ -211,7 +238,7 @@
 
             <!-- PASSWORD -->
             <div class="space-y-1">
-              <label class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">รหัสผ่าน (PASSWORD)</label>
+              <label data-i18n="auth_staff_password_label" class="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">รหัสผ่าน (PASSWORD)</label>
               <div class="relative">
                 <input type="password" id="login-password" placeholder="••••" autocomplete="current-password"
                        class="w-full bg-[#272d45] border border-slate-700/80 focus:border-blue-400 focus:ring-2 focus:ring-blue-500/40 rounded-2xl px-4 py-3 text-sm text-white placeholder-slate-500 outline-none transition">
@@ -222,8 +249,8 @@
             </div>
 
             <!-- SUBMIT BUTTON -->
-            <button type="submit" class="w-full py-3.5 bg-[#4f46e5] hover:bg-[#4338ca] active:bg-[#3730a3] text-white font-bold rounded-2xl text-base shadow-lg shadow-indigo-950/50 transition hover:scale-[1.01] flex items-center justify-center gap-2 mt-2">
-              <span>เข้าสู่ระบบเจ้าหน้าที่</span>
+            <button type="submit" class="w-full py-3.5 bg-gradient-to-r from-[#2563eb] to-[#1d4ed8] hover:brightness-110 active:scale-95 text-white font-bold rounded-2xl text-base shadow-lg shadow-blue-950/50 transition flex items-center justify-center gap-2 mt-2">
+              <span data-i18n="auth_staff_submit">เข้าสู่ระบบเจ้าหน้าที่</span>
               <i class="fa-solid fa-arrow-right text-xs"></i>
             </button>
           </form>
@@ -342,7 +369,6 @@
           <div>
             <div class="flex items-center gap-2">
               <h1 class="text-2xl font-bold tracking-tight leading-none">OnePass</h1>
-              <span class="text-[10px] bg-white/20 px-2 py-0.5 rounded-full border border-white/30 font-medium">IoT Gate</span>
             </div>
             <p class="text-xs text-white/95 font-medium mt-1">ระบบขออนุญาตออกนอกสถานศึกษา</p>
             <p class="text-[11px] text-white/80">วิทยาลัยการอาชีพองครักษ์</p>
@@ -351,6 +377,11 @@
 
         <!-- Right: Official Seal & Admin Quick Action -->
         <div class="flex items-center gap-2 sm:gap-2.5">
+          <!-- ปุ่มสลับธีมมืด/สว่าง (เข้าถึงได้ทันทีจากทุกหน้า ไม่ต้องเข้าไปในเมนูตั้งค่า) -->
+          <button id="header-theme-toggle" type="button" onclick="toggleAppTheme()" title="สลับธีมมืด/สว่าง" class="w-9 h-9 rounded-full bg-white/15 hover:bg-white/25 active:scale-90 border border-white/25 text-white flex items-center justify-center transition shrink-0" aria-label="สลับธีมมืด/สว่าง">
+            <i id="header-theme-toggle-icon" class="fa-solid fa-moon text-sm"></i>
+          </button>
+
           <!-- Admin Panel Quick Button (เฉพาะ Admin) -->
           <button id="header-admin-btn" onclick="setViewMode('admin')" class="hidden px-2.5 py-1.5 rounded-full bg-cyan-500/25 hover:bg-cyan-500/40 border border-cyan-300/50 text-cyan-200 text-xs font-bold transition flex items-center gap-1.5 backdrop-blur shadow-sm" title="เปิด OnePass Admin Panel">
             <i class="fa-solid fa-gears text-cyan-300 text-xs"></i>

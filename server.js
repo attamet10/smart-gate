@@ -1802,16 +1802,8 @@ app.get('/api/admin/users', authenticateToken, requireRole(['admin']), async (re
       }
     }
     
-    // ผสานบัญชีระบบทั้ง 5 ขั้นตอนที่มีอยู่ + บัญชีครูรายวิชาที่ถูกสร้างอัตโนมัติ
-    const baseKnownUsers = Object.values({ ...ALL_SYSTEM_ACCOUNTS, ...getAllActiveTeacherAccountsMap() });
-
-    const existingNames = new Set(users.map(u => u.username.toLowerCase()));
-    baseKnownUsers.forEach(u => {
-      if (!existingNames.has(u.username.toLowerCase())) {
-        users.push(u);
-      }
-    });
-
+    // หมายเหตุ: ไม่ผสานบัญชีสาธิต (ALL_SYSTEM_ACCOUNTS/getAllActiveTeacherAccountsMap) เข้ามาในหน้ารายชื่อผู้ใช้
+    // ของ Admin อีกต่อไป (กันสับสนกับบัญชีจริงใน production) - บัญชีสาธิตยังล็อกอินได้ตามปกติผ่าน /api/login
     const profiles = loadProfiles();
     const deletedSet = loadDeletedUsers();
 
@@ -3741,7 +3733,12 @@ app.post('/api/requests', async (req, res) => {
         }
       }
       if (!validStudentId) {
-        validStudentId = '00000000-0000-0000-0000-000000000001';
+        // เดิม fallback ไปที่ UUID บัญชีสาธิต '...0001' ซึ่งตอนนี้ไม่มีอยู่จริงในตาราง users แล้ว
+        // (ถูกลบตอนล้างข้อมูลจำลอง) ทำให้ insert ชน Foreign Key เสมอ ต้องปฏิเสธคำร้องแทนที่จะเดา ID มั่ว
+        return res.status(400).json({
+          success: false,
+          message: 'ไม่พบบัญชีผู้ใช้ของนักเรียนในระบบ กรุณาออกจากระบบแล้วเข้าสู่ระบบใหม่อีกครั้งก่อนยื่นคำร้อง'
+        });
       }
 
       // ตรวจสอบคำร้องเดิมที่ยังไม่หมดเวลา (ป้องกันการยื่นคำร้องซ้ำ)
@@ -3882,13 +3879,13 @@ app.post('/api/requests', async (req, res) => {
         console.warn('⚠️ [TELEGRAM] Notify approver queue error on create:', tgErr.message);
       }
 
-      if (step1Skipped) {
+      if (ttMatch.step1Skipped) {
         sendLineNotification(
           `\n📩 [OnePass คำร้องใหม่ - ข้ามขั้นครูรายวิชาอัตโนมัติ]\n` +
           `• คำร้อง: ${requestNo}\n` +
           `• นักเรียน: ${studentDisplay} (${resolvedDept})\n` +
           `• ช่วงเวลา: ${depTime} - ${isNoReturn ? 'ลากลับบ้าน' : retTime} น.\n` +
-          `• ขั้นที่ 1: ข้ามครูรายวิชา (${step1SkipReason})\n` +
+          `• ขั้นที่ 1: ข้ามครูรายวิชา (${ttMatch.step1SkipReason})\n` +
           `• คิวปัจจุบัน: ขั้นที่ 2 รอ "${firstTargetApprover ? firstTargetApprover.name : 'ครูที่ปรึกษา'}" อนุมัติ`
         );
       } else {
@@ -3897,14 +3894,14 @@ app.post('/api/requests', async (req, res) => {
           const otherNames = ttMatch.notifiedTeachers.map(t => `${t.teacherName} (${t.subjectName} ${t.periodTime})`).join(', ');
           multiNotice = `\n• แจ้งทราบครูคาบถัดไป: ${otherNames}`;
         }
-        const verifyNotice = advisorFlagVerify ? `\n• 🚩 หมายเหตุ: นักเรียนเลือกครูรายวิชาด้วยตนเอง (ไม่พบตารางสอน)` : '';
+        const verifyNotice = ttMatch.advisorFlagVerify ? `\n• 🚩 หมายเหตุ: นักเรียนเลือกครูรายวิชาด้วยตนเอง (ไม่พบตารางสอน)` : '';
         sendLineNotification(
           `\n📩 [OnePass คำร้องใหม่ถึงคิวขั้นที่ 1: ครูรายวิชา]\n` +
           `• คำร้อง: ${requestNo}\n` +
           `• นักเรียน: ${studentDisplay} (${resolvedDept})\n` +
           `• ช่วงเวลา: ${depTime} - ${isNoReturn ? 'ลากลับบ้าน' : retTime} น.\n` +
-          `• วิชาที่ตรงคาบ: ${snapshotSubjectName} (${snapshotPeriodTime})\n` +
-          `• รอการอนุมัติจาก: ${snapshotTeacherName}${multiNotice}${verifyNotice}`
+          `• วิชาที่ตรงคาบ: ${ttMatch.primaryPeriod ? ttMatch.primaryPeriod.subjectName : 'ไม่พบข้อมูลตารางสอน'} (${snapshotPeriodTime})\n` +
+          `• รอการอนุมัติจาก: ${ttMatch.primaryPeriod ? ttMatch.primaryPeriod.teacherName : 'ครูรายวิชา'}${multiNotice}${verifyNotice}`
         );
       }
 
@@ -3916,12 +3913,20 @@ app.post('/api/requests', async (req, res) => {
           match: ttMatch
         });
       } else if (error) {
+        // เดิมโค้ดจุดนี้ไม่ return เลย ปล่อยให้ไหลไปตอบ success:true ปลอมที่ด้านล่าง (บั๊กใหญ่ - คำร้องไม่ถูกบันทึกจริง
+        // แต่ผู้ใช้เห็นว่าสำเร็จ) เช่น เมื่อ student_id อ้างอิง foreign key ที่ไม่มีอยู่จริงในตาราง users
         console.error('MySQL request insert error:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'บันทึกคำร้องไม่สำเร็จ: ' + error.message
+        });
       }
     } catch (err) {
       console.error('Create request error:', err);
+      return res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการบันทึกคำร้อง: ' + err.message });
     }
   }
+  // ทางนี้ถูกใช้เฉพาะตอนไม่ได้เชื่อมต่อ MySQL เลย (โหมดสาธิต/Local JSON เท่านั้น - ไม่ใช่ error path)
   res.json({ success: true, request: { id: Date.now(), requestNo, currentStep: initialStep, status: initialStatus } });
 });
 
