@@ -6771,9 +6771,11 @@ async function exportRequestsToExcel() {
 let adminUsersCache = [];
 let currentAdminTab = 'users';
 
+let gateStatusPollInterval = null;
+
 function switchAdminTab(tabName) {
   currentAdminTab = tabName;
-  const tabs = ['users', 'depts', 'timetables', 'settings', 'import_students', 'devices'];
+  const tabs = ['users', 'depts', 'timetables', 'settings', 'import_students', 'devices', 'gate_status'];
   tabs.forEach(t => {
     const btn = document.getElementById(`admin-tab-btn-${t}`);
     const panel = document.getElementById(`admin-panel-${t}`);
@@ -6797,12 +6799,139 @@ function switchAdminTab(tabName) {
     }
   });
 
+  if (gateStatusPollInterval) {
+    clearInterval(gateStatusPollInterval);
+    gateStatusPollInterval = null;
+  }
+
   if (tabName === 'users') loadAdminUsers();
   else if (tabName === 'depts') loadAdminDepartments();
   else if (tabName === 'timetables') loadAdminTimetables();
   else if (tabName === 'import_students') fetchAdminImportLogs();
   else if (tabName === 'settings') loadAdminSettings();
   else if (tabName === 'devices') fetchPendingDeviceRequests();
+  else if (tabName === 'gate_status') {
+    fetchGateDeviceStatus();
+    gateStatusPollInterval = setInterval(fetchGateDeviceStatus, 3000);
+  }
+}
+
+async function fetchGateDeviceStatus() {
+  const box = document.getElementById('gate-status-list');
+  if (!box) return;
+  try {
+    const res = await fetch('/api/device/status', {
+      headers: { 'Authorization': 'Bearer ' + getAuthToken() }
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || 'โหลดสถานะไม่สำเร็จ');
+
+    const items = [
+      {
+        label: 'บอร์ด ESP32 (ออนไลน์)',
+        icon: 'fa-microchip',
+        ok: data.board_online,
+        detail: data.board_online ? ('อัปเดตล่าสุด: ' + new Date(data.last_update).toLocaleTimeString('th-TH')) : 'ไม่มีรายงานเข้ามาเกิน 15 วินาที'
+      },
+      {
+        label: 'WiFi',
+        icon: 'fa-wifi',
+        ok: data.board_online && data.wifi,
+        detail: (data.board_online && data.wifi) ? ('IP: ' + data.wifi_ip) : 'ไม่พบสัญญาณ'
+      },
+      {
+        label: 'เซนเซอร์ Ultrasonic',
+        icon: 'fa-ruler',
+        ok: data.board_online && data.ultrasonic,
+        detail: (data.board_online && data.ultrasonic) ? ('ระยะ ~' + data.ultrasonic_distance + ' ซม.') : 'ไม่มีสัญญาณตอบกลับ'
+      },
+      {
+        label: 'ปุ่มฉุกเฉิน',
+        icon: 'fa-circle-dot',
+        ok: data.board_online,
+        detail: !data.board_online ? '-' : (data.button_pressed ? 'กำลังกดอยู่' : 'ว่าง (ปกติ)')
+      },
+      {
+        label: 'สัญญาณไฟเขียว',
+        icon: 'fa-circle',
+        ok: data.board_online,
+        detail: data.board_online ? 'สั่งงานทุกรอบ (ดูด้วยตา)' : '-'
+      },
+      {
+        label: 'สัญญาณไฟเหลือง',
+        icon: 'fa-circle',
+        ok: data.board_online,
+        detail: data.board_online ? 'สั่งงานทุกรอบ (ดูด้วยตา)' : '-'
+      },
+      {
+        label: 'สัญญาณไฟแดง',
+        icon: 'fa-circle',
+        ok: data.board_online,
+        detail: data.board_online ? 'สั่งงานทุกรอบ (ดูด้วยตา)' : '-'
+      },
+      {
+        label: 'ไม้กั้น (Servo)',
+        icon: 'fa-road-barrier',
+        ok: data.board_online,
+        detail: data.board_online ? 'สั่งงานทุกรอบ (ดูด้วยตาว่าขยับจริง)' : '-'
+      },
+      {
+        label: 'โมดูลสแกน QR',
+        icon: 'fa-qrcode',
+        ok: data.board_online && data.qr_connected,
+        detail: !data.board_online ? '-' : (data.qr_connected ? 'เคยรับข้อมูลจากโมดูลแล้ว' : 'ยังไม่เคยมีข้อมูลเข้ามา ลองสแกนทดสอบ')
+      },
+      {
+        label: 'ลำโพง',
+        icon: 'fa-volume-high',
+        ok: data.board_online,
+        detail: data.board_online ? 'ส่งเสียงทดสอบทุกรอบ (ฟังด้วยหู)' : '-'
+      }
+    ];
+
+    box.innerHTML = items.map(it => `
+      <div class="flex items-center justify-between bg-slate-50 border border-slate-200 rounded-2xl px-3.5 py-2.5">
+        <div class="flex items-center gap-2.5 min-w-0">
+          <i class="fa-solid ${it.icon} text-blue-600 text-sm shrink-0"></i>
+          <div class="min-w-0">
+            <div class="text-xs font-bold text-slate-800 truncate">${it.label}</div>
+            <div class="text-[11px] text-slate-500 truncate">${it.detail}</div>
+          </div>
+        </div>
+        <span class="px-2.5 py-1 rounded-full text-[11px] font-bold text-white shrink-0 ${it.ok ? 'bg-emerald-500' : 'bg-rose-500'}">
+          ${it.ok ? 'เชื่อมต่อสำเร็จ' : 'ไม่ได้เชื่อมต่อ'}
+        </span>
+      </div>
+    `).join('');
+  } catch (err) {
+    box.innerHTML = `<p class="text-rose-500 text-xs">โหลดสถานะไม่สำเร็จ: ${err.message}</p>`;
+  }
+}
+
+async function handleGateTestOpen() {
+  const btn = document.getElementById('btn-gate-test-open');
+  if (!btn) return;
+  const originalHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> กำลังส่งคำสั่ง...';
+
+  try {
+    const res = await fetch('/api/device/test-open', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + getAuthToken()
+      }
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || 'ส่งคำสั่งไม่สำเร็จ');
+    alert('✅ ' + (data.message || 'ส่งคำสั่งทดสอบเปิดไม้กั้นแล้ว'));
+  } catch (err) {
+    alert('❌ ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = originalHtml;
+  }
 }
 
 async function initAdminPanel() {

@@ -1342,6 +1342,89 @@ let simulatorState = {
   lastUpdated: new Date().toISOString()
 };
 
+// สถานะฮาร์ดแวร์ล่าสุดที่บอร์ด ESP32 รายงานเข้ามา (หน้าแอดมินใช้แสดงผล)
+let gateDeviceStatus = {
+  wifi: false,
+  wifi_ip: null,
+  ultrasonic: false,
+  ultrasonic_distance: -1,
+  button_pressed: false,
+  output_cycle: false,
+  qr_connected: false,
+  last_update: null
+};
+const DEVICE_STATUS_STALE_MS = 15000; // ไม่มีรายงานเข้ามาเกิน 15 วิ ถือว่าออฟไลน์
+let pendingDeviceCommand = null; // คำสั่งทดสอบที่รอส่งให้บอร์ดรอบถัดไปที่รายงานสถานะเข้ามา
+
+// บอร์ด ESP32 ยิงสถานะเข้ามาทุก 3 วิ (ยืนยันตัวตนด้วย key ถ้าตั้งค่า DEVICE_STATUS_KEY ไว้)
+// ตอบกลับพร้อมคำสั่งทดสอบค้างอยู่ (ถ้ามี) ให้บอร์ดทำตามแล้วเคลียร์ทิ้ง
+app.post('/api/device/status', (req, res) => {
+  const expectedKey = process.env.DEVICE_STATUS_KEY;
+  if (expectedKey && req.headers['x-device-key'] !== expectedKey) {
+    return res.status(401).json({ success: false, message: 'Unauthorized device' });
+  }
+
+  const body = req.body || {};
+  gateDeviceStatus = {
+    wifi: !!body.wifi,
+    wifi_ip: body.wifi_ip || null,
+    ultrasonic: !!body.ultrasonic,
+    ultrasonic_distance: typeof body.ultrasonic_distance === 'number' ? body.ultrasonic_distance : -1,
+    button_pressed: !!body.button_pressed,
+    output_cycle: !!body.output_cycle,
+    qr_connected: !!body.qr_connected,
+    last_update: new Date().toISOString()
+  };
+
+  const commandToSend = pendingDeviceCommand;
+  pendingDeviceCommand = null; // ส่งครั้งเดียวแล้วเคลียร์ทิ้ง กันค้างเปิดซ้ำ
+  res.json({ success: true, command: commandToSend });
+});
+
+// แอดมินดึงสถานะล่าสุดไปแสดงในหน้าเว็บ (อัปเดตทุก 3 วิฝั่งหน้าเว็บ)
+app.get('/api/device/status', authenticateToken, requireRole(['admin']), (req, res) => {
+  const isStale = !gateDeviceStatus.last_update ||
+    (Date.now() - new Date(gateDeviceStatus.last_update).getTime() > DEVICE_STATUS_STALE_MS);
+  res.json({ ...gateDeviceStatus, board_online: !isStale });
+});
+
+// แอดมินกดปุ่ม "ทดสอบเปิดไม้กั้น" จากหน้าเว็บ บอร์ดจะรับคำสั่งภายในรอบรายงานถัดไป (≤3 วิ)
+app.post('/api/device/test-open', authenticateToken, requireRole(['admin']), (req, res) => {
+  pendingDeviceCommand = 'OPEN_TEST';
+  res.json({ success: true, message: 'ส่งคำสั่งทดสอบเปิดไม้กั้นแล้ว รอบอร์ดรับคำสั่งภายใน 3 วินาที' });
+});
+
+// สร้าง (หรือรีเซ็ต) คำร้องทดสอบที่สถานะ approved พร้อม qr_token คงที่ ไว้สแกนทดสอบฮาร์ดแวร์ซ้ำได้เรื่อยๆ
+const TEST_QR_TOKEN = 'TEST-GATE-0001';
+app.post('/api/device/create-test-qr', authenticateToken, requireRole(['admin']), async (req, res) => {
+  if (!supabase) return res.status(500).json({ success: false, message: 'ไม่ได้เชื่อมต่อฐานข้อมูล' });
+  try {
+    await db.query('DELETE FROM leave_requests WHERE qr_token = ?', [TEST_QR_TOKEN]);
+
+    const todayStr = getThaiDateStr();
+    await db.insertAutoIncrement('leave_requests', {
+      request_no: 'TEST-' + Date.now(),
+      student_id: req.user.id,
+      student_code: 'TEST',
+      title: 'ทดสอบระบบสแกน QR ฮาร์ดแวร์',
+      reason: 'ทดสอบการเชื่อมต่อโมดูลสแกน QR กับบอร์ด ESP32',
+      leave_date: todayStr,
+      departure_time: '08:00:00',
+      expected_return_time: '16:00:00',
+      status: 'approved',
+      current_step: 6,
+      total_steps: 5,
+      qr_token: TEST_QR_TOKEN,
+      qr_generated_at: new Date().toISOString()
+    });
+
+    res.json({ success: true, qr_token: TEST_QR_TOKEN, message: 'สร้างคำร้องทดสอบสำเร็จ พร้อมสแกนได้เลย' });
+  } catch (err) {
+    console.error('create-test-qr error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // ============================================================================
 // 3. API ENDPOINTS (ผูกกับ MYSQL DB ตรง 100%)
 // ============================================================================

@@ -1,0 +1,113 @@
+<title>QR ทดสอบประตู</title>
+<style>
+  :root {
+    --navy: #1e3a8a;
+    --navy-dark: #172554;
+    --bg: #f8fafc;
+    --surface: #ffffff;
+    --border: #e2e8f0;
+    --text: #0f172a;
+    --muted: #64748b;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0b1220;
+      --surface: #121a2b;
+      --border: #27324a;
+      --text: #e5e9f2;
+      --muted: #93a1b8;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0b1220;
+    --surface: #121a2b;
+    --border: #27324a;
+    --text: #e5e9f2;
+    --muted: #93a1b8;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Noto Sans Thai", sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px 16px;
+  }
+  .card {
+    width: 100%;
+    max-width: 380px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 28px 24px;
+    text-align: center;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .eyebrow {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--navy);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .eyebrow { color: #93c5fd; }
+  }
+  :root[data-theme="dark"] .eyebrow { color: #93c5fd; }
+
+  h1 {
+    margin: 6px 0 20px;
+    font-size: 20px;
+    font-weight: 800;
+  }
+  #qr-box {
+    display: inline-flex;
+    padding: 16px;
+    background: #ffffff;
+    border-radius: 16px;
+    border: 1px solid var(--border);
+  }
+  .token {
+    margin-top: 18px;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--text);
+    word-break: break-all;
+  }
+  .hint {
+    margin-top: 14px;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--muted);
+  }
+</style>
+
+<div class="card">
+  <div class="eyebrow">OnePass Smart Gate</div>
+  <h1>QR ทดสอบระบบสแกน</h1>
+  <div id="qr-box"></div>
+  <div class="token">TEST-GATE-0001</div>
+  <p class="hint">ส่องหน้าจอนี้เข้าโมดูลสแกน QR ที่ต่อกับบอร์ด ESP32<br>เพื่อทดสอบว่าสแกนแล้วสั่งเปิดไม้กั้นได้จริง</p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+  new QRCode(document.getElementById("qr-box"), {
+    text: "TEST-GATE-0001",
+    width: 220,
+    height: 220,
+    colorDark: "#0f172a",
+    colorLight: "#ffffff",
+    correctLevel: QRCode.CorrectLevel.M
+  });
+</script>
