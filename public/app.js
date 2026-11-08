@@ -577,6 +577,7 @@ function onLoginSuccess(user) {
   const roleLabels = {
     student: 'ผู้เรียน',
     teacher: 'ครูอาจารย์',
+    advisor: 'ครูที่ปรึกษา',
     deputy_director: 'รองผู้อำนวยการฝ่ายกิจการนักเรียน นักศึกษา',
     director: 'ผู้อำนวยการ',
     admin: 'ผู้ดูแลระบบ',

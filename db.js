@@ -107,6 +107,13 @@ async function initDatabase() {
     const connection = await getConnectedPool();
     console.log(`[DB] Connected successfully to MySQL (${process.env.DB_NAME || 'ongkharak_std'} on port ${activePort})`);
 
+    // 0. Ensure must_change_password column exists on users table
+    try {
+      await connection.query("ALTER TABLE `users` ADD COLUMN `must_change_password` TINYINT(1) DEFAULT 0");
+    } catch (e) {
+      // Column already exists or no ALTER permission - perfectly safe to ignore
+    }
+
     // 1. Create onepass_requests table
     await connection.query(`
       CREATE TABLE IF NOT EXISTS \`onepass_requests\` (

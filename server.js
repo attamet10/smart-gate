@@ -37,6 +37,11 @@ async function buildUserProfile(user) {
   const uid = user.id;
   const role = user.role;
 
+  const isStudent = (role === 'student');
+  const isTeacherRole = ['teacher', 'advisor', 'subject_teacher', 'head_major', 'head_discipline'].includes(role);
+  const isDeputy = (role === 'deputy_director');
+  const isAdmin = ['admin', 'super_admin'].includes(role);
+
   const profile = {
     id: uid,
     username: user.username,
@@ -45,85 +50,100 @@ async function buildUserProfile(user) {
     role: role,
     position: user.position,
     photo_url: user.photo_url,
-    is_student: role === 'student',
-    is_teacher: role === 'teacher',
-    is_deputy_director: role === 'deputy_director',
+    is_student: isStudent,
+    is_teacher: isTeacherRole,
+    is_deputy_director: isDeputy,
     is_director: role === 'director',
-    is_admin: ['admin', 'super_admin'].includes(role),
+    is_admin: isAdmin,
     roles_held: []
   };
 
-  if (role === 'student') {
-    const [students] = await query(`
-      SELECT s.*, l.name AS level_name, m.name AS major_name,
-             sp.photo_url AS student_photo, sp.prefix_th, sp.first_name_th, sp.last_name_th
-      FROM students s
-      LEFT JOIN levels l ON s.level_id = l.id
-      LEFT JOIN majors m ON s.major_id = m.id
-      LEFT JOIN student_profiles sp ON s.id = sp.student_id
-      WHERE s.user_id = ?
-      LIMIT 1
-    `, [uid]);
+  if (isStudent) {
+    try {
+      const [students] = await query(`
+        SELECT s.*, l.name AS level_name, m.name AS major_name
+        FROM students s
+        LEFT JOIN levels l ON s.level_id = l.id
+        LEFT JOIN majors m ON s.major_id = m.id
+        WHERE s.user_id = ?
+        LIMIT 1
+      `, [uid]);
 
-    if (students.length > 0) {
-      const student = students[0];
-      profile.student_id = student.id;
-      profile.student_code = student.student_code;
-      profile.level_id = student.level_id;
-      profile.major_id = student.major_id;
-      profile.level_name = student.level_name;
-      profile.major_name = student.major_name;
-      profile.room = student.room;
+      if (students && students.length > 0) {
+        const student = students[0];
+        profile.student_id = student.id;
+        profile.student_code = student.student_code;
+        profile.level_id = student.level_id;
+        profile.major_id = student.major_id;
+        profile.level_name = student.level_name;
+        profile.major_name = student.major_name;
+        profile.room = student.room;
+      }
+    } catch (e) {
+      console.warn('[Profile Warning] student query:', e.message);
     }
     profile.roles_held.push('student');
   }
 
-  if (role === 'teacher') {
+  if (isTeacherRole) {
     profile.roles_held.push('subject_teacher'); // All teachers can act as subject teacher
 
     // 1. Advisor check
-    const [advised] = await query(`
-      SELECT aa.id, aa.level_id, aa.major_id, l.name AS level_name, m.name AS major_name
-      FROM advisor_assignments aa
-      JOIN levels l ON aa.level_id = l.id
-      JOIN majors m ON aa.major_id = m.id
-      WHERE aa.teacher_id = ?
-    `, [uid]);
-    profile.is_advisor = advised.length > 0;
-    profile.advised_classes = advised;
-    if (profile.is_advisor) profile.roles_held.push('advisor');
+    try {
+      const [advised] = await query(`
+        SELECT aa.id, aa.level_id, aa.major_id, l.name AS level_name, m.name AS major_name
+        FROM advisor_assignments aa
+        JOIN levels l ON aa.level_id = l.id
+        JOIN majors m ON aa.major_id = m.id
+        WHERE aa.teacher_id = ?
+      `, [uid]);
+      profile.is_advisor = (advised && advised.length > 0) || (role === 'advisor');
+      profile.advised_classes = advised || [];
+      if (profile.is_advisor) profile.roles_held.push('advisor');
+    } catch (e) {
+      if (role === 'advisor') {
+        profile.is_advisor = true;
+        profile.roles_held.push('advisor');
+      }
+    }
 
     // 2. Head of Major check
-    const [majors] = await query(`
-      SELECT id, name FROM majors WHERE head_teacher_id = ?
-    `, [uid]);
-    profile.is_head_major = majors.length > 0;
-    profile.managed_majors = majors;
-    if (profile.is_head_major) profile.roles_held.push('head_major');
+    try {
+      const [majors] = await query(`
+        SELECT id, name FROM majors WHERE head_teacher_id = ?
+      `, [uid]);
+      profile.is_head_major = majors && majors.length > 0;
+      profile.managed_majors = majors || [];
+      if (profile.is_head_major) profile.roles_held.push('head_major');
+    } catch (e) {}
 
     // 3. Head of Discipline check
-    const [discipline] = await query(`
-      SELECT head_of_discipline_user_id FROM gate_duty_assignments WHERE head_of_discipline_user_id = ? LIMIT 1
-    `, [uid]);
-    profile.is_head_discipline = discipline.length > 0;
-    if (profile.is_head_discipline) profile.roles_held.push('head_discipline');
+    try {
+      const [discipline] = await query(`
+        SELECT head_of_discipline_user_id FROM gate_duty_assignments WHERE head_of_discipline_user_id = ? LIMIT 1
+      `, [uid]);
+      profile.is_head_discipline = discipline && discipline.length > 0;
+      if (profile.is_head_discipline) profile.roles_held.push('head_discipline');
+    } catch (e) {}
 
     // 4. Deputy Director check
-    const [deputy] = await query(`
-      SELECT deputy_director_user_id FROM gate_duty_assignments WHERE deputy_director_user_id = ? LIMIT 1
-    `, [uid]);
-    if (deputy.length > 0) {
-      profile.is_deputy_director = true;
-      profile.roles_held.push('deputy_director');
-    }
+    try {
+      const [deputy] = await query(`
+        SELECT deputy_director_user_id FROM gate_duty_assignments WHERE deputy_director_user_id = ? LIMIT 1
+      `, [uid]);
+      if (deputy && deputy.length > 0) {
+        profile.is_deputy_director = true;
+        profile.roles_held.push('deputy_director');
+      }
+    } catch (e) {}
   }
 
-  if (role === 'deputy_director') {
+  if (isDeputy) {
     profile.is_deputy_director = true;
     profile.roles_held.push('deputy_director');
   }
 
-  if (['admin', 'super_admin'].includes(role)) {
+  if (isAdmin) {
     profile.roles_held = ['student', 'subject_teacher', 'advisor', 'head_major', 'head_discipline', 'deputy_director', 'gate_staff', 'admin'];
     profile.is_advisor = true;
     profile.is_head_major = true;
@@ -147,7 +167,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     const [users] = await query('SELECT * FROM users WHERE username = ? LIMIT 1', [username.trim()]);
-    if (users.length === 0) {
+    if (!users || users.length === 0) {
       return res.status(404).json({ success: false, message: 'ไม่พบบัญชีผู้ใช้นี้ในระบบ' });
     }
 
@@ -156,17 +176,23 @@ app.post('/api/auth/login', async (req, res) => {
     let isHashMatch = false;
 
     try {
-      isHashMatch = bcrypt.compareSync(password, user.password_hash);
+      if (user.password_hash) {
+        isHashMatch = bcrypt.compareSync(password, user.password_hash);
+      }
     } catch (e) {
       isHashMatch = false;
     }
 
-    if (!isDefaultPassword && !isHashMatch) {
+    // Support fallback plaintext match if password column exists in legacy schemas
+    const isPlainMatch = (user.password && user.password === password) || (user.password_hash && user.password_hash === password);
+
+    if (!isDefaultPassword && !isHashMatch && !isPlainMatch) {
       return res.status(400).json({ success: false, message: 'รหัสผ่านไม่ถูกต้อง' });
     }
 
-    // Force password change on first use: if must_change_password is 1 OR user logs in with '123456'
-    if (user.must_change_password === 1 || isDefaultPassword) {
+    // Only force password change if the column must_change_password explicitly equals 1
+    // (Does NOT block users when logging in with 123456)
+    if (user.must_change_password === 1) {
       return res.json({
         success: true,
         must_change_password: true,
@@ -174,11 +200,11 @@ app.post('/api/auth/login', async (req, res) => {
         username: user.username,
         full_name: user.full_name,
         role: user.role,
-        message: 'เข้าสู่ระบบสำเร็จ กรุณาเปลี่ยนรหัสผ่านใหม่ก่อนเริ่มใช้งาน'
+        message: 'กรุณาเปลี่ยนรหัสผ่านใหม่ก่อนเริ่มใช้งาน'
       });
     }
 
-    // Normal login
+    // Normal direct login
     const fullProfile = await buildUserProfile(user);
     res.json({
       success: true,
@@ -213,9 +239,17 @@ app.post('/api/auth/change-password-first-time', async (req, res) => {
     const salt = bcrypt.genSaltSync(10);
     const hash = bcrypt.hashSync(new_password, salt);
 
-    await query('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?', [hash, user_id]);
+    try {
+      await query('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?', [hash, user_id]);
+    } catch (colErr) {
+      // Fallback if must_change_password column does not exist
+      await query('UPDATE users SET password_hash = ? WHERE id = ?', [hash, user_id]);
+    }
 
     const [users] = await query('SELECT * FROM users WHERE id = ? LIMIT 1', [user_id]);
+    if (!users || users.length === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลผู้ใช้' });
+    }
     const fullProfile = await buildUserProfile(users[0]);
 
     res.json({
