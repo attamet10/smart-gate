@@ -1584,10 +1584,10 @@ function setViewMode(mode) {
   // ล็อคและรักษาสิทธิ์การแสดง/ซ่อนแท็บเมนูล่างตาม Role เสมอ 100% ทุกครั้งที่มีการเปลี่ยนหน้า
   updateBottomNavVisibility(u);
 
-  // แถบเมนูด้านล่างแสดงตลอดทุกหน้าหลัง Login (ตามคำขอ - ไม่ซ่อนแม้แต่หน้าฟอร์ม/Admin)
+  // แถบเมนูด้านล่างแสดงทุกหน้าหลัง Login ยกเว้นหน้า Admin (ใช้เมนู sidebar ด้านซ้ายแทนอยู่แล้ว)
   const mobileBottomNav = document.getElementById('mobile-bottom-nav');
   if (mobileBottomNav) {
-    mobileBottomNav.classList.remove('hidden');
+    mobileBottomNav.classList.toggle('hidden', mode === 'admin');
   }
 
   // หยุด Timer หมุนเวียน QR เมื่อสลับไปหน้าอื่น
