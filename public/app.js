@@ -7351,12 +7351,36 @@ function openAddUserModal() {
     modal.classList.remove('hidden');
     handleAdminAddUserRoleChange();
   }
+  document.querySelectorAll('.admin-new-subject-classroom-cb').forEach(cb => { cb.checked = false; });
+  updateSubjectClassroomSummary();
+  document.getElementById('admin-new-subject-classroom-panel')?.classList.add('hidden');
 }
 
 function closeAddUserModal() {
   const modal = document.getElementById('modal-admin-add-user');
   if (modal) modal.classList.add('hidden');
 }
+
+function toggleSubjectClassroomDropdown(e) {
+  if (e) e.stopPropagation();
+  document.getElementById('admin-new-subject-classroom-panel')?.classList.toggle('hidden');
+}
+
+function updateSubjectClassroomSummary() {
+  const summaryEl = document.getElementById('admin-new-subject-classroom-summary');
+  if (!summaryEl) return;
+  const selected = Array.from(document.querySelectorAll('.admin-new-subject-classroom-cb:checked')).map(cb => cb.value);
+  summaryEl.textContent = selected.length ? selected.join(', ') : 'เลือกชั้นที่สอน';
+}
+
+document.addEventListener('click', (e) => {
+  const panel = document.getElementById('admin-new-subject-classroom-panel');
+  const trigger = document.getElementById('admin-new-subject-classroom-trigger');
+  if (!panel || panel.classList.contains('hidden')) return;
+  if (!panel.contains(e.target) && e.target !== trigger && !trigger?.contains(e.target)) {
+    panel.classList.add('hidden');
+  }
+});
 
 async function handleAdminCreateUser(e) {
   if (e) e.preventDefault();

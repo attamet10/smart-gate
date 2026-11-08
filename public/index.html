@@ -3492,24 +3492,29 @@
             </select>
           </div>
 
-          <!-- ชั้นที่สอน สำหรับครูรายวิชา (เลือกได้หลายชั้น เพราะครู 1 คนมักสอนหลายชั้นปี) -->
-          <div id="admin-add-subject-classroom-box" class="hidden">
+          <!-- ชั้นที่สอน สำหรับครูรายวิชา (เลือกได้หลายชั้น เพราะครู 1 คนมักสอนหลายชั้นปี) - dropdown ที่กดแล้วเด้ง checkbox -->
+          <div id="admin-add-subject-classroom-box" class="hidden relative">
             <label class="block text-slate-700 font-semibold mb-1 text-xs">ชั้นที่สอน (เลือกได้หลายชั้น)</label>
-            <div class="grid grid-cols-3 gap-2">
+            <button type="button" id="admin-new-subject-classroom-trigger" onclick="toggleSubjectClassroomDropdown(event)"
+                    class="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs sm:text-sm focus:outline-none focus:border-cyan-500 font-bold text-emerald-800 flex items-center justify-between gap-2 text-left">
+              <span id="admin-new-subject-classroom-summary" class="truncate">เลือกชั้นที่สอน</span>
+              <i class="fa-solid fa-chevron-down text-[10px] text-slate-400 shrink-0"></i>
+            </button>
+            <div id="admin-new-subject-classroom-panel" class="hidden absolute z-10 mt-1 w-full p-2 bg-white border border-slate-200 rounded-xl shadow-lg grid grid-cols-3 gap-2">
               <label class="flex items-center gap-1.5 px-2 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs cursor-pointer hover:border-cyan-400">
-                <input type="checkbox" class="admin-new-subject-classroom-cb w-3.5 h-3.5" value="ปวช.1"> ปวช.1
+                <input type="checkbox" class="admin-new-subject-classroom-cb w-3.5 h-3.5" value="ปวช.1" onchange="updateSubjectClassroomSummary()"> ปวช.1
               </label>
               <label class="flex items-center gap-1.5 px-2 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs cursor-pointer hover:border-cyan-400">
-                <input type="checkbox" class="admin-new-subject-classroom-cb w-3.5 h-3.5" value="ปวช.2"> ปวช.2
+                <input type="checkbox" class="admin-new-subject-classroom-cb w-3.5 h-3.5" value="ปวช.2" onchange="updateSubjectClassroomSummary()"> ปวช.2
               </label>
               <label class="flex items-center gap-1.5 px-2 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs cursor-pointer hover:border-cyan-400">
-                <input type="checkbox" class="admin-new-subject-classroom-cb w-3.5 h-3.5" value="ปวช.3"> ปวช.3
+                <input type="checkbox" class="admin-new-subject-classroom-cb w-3.5 h-3.5" value="ปวช.3" onchange="updateSubjectClassroomSummary()"> ปวช.3
               </label>
               <label class="flex items-center gap-1.5 px-2 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs cursor-pointer hover:border-cyan-400">
-                <input type="checkbox" class="admin-new-subject-classroom-cb w-3.5 h-3.5" value="ปวส.1"> ปวส.1
+                <input type="checkbox" class="admin-new-subject-classroom-cb w-3.5 h-3.5" value="ปวส.1" onchange="updateSubjectClassroomSummary()"> ปวส.1
               </label>
               <label class="flex items-center gap-1.5 px-2 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs cursor-pointer hover:border-cyan-400">
-                <input type="checkbox" class="admin-new-subject-classroom-cb w-3.5 h-3.5" value="ปวส.2"> ปวส.2
+                <input type="checkbox" class="admin-new-subject-classroom-cb w-3.5 h-3.5" value="ปวส.2" onchange="updateSubjectClassroomSummary()"> ปวส.2
               </label>
             </div>
             <p class="text-[10px] text-slate-400 mt-1">ไม่เลือกก็บันทึกได้ — ระบบจะเพิ่มชั้นให้อัตโนมัติเองทีหลังตอนนำเข้าตารางสอนที่มีชื่อครูท่านนี้</p>
