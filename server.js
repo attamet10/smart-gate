@@ -1416,6 +1416,25 @@ app.post('/api/device/test-open', authenticateToken, requireRole(['admin']), (re
   res.json({ success: true, message: 'ส่งคำสั่งทดสอบเปิดไม้กั้นแล้ว รอบอร์ดรับคำสั่งภายใน 3 วินาที' });
 });
 
+// แอดมินกดปุ่มทดสอบอุปกรณ์แยกทีละชิ้น (Servo/LED/Relay/บัซเซอร์) จากหน้าเว็บ
+const DEVICE_TEST_COMPONENT_COMMANDS = {
+  servo: 'TEST_SERVO',
+  led_green: 'TEST_LED_GREEN',
+  led_red: 'TEST_LED_RED',
+  led_yellow: 'TEST_LED_YELLOW',
+  relay: 'TEST_RELAY',
+  buzzer: 'TEST_BUZZER'
+};
+app.post('/api/device/test-component', authenticateToken, requireRole(['admin']), (req, res) => {
+  const component = String((req.body || {}).component || '').trim().toLowerCase();
+  const command = DEVICE_TEST_COMPONENT_COMMANDS[component];
+  if (!command) {
+    return res.status(400).json({ success: false, message: `ไม่รู้จักอุปกรณ์ "${component}"` });
+  }
+  pendingDeviceCommand = command;
+  res.json({ success: true, message: `ส่งคำสั่งทดสอบ ${component} แล้ว รอบอร์ดรับคำสั่งภายใน 3 วินาที` });
+});
+
 // สร้าง (หรือรีเซ็ต) คำร้องทดสอบที่สถานะ approved พร้อม qr_token คงที่ ไว้สแกนทดสอบฮาร์ดแวร์ซ้ำได้เรื่อยๆ
 const TEST_QR_TOKEN = 'TEST-GATE-0001';
 app.post('/api/device/create-test-qr', authenticateToken, requireRole(['admin']), async (req, res) => {

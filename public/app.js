@@ -6934,6 +6934,32 @@ async function handleGateTestOpen() {
   }
 }
 
+async function handleGateTestComponent(component, btnEl) {
+  if (!btnEl) return;
+  const originalHtml = btnEl.innerHTML;
+  btnEl.disabled = true;
+  btnEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+
+  try {
+    const res = await fetch('/api/device/test-component', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + getAuthToken()
+      },
+      body: JSON.stringify({ component })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || 'ส่งคำสั่งไม่สำเร็จ');
+    alert('✅ ' + (data.message || 'ส่งคำสั่งทดสอบแล้ว'));
+  } catch (err) {
+    alert('❌ ' + err.message);
+  } finally {
+    btnEl.disabled = false;
+    btnEl.innerHTML = originalHtml;
+  }
+}
+
 async function initAdminPanel() {
   const user = getCurrentUser();
   if (!user || user.role !== 'admin') {

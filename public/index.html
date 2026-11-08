@@ -2755,6 +2755,18 @@
           <button type="button" id="btn-gate-test-open" onclick="handleGateTestOpen()" class="w-full py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-sm">
             <i class="fa-solid fa-door-open"></i> ทดสอบเปิดไม้กั้น
           </button>
+
+          <div class="pt-2 border-t border-slate-100">
+            <p class="text-[11px] text-slate-500 mb-2">หรือทดสอบทีละชิ้น (สั่งสั้นๆ แล้วคืนค่าเดิมทันที):</p>
+            <div class="grid grid-cols-3 gap-2">
+              <button type="button" onclick="handleGateTestComponent('servo', this)" class="py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[11px] font-bold transition">Servo</button>
+              <button type="button" onclick="handleGateTestComponent('led_green', this)" class="py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[11px] font-bold transition">LED เขียว</button>
+              <button type="button" onclick="handleGateTestComponent('led_red', this)" class="py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[11px] font-bold transition">LED แดง</button>
+              <button type="button" onclick="handleGateTestComponent('led_yellow', this)" class="py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[11px] font-bold transition">LED เหลือง</button>
+              <button type="button" onclick="handleGateTestComponent('relay', this)" class="py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[11px] font-bold transition">Relay</button>
+              <button type="button" onclick="handleGateTestComponent('buzzer', this)" class="py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[11px] font-bold transition">บัซเซอร์</button>
+            </div>
+          </div>
         </div>
       </div>
       <!-- End of right main content area -->

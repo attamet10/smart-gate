@@ -283,6 +283,24 @@ void reportStatus() {
   if (response.indexOf("\"command\":\"OPEN_TEST\"") >= 0) {
     Serial.println("🔔 ได้รับคำสั่งทดสอบเปิดไม้กั้นจากแอดมิน");
     testOpenSequence();
+  } else if (response.indexOf("\"command\":\"TEST_SERVO\"") >= 0) {
+    Serial.println("🔔 ได้รับคำสั่งทดสอบ Servo จากแอดมิน");
+    testServoOnly();
+  } else if (response.indexOf("\"command\":\"TEST_LED_GREEN\"") >= 0) {
+    Serial.println("🔔 ได้รับคำสั่งทดสอบ LED เขียวจากแอดมิน");
+    testLedOnly(PIN_LED_GREEN, "เขียว");
+  } else if (response.indexOf("\"command\":\"TEST_LED_RED\"") >= 0) {
+    Serial.println("🔔 ได้รับคำสั่งทดสอบ LED แดงจากแอดมิน");
+    testLedOnly(PIN_LED_RED, "แดง");
+  } else if (response.indexOf("\"command\":\"TEST_LED_YELLOW\"") >= 0) {
+    Serial.println("🔔 ได้รับคำสั่งทดสอบ LED เหลืองจากแอดมิน");
+    testLedOnly(PIN_LED_YELLOW, "เหลือง");
+  } else if (response.indexOf("\"command\":\"TEST_RELAY\"") >= 0) {
+    Serial.println("🔔 ได้รับคำสั่งทดสอบ Relay จากแอดมิน");
+    testRelayOnly();
+  } else if (response.indexOf("\"command\":\"TEST_BUZZER\"") >= 0) {
+    Serial.println("🔔 ได้รับคำสั่งทดสอบบัซเซอร์จากแอดมิน");
+    testBuzzerOnly();
   }
 }
 
@@ -302,6 +320,36 @@ void testOpenSequence() {
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_RED, HIGH);
   Serial.println("✅ ทดสอบเปิด-ปิดไม้กั้นเสร็จสิ้น");
+}
+
+// ทดสอบอุปกรณ์ทีละชิ้น (ปุ่มแยกในหน้าแอดมิน) - สั่งงานสั้นๆ ให้เห็น/ได้ยินผลแล้วคืนค่าเดิม
+void testServoOnly() {
+  gateServo.write(90);
+  delay(800);
+  gateServo.write(0);
+  Serial.println("✅ ทดสอบ Servo เสร็จสิ้น");
+}
+
+void testLedOnly(int pin, const char* name) {
+  digitalWrite(pin, HIGH);
+  delay(800);
+  digitalWrite(pin, LOW);
+  Serial.print("✅ ทดสอบ LED ");
+  Serial.print(name);
+  Serial.println(" เสร็จสิ้น");
+}
+
+void testRelayOnly() {
+  digitalWrite(PIN_RELAY, HIGH);
+  delay(800);
+  digitalWrite(PIN_RELAY, LOW);
+  Serial.println("✅ ทดสอบ Relay เสร็จสิ้น");
+}
+
+void testBuzzerOnly() {
+  tone(PIN_SPEAKER, 1500, 400);
+  delay(400);
+  Serial.println("✅ ทดสอบบัซเซอร์เสร็จสิ้น");
 }
 
 void setup() {
