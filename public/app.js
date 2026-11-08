@@ -4207,11 +4207,18 @@ function selectPeriodPreset(start, end, label) {
     btn.classList.remove('bg-blue-600', 'text-white', 'border-blue-600');
     btn.classList.add('bg-white', 'text-slate-700', 'border-slate-200');
   });
-  if (window.event && window.event.currentTarget) {
-    const target = window.event.currentTarget;
-    target.classList.remove('bg-white', 'text-slate-700', 'border-slate-200');
-    target.classList.add('bg-blue-600', 'text-white', 'border-blue-600');
+  // หากเลือกพักกลางวัน (12:00 - 13:00 น.) -> ข้ามขั้นครูรายวิชาอัตโนมัติ ส่งตรงถึงครูที่ปรึกษา
+  if (label === 'พักกลางวัน' || start === '12:00') {
+    if (typeof setFreePeriodMode === 'function') {
+      setFreePeriodMode(true, 'ช่วงพักกลางวัน (12:00 - 13:00 น.)');
+    }
+  } else if (window.isFreePeriodMode && label !== 'ช่วงเช้า' && label !== 'ช่วงบ่าย') {
+    if (typeof setFreePeriodMode === 'function') {
+      setFreePeriodMode(false);
+    }
   }
+
+  if (typeof triggerAutoSaveDraft === 'function') triggerAutoSaveDraft();
 }
 
 // ====================== LEAVE DATE PICKER (วันนี้ / พรุ่งนี้ / ล่วงหน้า) ======================
@@ -4640,35 +4647,134 @@ function toggleNoReturn(isChecked) {
   }
 }
 
-// ====================== เลือกครูรายวิชาโดยตรงจากฐานข้อมูล (แทนที่ระบบจับคู่ตารางสอนอัตโนมัติที่ถูกยกเลิก) ======================
-let cachedTeachersList = [];
+// ====================== เลือกครูรายวิชาโดยตรงจากฐานข้อมูล (โหลดไว 0ms + ข้ามขั้นพักกลางวัน/คาบว่าง) ======================
+const DEFAULT_SYSTEM_TEACHERS = [
+  { username: 'subject_auto', fullName: 'อ.วิชัย เครื่องยนต์', full_name: 'อ.วิชัย เครื่องยนต์', dept: 'แผนกวิชาช่างยนต์' },
+  { username: 'teacher_auto', fullName: 'อ.อนุสรณ์ ช่างยนต์', full_name: 'อ.อนุสรณ์ ช่างยนต์', dept: 'แผนกวิชาช่างยนต์ (ครูที่ปรึกษา)' },
+  { username: 'head_auto', fullName: 'อ.ประสิทธิ์ ยานยนต์', full_name: 'อ.ประสิทธิ์ ยานยนต์', dept: 'แผนกวิชาช่างยนต์ (หัวหน้าแผนก)' },
+  { username: 'subject_electric', fullName: 'อ.ธีรพงษ์ วงจรไฟฟ้า', full_name: 'อ.ธีรพงษ์ วงจรไฟฟ้า', dept: 'แผนกวิชาช่างไฟฟ้า' },
+  { username: 'teacher_electric', fullName: 'อ.กิตติศักดิ์ ไฟฟ้า', full_name: 'อ.กิตติศักดิ์ ไฟฟ้า', dept: 'แผนกวิชาช่างไฟฟ้า (ครูที่ปรึกษา)' },
+  { username: 'head_electric', fullName: 'อ.สมศักดิ์ พลังงาน', full_name: 'อ.สมศักดิ์ พลังงาน', dept: 'แผนกวิชาช่างไฟฟ้า (หัวหน้าแผนก)' },
+  { username: 'subject_account', fullName: 'อ.กมลชนก การเงิน', full_name: 'อ.กมลชนก การเงิน', dept: 'แผนกวิชาการบัญชี' },
+  { username: 'teacher_account', fullName: 'อ.พิมพา บัญชี', full_name: 'อ.พิมพา บัญชี', dept: 'แผนกวิชาการบัญชี (ครูที่ปรึกษา)' },
+  { username: 'head_account', fullName: 'อ.วรรณา ยอดเงิน', full_name: 'อ.วรรณา ยอดเงิน', dept: 'แผนกวิชาการบัญชี (หัวหน้าแผนก)' },
+  { username: 'subject_digital', fullName: 'อ.ปิยะพงษ์ โปรแกรม', full_name: 'อ.ปิยะพงษ์ โปรแกรม', dept: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล' },
+  { username: 'teacher_digital', fullName: 'อ.ธนากร ดิจิทัล', full_name: 'อ.ธนากร ดิจิทัล', dept: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล (ครูที่ปรึกษา)' },
+  { username: 'head_digital', fullName: 'อ.ณัฐพงษ์ เทคโนโลยี', full_name: 'อ.ณัฐพงษ์ เทคโนโลยี', dept: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล (หัวหน้าแผนก)' },
+  { username: 'subject_office', fullName: 'อ.วิภาดา ธุรการ', full_name: 'อ.วิภาดา ธุรการ', dept: 'แผนกวิชาการจัดการสำนักงาน' },
+  { username: 'teacher_office', fullName: 'อ.นภาวรรณ สำนักงาน', full_name: 'อ.นภาวรรณ สำนักงาน', dept: 'แผนกวิชาการจัดการสำนักงาน (ครูที่ปรึกษา)' },
+  { username: 'head_office', fullName: 'อ.สุภาณี การจัดการ', full_name: 'อ.สุภาณี การจัดการ', dept: 'แผนกวิชาการจัดการสำนักงาน (หัวหน้าแผนก)' },
+  { username: 'subject_common', fullName: 'อ.สายชล สามัญศึกษา', full_name: 'อ.สายชล สามัญศึกษา', dept: 'แผนกวิชาสามัญสัมพันธ์' }
+];
+
+let cachedTeachersList = [...DEFAULT_SYSTEM_TEACHERS];
+window.isFreePeriodMode = false;
+
+// จัดการโหมดคาบว่าง / พักกลางวัน (ไม่ต้องกรอกครูรายวิชา -> ส่งตรงถึงครูที่ปรึกษา)
+function setFreePeriodMode(active, reason = 'พักกลางวัน / คาบว่าง') {
+  window.isFreePeriodMode = Boolean(active);
+  const boxNotice = document.getElementById('box-free-period-notice');
+  const noticeText = document.getElementById('free-period-notice-text');
+  const wrapperTeacher = document.getElementById('wrapper-teacher-select');
+  const btnToggle = document.getElementById('btn-toggle-free-period');
+  const star = document.getElementById('form-teacher-required-star');
+  const sel = document.getElementById('form-manual-teacher-select');
+
+  if (window.isFreePeriodMode) {
+    if (boxNotice) boxNotice.classList.remove('hidden');
+    if (noticeText) noticeText.textContent = `✓ ${reason}: ไม่ต้องกรอกครูรายวิชา ระบบจะส่งตรงถึง "ครูที่ปรึกษา (ขั้นที่ 2/5)" ทันที`;
+    if (wrapperTeacher) wrapperTeacher.classList.add('hidden');
+    if (star) star.classList.add('hidden');
+    if (btnToggle) {
+      btnToggle.className = 'px-2.5 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-emerald-500 bg-emerald-600 text-white shadow-2xs active:scale-95';
+      btnToggle.innerHTML = '<i class="fa-solid fa-check"></i> <span>ข้ามขั้นครูรายวิชาแล้ว (ส่งตรงครูที่ปรึกษา)</span>';
+    }
+    if (sel) sel.value = 'SKIP_FREE_PERIOD';
+  } else {
+    if (boxNotice) boxNotice.classList.add('hidden');
+    if (wrapperTeacher) wrapperTeacher.classList.remove('hidden');
+    if (star) star.classList.remove('hidden');
+    if (btnToggle) {
+      btnToggle.className = 'px-2.5 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 shadow-2xs active:scale-95';
+      btnToggle.innerHTML = '<i class="fa-solid fa-mug-hot text-amber-600"></i> <span>☕ คาบว่าง / พักกลางวัน (ข้ามไปครูที่ปรึกษา)</span>';
+    }
+    if (sel && sel.value === 'SKIP_FREE_PERIOD') sel.value = '';
+  }
+}
+window.setFreePeriodMode = setFreePeriodMode;
+
+function toggleFreeOrLunchPeriod() {
+  setFreePeriodMode(!window.isFreePeriodMode, 'คาบว่าง / ไม่มีวิชาเรียน');
+}
+window.toggleFreeOrLunchPeriod = toggleFreeOrLunchPeriod;
+
+function cancelFreePeriodMode() {
+  setFreePeriodMode(false);
+}
+window.cancelFreePeriodMode = cancelFreePeriodMode;
+
+function onManualTeacherChange(val) {
+  if (val === 'SKIP_FREE_PERIOD') {
+    setFreePeriodMode(true, 'พักกลางวัน / คาบว่าง');
+  } else if (window.isFreePeriodMode) {
+    setFreePeriodMode(false);
+  }
+}
+window.onManualTeacherChange = onManualTeacherChange;
+
+// เติมรายชื่อครูทั้งหมดในระบบลง Dropdown (แสดงผลทันที 0ms ไม่ให้ค้างหมุน)
+async function populateManualTeacherSelect(preferredUsername = '') {
+  const manualSelect = document.getElementById('form-manual-teacher-select');
+  if (!manualSelect) return;
+
+  const currentVal = preferredUsername || manualSelect.value;
+  const teachers = (cachedTeachersList && cachedTeachersList.length > 0) ? cachedTeachersList : DEFAULT_SYSTEM_TEACHERS;
+
+  const optionsHtml = [
+    `<option value="">-- เลือกครูรายวิชา (หรือเลือกคาบว่าง/พักกลางวัน) --</option>`,
+    `<option value="SKIP_FREE_PERIOD" class="font-bold text-amber-700 bg-amber-50">☕ พักกลางวัน / คาบว่าง (ไม่ต้องกรอกครูรายวิชา ➔ ส่งตรงถึงครูที่ปรึกษา)</option>`
+  ];
+
+  teachers.forEach(t => {
+    const uName = t.username || '';
+    if (!uName || uName === 'SKIP_FREE_PERIOD') return;
+    const fName = t.fullName || t.full_name || uName;
+    const dLabel = t.dept || t.role_label || 'ครูผู้สอน';
+    optionsHtml.push(`<option value="${escapeHtml(uName)}" data-name="${escapeHtml(fName)}">${escapeHtml(fName)} (${escapeHtml(dLabel)})</option>`);
+  });
+
+  manualSelect.innerHTML = optionsHtml.join('');
+  if (currentVal) manualSelect.value = currentVal;
+}
+window.populateManualTeacherSelect = populateManualTeacherSelect;
 
 async function ensureTeachersListLoaded() {
-  if (cachedTeachersList.length > 0) return cachedTeachersList;
+  populateManualTeacherSelect();
   try {
-    const res = await fetch('/api/teachers');
-    const data = await res.json();
-    if (data.success && Array.isArray(data.teachers)) {
-      cachedTeachersList = data.teachers;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    const res = await fetch('/api/teachers', { signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (res.ok) {
+      const data = await res.json();
+      if (data.success && Array.isArray(data.teachers) && data.teachers.length > 0) {
+        const map = new Map();
+        DEFAULT_SYSTEM_TEACHERS.forEach(t => map.set(t.username, t));
+        data.teachers.forEach(t => {
+          map.set(t.username, {
+            username: t.username,
+            fullName: t.fullName || t.full_name || t.username,
+            full_name: t.fullName || t.full_name || t.username,
+            dept: t.dept || t.role_label || ''
+          });
+        });
+        cachedTeachersList = Array.from(map.values());
+        populateManualTeacherSelect();
+      }
     }
   } catch (e) {}
   return cachedTeachersList;
-}
-
-// เติมรายชื่อครูทั้งหมดในระบบลง Dropdown "เลือกครูรายวิชา" ของฟอร์มยื่นคำร้อง (นักเรียนเลือกเองโดยตรง ไม่มีการจับคู่ตารางสอนอัตโนมัติ)
-async function populateManualTeacherSelect() {
-  const manualSelect = document.getElementById('form-manual-teacher-select');
-  if (!manualSelect) return;
-  try {
-    const teachers = await ensureTeachersListLoaded();
-    if (teachers.length === 0) return;
-    const currentVal = manualSelect.value;
-    manualSelect.innerHTML = `<option value="">-- กรุณาเลือกครูรายวิชา --</option>` +
-      teachers.map(t => `<option value="${t.username}" data-name="${t.full_name}">${t.full_name} (${t.dept || t.role_label || ''})</option>`).join('');
-    if (currentVal) manualSelect.value = currentVal;
-  } catch (err) {
-    console.warn('Populate manual teacher select error:', err);
-  }
 }
 
 window.uploadedEvidencePhoto = null;
@@ -4901,19 +5007,41 @@ async function submitOnePassForm() {
     destination = destOther;
   }
 
-  // ครูรายวิชา: นักเรียนเลือกชื่อครูจากฐานข้อมูลโดยตรง (ไม่มีการจับคู่ตารางสอนอัตโนมัติอีกต่อไป)
-  // สายอนุมัติยังเริ่มที่ครูที่ปรึกษาเหมือนเดิม ข้อมูลนี้เก็บไว้เพื่ออ้างอิง/แจ้งเตือนเท่านั้น
+  // ครูรายวิชา: ถ้าเป็นคาบว่าง หรือช่วงกลางวัน ให้ผ่านไปที่ครูที่ปรึกษาเลย (ไม่ต้องกรอกครูรายวิชา)
+  const [subDepH, subDepM] = departureTime.split(':').map(Number);
+  const subDepMinutes = subDepH * 60 + (subDepM || 0);
+  const isLunchTimeDeparture = (subDepMinutes >= 720 && subDepMinutes < 780);
+
   const manualTeacherSelectEl = document.getElementById('form-manual-teacher-select');
   const manualTeacherUsername = manualTeacherSelectEl ? manualTeacherSelectEl.value : '';
-  if (!manualTeacherUsername) {
-    resetBtn();
-    alert('⚠️ กรุณาเลือก "ครูรายวิชา" ที่สอนในคาบนี้ก่อนส่งคำร้องขออนุญาต');
-    if (manualTeacherSelectEl) manualTeacherSelectEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    return;
+
+  const isStep1Skipped = window.isFreePeriodMode
+    || manualTeacherUsername === 'SKIP_FREE_PERIOD'
+    || isLunchTimeDeparture;
+
+  let resolvedTeacherUsername = '';
+  let resolvedTeacherName = '';
+  let manualSubjectName = '';
+
+  if (isStep1Skipped) {
+    resolvedTeacherUsername = '';
+    resolvedTeacherName = '(ข้ามขั้นครูรายวิชา - คาบว่าง/พักกลางวัน)';
+    manualSubjectName = isLunchTimeDeparture ? 'ช่วงพักกลางวัน (12:00 - 13:00 น.)' : 'คาบว่าง / ไม่มีวิชาเรียน';
+  } else {
+    if (!manualTeacherUsername) {
+      resetBtn();
+      alert('⚠️ กรุณาเลือก "ครูรายวิชา" ในคาบนี้ หรือกดปุ่ม "☕ คาบว่าง / พักกลางวัน" หากไม่มีชั่วโมงเรียน');
+      if (manualTeacherSelectEl) {
+        manualTeacherSelectEl.focus();
+        manualTeacherSelectEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      return;
+    }
+    resolvedTeacherUsername = manualTeacherUsername;
+    const manualTeacherSelectedOption = manualTeacherSelectEl.options[manualTeacherSelectEl.selectedIndex];
+    resolvedTeacherName = manualTeacherSelectedOption?.getAttribute('data-name') || manualTeacherSelectedOption?.textContent?.trim() || '';
+    manualSubjectName = 'วิชาตามคาบเรียน';
   }
-  const manualTeacherSelectedOption = manualTeacherSelectEl.options[manualTeacherSelectEl.selectedIndex];
-  const manualTeacherName = manualTeacherSelectedOption?.getAttribute('data-name') || manualTeacherSelectedOption?.textContent?.trim() || '';
-  const manualSubjectName = '';
 
   // เตรียมข้อมูลสรุปสำหรับ Confirm Dialog
   const requestTitle = isNoReturn ? 'ลากลับบ้าน (ไม่กลับเข้า)' : (type === 'medical' ? 'พบแพทย์ตามนัด' : 'ลากิจธุระจำเป็น');
@@ -4943,24 +5071,35 @@ async function submitOnePassForm() {
     studentName: name,
     totalSteps: 4,
     workflowVersion: 4,
-    manualTeacherUsername,
-    manualTeacherName,
-    manualSubjectName
+    step1Skipped: isStep1Skipped,
+    step1SkipReason: isLunchTimeDeparture ? 'ช่วงพักกลางวัน (12:00 - 13:00 น.)' : 'คาบว่าง / ไม่มีวิชาเรียน',
+    manualTeacherUsername: resolvedTeacherUsername,
+    manualTeacherName: resolvedTeacherName,
+    manualSubjectName: manualSubjectName
   };
 
-  // แสดงข้อมูลสายอนุมัติ 4 ขั้นใน Confirm Modal
+  // แสดงข้อมูลสายอนุมัติใน Confirm Modal
   const modalSubjectPreview = document.getElementById('confirm-modal-subject-preview');
   if (modalSubjectPreview) {
-    modalSubjectPreview.innerHTML = `
-      <div class="p-2.5 rounded-xl bg-blue-50 border border-blue-200 text-blue-950 text-xs flex items-center gap-2">
-        <i class="fa-solid fa-clipboard-check text-blue-600 text-sm"></i>
-        <span>สายอนุมัติ 4 ขั้น: <strong>1. ครูที่ปรึกษา → 2. หัวหน้าแผนก → 3. ฝ่ายปกครอง/หลักสูตร → 4. รองผู้อำนวยการ</strong></span>
-      </div>
-      <div class="p-2.5 mt-1.5 rounded-xl bg-sky-50 border border-sky-200 text-sky-900 text-xs flex items-center gap-2">
-        <i class="fa-solid fa-chalkboard-user text-sky-600 text-sm"></i>
-        <span>ครูรายวิชาที่เลือก (ข้อมูลอ้างอิง): <strong>${escapeHtml(manualTeacherName || '-')}</strong></span>
-      </div>
-    `;
+    if (isStep1Skipped) {
+      modalSubjectPreview.innerHTML = `
+        <div class="p-2.5 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-900 text-xs flex items-center gap-2">
+          <i class="fa-solid fa-circle-check text-emerald-600 text-sm"></i>
+          <span>✓ พักกลางวัน / คาบว่าง: ข้ามขั้นครูรายวิชาอัตโนมัติ ส่งตรงถึง <strong>ครูที่ปรึกษา (ขั้นที่ 1)</strong> ทันที</span>
+        </div>
+      `;
+    } else {
+      modalSubjectPreview.innerHTML = `
+        <div class="p-2.5 rounded-xl bg-blue-50 border border-blue-200 text-blue-950 text-xs flex items-center gap-2">
+          <i class="fa-solid fa-clipboard-check text-blue-600 text-sm"></i>
+          <span>สายอนุมัติ: <strong>ครูที่ปรึกษา → หัวหน้าแผนก → ฝ่ายปกครอง → รองผู้อำนวยการ</strong></span>
+        </div>
+        <div class="p-2.5 mt-1.5 rounded-xl bg-sky-50 border border-sky-200 text-sky-900 text-xs flex items-center gap-2">
+          <i class="fa-solid fa-chalkboard-user text-sky-600 text-sm"></i>
+          <span>ครูรายวิชาที่เลือก: <strong>${escapeHtml(resolvedTeacherName || '-')}</strong></span>
+        </div>
+      `;
+    }
   }
 
   // แสดงข้อมูลใน Modal ยืนยัน

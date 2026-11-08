@@ -968,12 +968,41 @@
               </div>
             </div>
 
-            <!-- เลือกครูรายวิชาโดยตรงจากฐานข้อมูล (นักเรียนเลือกเอง แทนที่ระบบจับคู่ตารางสอนอัตโนมัติที่ถูกยกเลิก) -->
-            <div class="space-y-1.5">
-              <label class="block text-slate-500 text-xs font-medium">ครูรายวิชาในคาบที่ขอออก <span class="text-rose-500">*</span></label>
-              <select id="form-manual-teacher-select" class="w-full px-3 py-2.5 rounded-2xl border border-slate-300 bg-white text-sm focus:outline-none focus:border-cyan-500">
-                <option value="">-- กำลังโหลดรายชื่อครู... --</option>
-              </select>
+            <!-- ส่วนเลือกครูรายวิชา / คาบว่าง / พักกลางวัน (ไม่ต้องกรอกครูรายวิชาหากเป็นคาบว่างหรือพักกลางวัน) -->
+            <div id="form-manual-teacher-container" class="space-y-2 pt-2">
+              <div class="flex items-center justify-between gap-2 flex-wrap">
+                <label class="block text-slate-700 text-sm font-bold">
+                  ครูรายวิชาในคาบที่ขอออก <span id="form-teacher-required-star" class="text-rose-500">*</span>
+                </label>
+                <!-- ปุ่มสลับ คาบว่าง / พักกลางวัน -->
+                <button type="button" id="btn-toggle-free-period" onclick="toggleFreeOrLunchPeriod()"
+                  class="px-2.5 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 shadow-2xs active:scale-95">
+                  <i class="fa-solid fa-mug-hot text-amber-600"></i>
+                  <span id="btn-toggle-free-period-text">☕ คาบว่าง / พักกลางวัน (ข้ามไปครูที่ปรึกษา)</span>
+                </button>
+              </div>
+
+              <!-- กล่องแจ้งเตือนสีเขียว เมื่อเป็นคาบว่างหรือพักกลางวัน (ส่งตรงถึงครูที่ปรึกษา) -->
+              <div id="box-free-period-notice" class="hidden p-3 rounded-2xl bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs flex items-center justify-between gap-2">
+                <div class="flex items-center gap-2 font-bold">
+                  <i class="fa-solid fa-circle-check text-emerald-600 text-base"></i>
+                  <span id="free-period-notice-text">✓ พักกลางวัน / คาบว่าง: ข้ามขั้นครูรายวิชาอัตโนมัติ ส่งตรงถึงครูที่ปรึกษา (ขั้นที่ 2/5)</span>
+                </div>
+                <button type="button" onclick="cancelFreePeriodMode()" class="text-xs text-emerald-700 underline font-semibold shrink-0">เปลี่ยน</button>
+              </div>
+
+              <!-- Dropdown เลือกครูรายวิชา (โหลดไว แสดงผลทันที 0ms จากแคชระบบ ไม่ค้าง) -->
+              <div id="wrapper-teacher-select" class="space-y-1">
+                <select id="form-manual-teacher-select" onchange="onManualTeacherChange(this.value)"
+                  class="w-full px-3.5 py-3 rounded-2xl border border-slate-300 bg-white text-sm font-medium focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 shadow-2xs">
+                  <option value="">-- เลือกครูรายวิชา (หรือเลือกคาบว่าง/พักกลางวัน) --</option>
+                  <option value="SKIP_FREE_PERIOD" class="font-bold text-amber-700 bg-amber-50">☕ พักกลางวัน / คาบว่าง (ไม่ต้องกรอกครูรายวิชา ➔ ส่งตรงถึงครูที่ปรึกษา)</option>
+                </select>
+                <input type="hidden" id="form-manual-subject-input" value="">
+                <p id="form-teacher-hint" class="text-[11px] text-slate-500 pl-1">
+                  💡 หากเป็นคาบว่างหรือช่วงพักกลางวัน ระบบจะข้ามขั้นครูรายวิชาและส่งไปยังครูที่ปรึกษาทันที
+                </p>
+              </div>
             </div>
           </div>
         </div>

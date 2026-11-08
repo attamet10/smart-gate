@@ -1386,6 +1386,7 @@ app.get('/api/teachers', async (req, res) => {
     .map(u => ({
       username: u.username,
       fullName: u.full_name,
+      full_name: u.full_name,
       role: u.role,
       dept: u.dept || (u.departments ? u.departments.name : ''),
       isAutoCreated: Boolean(u.isAutoCreated)
@@ -2414,21 +2415,37 @@ app.post('/api/requests', async (req, res) => {
     || storedProf.classroom
     || 'ปวช.3';
 
-  // ข้อมูลครูรายวิชา: นักเรียนเลือกชื่อครูจากฐานข้อมูลโดยตรง (ไม่มีระบบจับคู่ตารางสอนอัตโนมัติอีกต่อไป)
-  // เก็บติดไปกับคำร้องทุกครั้งเพื่อใช้แจ้ง/อ้างอิงย้อนหลัง แม้ขั้นตอนอนุมัติจะเริ่มที่ครูที่ปรึกษาโดยตรงก็ตาม
-  const resolvedSubjectTeacherUsername = manualTeacherUsername || null;
-  const resolvedSubjectTeacherName = manualTeacherName || null;
-  const resolvedSubjectName = manualSubjectName || null;
+  // ข้อมูลครูรายวิชา: ถ้าเป็นคาบว่าง หรือช่วงกลางวัน ให้ผ่านไปที่ครูที่ปรึกษาเลย (ไม่ต้องกรอกครูรายวิชา)
+  const isLunchTimeDep = (depMinutes >= 720 && depMinutes < 780);
+  const isStep1Skipped = Boolean(req.body.step1Skipped || manualTeacherUsername === 'SKIP_FREE_PERIOD' || isLunchTimeDep || !manualTeacherUsername);
+  const skipReason = isLunchTimeDep ? 'ช่วงพักกลางวัน (12:00 - 13:00 น.)' : (req.body.step1SkipReason || 'คาบว่าง / ไม่มีวิชาเรียน');
+
+  const resolvedSubjectTeacherUsername = isStep1Skipped ? null : (manualTeacherUsername || null);
+  const resolvedSubjectTeacherName = isStep1Skipped ? `(ข้ามขั้นครูรายวิชา - ${skipReason})` : (manualTeacherName || null);
+  const resolvedSubjectName = isStep1Skipped ? skipReason : (manualSubjectName || 'วิชาตามคาบเรียน');
   const resolvedSubjectCode = null;
-  const resolvedPeriodType = 'manual';
+  const resolvedPeriodType = isStep1Skipped ? 'free_period' : 'manual';
 
   const nowIso = new Date().toISOString();
   let initialStep = 1;
-  let initialStatus = 'pending_advisor'; // โครงสร้างใหม่ 4 ขั้นตอน: เริ่มต้นที่ครูที่ปรึกษาโดยตรง (ไม่ผ่านครูรายวิชา)
+  let initialStatus = 'pending_advisor'; // ส่งตรงถึงครูที่ปรึกษาทันที
   let totalSteps = 4;
   let snapshotPeriodTime = `${depTime}-${isNoReturn ? '16:00' : retTime}`;
   const approvalHistory = [];
   const stepEnteredAt = { '1': nowIso };
+
+  if (isStep1Skipped) {
+    approvalHistory.push({
+      step: 1,
+      role: 'subject_teacher',
+      roleLabel: 'ครูรายวิชา',
+      approverUsername: 'system',
+      approverName: 'ระบบอัตโนมัติ (ผ่านข้าม)',
+      action: 'skipped_no_class',
+      note: `ผ่านข้ามขั้นครูรายวิชาอัตโนมัติ (${skipReason}) ส่งตรงถึงครูที่ปรึกษา`,
+      actionAt: nowIso
+    });
+  }
 
   if (supabase) {
     try {
