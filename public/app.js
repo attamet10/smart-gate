@@ -7331,6 +7331,9 @@ function handleAdminAddUserRoleChange() {
   const staffFields = document.getElementById('admin-add-staff-fields');
   const advClassBox = document.getElementById('admin-add-advisor-classroom-box');
   const subjClassBox = document.getElementById('admin-add-subject-classroom-box');
+  const deptSelectBox = document.getElementById('admin-add-staff-dept-select-box');
+  const deptTextBox = document.getElementById('admin-add-staff-dept-text-box');
+  const isDeptRole = ['subject_teacher', 'advisor', 'dept_head'].includes(role);
 
   if (role === 'student') {
     if (studentFields) studentFields.classList.remove('hidden');
@@ -7342,6 +7345,8 @@ function handleAdminAddUserRoleChange() {
     if (staffFields) staffFields.classList.remove('hidden');
     if (advClassBox) advClassBox.classList.toggle('hidden', role !== 'advisor');
     if (subjClassBox) subjClassBox.classList.toggle('hidden', role !== 'subject_teacher');
+    if (deptSelectBox) deptSelectBox.classList.toggle('hidden', !isDeptRole);
+    if (deptTextBox) deptTextBox.classList.toggle('hidden', isDeptRole);
   }
 }
 
@@ -7426,7 +7431,10 @@ async function handleAdminCreateUser(e) {
     const username = document.getElementById('admin-new-username')?.value.trim();
     const password = document.getElementById('admin-new-password')?.value.trim() || '1234';
     const full_name = document.getElementById('admin-new-fullname')?.value.trim();
-    const dept = document.getElementById('admin-new-dept')?.value.trim() || '';
+    const isDeptRole = ['subject_teacher', 'advisor', 'dept_head'].includes(role);
+    const dept = isDeptRole
+      ? (document.getElementById('admin-new-dept-select-staff')?.value || '')
+      : (document.getElementById('admin-new-dept')?.value.trim() || '');
 
     if (!username || !full_name) {
       alert('กรุณากรอก Username และ ชื่อ-นามสกุล ให้ครบถ้วน');

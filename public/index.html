@@ -3477,9 +3477,22 @@
             <label class="block text-slate-700 font-semibold mb-1 text-xs">ชื่อ-นามสกุล *</label>
             <input type="text" id="admin-new-fullname" placeholder="เช่น อ.สมคิด สถิตมั่น" class="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs sm:text-sm focus:outline-none focus:border-cyan-500">
           </div>
-          <div>
-            <label class="block text-slate-700 font-semibold mb-1 text-xs">แผนกวิชา / สังกัด</label>
-            <input type="text" id="admin-new-dept" placeholder="เช่น แผนกวิชาช่างยนต์ หรือ งานปกครอง" class="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs sm:text-sm focus:outline-none focus:border-cyan-500">
+          <!-- ครูรายวิชา/ครูที่ปรึกษา/หัวหน้าแผนก ต้องสังกัดแผนกวิชาจริง เลือกจากรายการตายตัวเท่านั้น (ห้ามพิมพ์อิสระ) -->
+          <div id="admin-add-staff-dept-select-box" class="hidden">
+            <label class="block text-slate-700 font-semibold mb-1 text-xs">สาขาวิชา / แผนก *</label>
+            <select id="admin-new-dept-select-staff" class="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs sm:text-sm focus:outline-none focus:border-cyan-500">
+              <option value="แผนกวิชาช่างยนต์">แผนกวิชาช่างยนต์</option>
+              <option value="แผนกวิชาช่างไฟฟ้ากำลัง">แผนกวิชาช่างไฟฟ้ากำลัง</option>
+              <option value="แผนกวิชาการบัญชี">แผนกวิชาการบัญชี</option>
+              <option value="แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล">แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล</option>
+              <option value="แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล">แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล</option>
+            </select>
+          </div>
+
+          <!-- ตำแหน่งที่ไม่สังกัดแผนกวิชา (ฝ่ายปกครอง/รองผอ./แอดมิน) ยังพิมพ์ชื่อหน่วยงานได้อิสระ -->
+          <div id="admin-add-staff-dept-text-box">
+            <label class="block text-slate-700 font-semibold mb-1 text-xs">สังกัด</label>
+            <input type="text" id="admin-new-dept" placeholder="เช่น งานปกครอง หรือ ฝ่ายบริหาร" class="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs sm:text-sm focus:outline-none focus:border-cyan-500">
           </div>
           <div id="admin-add-advisor-classroom-box" class="hidden">
             <label class="block text-slate-700 font-semibold mb-1 text-xs">ระดับชั้นที่ปรึกษา (Classroom/Level) *</label>

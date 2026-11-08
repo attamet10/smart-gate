@@ -3839,6 +3839,14 @@ app.post('/api/requests', async (req, res) => {
     noReturn: isNoReturn
   });
 
+  // ข้อมูลครูรายวิชา: ดึงจากตารางสอนที่จับคู่อัตโนมัติก่อน ถ้าไม่พบให้ใช้ครูที่นักเรียนเลือกเอง (manual)
+  // เก็บติดไปกับคำร้องทุกครั้งเพื่อใช้แจ้ง/อ้างอิงย้อนหลัง แม้ขั้นตอนอนุมัติจะเริ่มที่ครูที่ปรึกษาโดยตรงก็ตาม
+  const resolvedSubjectTeacherUsername = ttMatch.primaryPeriod?.teacherUsername || manualTeacherUsername || null;
+  const resolvedSubjectTeacherName = ttMatch.primaryPeriod?.teacherName || manualTeacherName || null;
+  const resolvedSubjectName = ttMatch.primaryPeriod?.subjectName || manualSubjectName || null;
+  const resolvedSubjectCode = ttMatch.primaryPeriod?.subjectCode || null;
+  const resolvedPeriodType = ttMatch.primaryPeriod?.periodType || (ttMatch.manualTeacherRequired ? 'manual' : 'no_timetable');
+
   const nowIso = new Date().toISOString();
   let initialStep = 1;
   let initialStatus = 'pending_advisor'; // โครงสร้างใหม่ 4 ขั้นตอน: เริ่มต้นที่ครูที่ปรึกษาโดยตรง (ไม่ผ่านครูรายวิชา)
@@ -3935,6 +3943,11 @@ app.post('/api/requests', async (req, res) => {
       if (travelMode) insertPayload.travel_mode = travelMode;
       if (pickupName) insertPayload.pickup_name = pickupName;
       if (pickupPlate) insertPayload.pickup_plate = pickupPlate;
+      if (resolvedSubjectTeacherUsername) insertPayload.subject_teacher_username = resolvedSubjectTeacherUsername;
+      if (resolvedSubjectTeacherName) insertPayload.subject_teacher_name = resolvedSubjectTeacherName;
+      if (resolvedSubjectName) insertPayload.subject_name = resolvedSubjectName;
+      if (resolvedSubjectCode) insertPayload.subject_code = resolvedSubjectCode;
+      insertPayload.period_type = resolvedPeriodType;
 
       let data = null;
       let error = null;
@@ -3957,6 +3970,11 @@ app.post('/api/requests', async (req, res) => {
         delete insertPayload.student_code;
         delete insertPayload.plate_photo;
         delete insertPayload.parent_phone;
+        delete insertPayload.subject_teacher_username;
+        delete insertPayload.subject_teacher_name;
+        delete insertPayload.subject_name;
+        delete insertPayload.subject_code;
+        delete insertPayload.period_type;
         try {
           const inserted = await db.insertAutoIncrement('leave_requests', insertPayload);
           data = [inserted];
