@@ -273,88 +273,11 @@ const DEFAULT_SETTINGS = {
   returnRequireWifi: false
 };
 
-// บัญชีมาตรฐานครบทั้ง 5 ขั้นตอน (นักเรียน, ครูรายวิชา, ครูที่ปรึกษา, หัวหน้าแผนก, ฝ่ายปกครอง, รองผู้อำนวยการ, ผู้ดูแลระบบ)
+// บัญชีระบบจริง - เหลือแค่ admin สำหรับ bootstrap เข้าระบบครั้งแรกเท่านั้น
+// (เดิมมีบัญชีสาธิตปลอมกว่า 30 บัญชี เช่น teacher_auto, adv_auto_1, head_account, discipline, deputy
+//  ที่ login ผ่านได้ด้วยรหัสผ่าน 1234 เสมอ ไม่ผูกกับใครจริง และยังอนุมัติคำร้องจริงได้ด้วย - ถือเป็นช่องโหว่
+//  ล็อกอินปลอม จึงลบออกทั้งหมด ให้สร้างบัญชีจริงผ่านหน้า "เพิ่มผู้ใช้งาน" ของแอดมินแทน)
 const ALL_SYSTEM_ACCOUNTS = {
-  'student': {
-    id: '00000000-0000-0000-0000-000000000001',
-    username: 'student',
-    full_name: 'นายธนภัทร รัตนโชติ',
-    role: 'student',
-    student_code: '66209010012',
-    plate_no: '1กข 4589 นครนายก (รถจักรยานยนต์)',
-    dept: 'แผนกวิชาช่างยนต์',
-    departments: { name: 'แผนกวิชาช่างยนต์' },
-    classrooms: { name: 'ปวช.3' }
-  },
-
-  // ขั้นที่ 1: ครูรายวิชา (Subject Teachers)
-  'subject_auto': { id: '00000000-0000-0000-0000-000000000111', username: 'subject_auto', full_name: 'อ.ธีรพงศ์ เครื่องยนต์', role: 'subject_teacher', dept: 'แผนกวิชาช่างยนต์', departments: { name: 'แผนกวิชาช่างยนต์' } },
-  'subject_electric': { id: '00000000-0000-0000-0000-000000000121', username: 'subject_electric', full_name: 'อ.วีระพล วงจรไฟฟ้า', role: 'subject_teacher', dept: 'แผนกวิชาช่างไฟฟ้า', departments: { name: 'แผนกวิชาช่างไฟฟ้า' } },
-  'subject_account': { id: '00000000-0000-0000-0000-000000000131', username: 'subject_account', full_name: 'อ.ศิริพร การบัญชี', role: 'subject_teacher', dept: 'แผนกวิชาการบัญชี', departments: { name: 'แผนกวิชาการบัญชี' } },
-  'subject_digital': { id: '00000000-0000-0000-0000-000000000141', username: 'subject_digital', full_name: 'อ.ภาณุวัฒน์ โค้ดดิ้ง', role: 'subject_teacher', dept: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล', departments: { name: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล' } },
-  'subject_office': { id: '00000000-0000-0000-0000-000000000151', username: 'subject_office', full_name: 'อ.กนกวรรณ บริหาร', role: 'subject_teacher', dept: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล', departments: { name: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล' } },
-  'subject_general': { id: '00000000-0000-0000-0000-000000000161', username: 'subject_general', full_name: 'อ.ดรุณี วิชาการ', role: 'subject_teacher', dept: 'หมวดวิชาสามัญสัมพันธ์', departments: { name: 'หมวดวิชาสามัญสัมพันธ์' } },
-
-  // ==========================================================================
-  // ขั้นที่ 2: ครูที่ปรึกษาประจำระดับชั้น (Advisors: 5 แผนก × 5 ระดับชั้น = 25 บัญชี)
-  // ==========================================================================
-  // 1. แผนกวิชาช่างยนต์
-  'adv_auto_1': { id: '00000000-0000-0000-0000-000000000211', username: 'adv_auto_1', full_name: 'อ.อนุสรณ์ ช่างยนต์', role: 'advisor', dept: 'แผนกวิชาช่างยนต์', classroom: 'ปวช.1', departments: { name: 'แผนกวิชาช่างยนต์' }, classrooms: { name: 'ปวช.1' } },
-  'adv_auto_2': { id: '00000000-0000-0000-0000-000000000212', username: 'adv_auto_2', full_name: 'อ.กมล ยานยนต์', role: 'advisor', dept: 'แผนกวิชาช่างยนต์', classroom: 'ปวช.2', departments: { name: 'แผนกวิชาช่างยนต์' }, classrooms: { name: 'ปวช.2' } },
-  'adv_auto_3': { id: '00000000-0000-0000-0000-000000000213', username: 'adv_auto_3', full_name: 'อ.สมชาย ใจดี', role: 'advisor', dept: 'แผนกวิชาช่างยนต์', classroom: 'ปวช.3', departments: { name: 'แผนกวิชาช่างยนต์' }, classrooms: { name: 'ปวช.3' } },
-  'adv_auto_pvs1': { id: '00000000-0000-0000-0000-000000000214', username: 'adv_auto_pvs1', full_name: 'อ.ชาญชัย ช่างยนต์', role: 'advisor', dept: 'แผนกวิชาช่างยนต์', classroom: 'ปวส.1', departments: { name: 'แผนกวิชาช่างยนต์' }, classrooms: { name: 'ปวส.1' } },
-  'adv_auto_pvs2': { id: '00000000-0000-0000-0000-000000000215', username: 'adv_auto_pvs2', full_name: 'อ.ธีรยุทธ ยานยนต์', role: 'advisor', dept: 'แผนกวิชาช่างยนต์', classroom: 'ปวส.2', departments: { name: 'แผนกวิชาช่างยนต์' }, classrooms: { name: 'ปวส.2' } },
-
-  // 2. แผนกวิชาช่างไฟฟ้า
-  'adv_elec_1': { id: '00000000-0000-0000-0000-000000000221', username: 'adv_elec_1', full_name: 'อ.กิตติศักดิ์ ไฟฟ้า', role: 'advisor', dept: 'แผนกวิชาช่างไฟฟ้า', classroom: 'ปวช.1', departments: { name: 'แผนกวิชาช่างไฟฟ้า' }, classrooms: { name: 'ปวช.1' } },
-  'adv_elec_2': { id: '00000000-0000-0000-0000-000000000222', username: 'adv_elec_2', full_name: 'อ.สมเกียรติ พลังงานไฟฟ้า', role: 'advisor', dept: 'แผนกวิชาช่างไฟฟ้า', classroom: 'ปวช.2', departments: { name: 'แผนกวิชาช่างไฟฟ้า' }, classrooms: { name: 'ปวช.2' } },
-  'adv_elec_3': { id: '00000000-0000-0000-0000-000000000223', username: 'adv_elec_3', full_name: 'อ.ธวัชชัย อิเล็กทรอนิกส์', role: 'advisor', dept: 'แผนกวิชาช่างไฟฟ้า', classroom: 'ปวช.3', departments: { name: 'แผนกวิชาช่างไฟฟ้า' }, classrooms: { name: 'ปวช.3' } },
-  'adv_elec_pvs1': { id: '00000000-0000-0000-0000-000000000224', username: 'adv_elec_pvs1', full_name: 'อ.สุรศักดิ์ ควบคุมไฟฟ้า', role: 'advisor', dept: 'แผนกวิชาช่างไฟฟ้า', classroom: 'ปวส.1', departments: { name: 'แผนกวิชาช่างไฟฟ้า' }, classrooms: { name: 'ปวส.1' } },
-  'adv_elec_pvs2': { id: '00000000-0000-0000-0000-000000000225', username: 'adv_elec_pvs2', full_name: 'อ.บุญส่ง วิศวกรรมไฟฟ้า', role: 'advisor', dept: 'แผนกวิชาช่างไฟฟ้า', classroom: 'ปวส.2', departments: { name: 'แผนกวิชาช่างไฟฟ้า' }, classrooms: { name: 'ปวส.2' } },
-
-  // 3. แผนกวิชาการบัญชี
-  'adv_acc_1': { id: '00000000-0000-0000-0000-000000000231', username: 'adv_acc_1', full_name: 'อ.พิมพา บัญชี', role: 'advisor', dept: 'แผนกวิชาการบัญชี', classroom: 'ปวช.1', departments: { name: 'แผนกวิชาการบัญชี' }, classrooms: { name: 'ปวช.1' } },
-  'adv_acc_2': { id: '00000000-0000-0000-0000-000000000232', username: 'adv_acc_2', full_name: 'อ.รัตนา การเงิน', role: 'advisor', dept: 'แผนกวิชาการบัญชี', classroom: 'ปวช.2', departments: { name: 'แผนกวิชาการบัญชี' }, classrooms: { name: 'ปวช.2' } },
-  'adv_acc_3': { id: '00000000-0000-0000-0000-000000000233', username: 'adv_acc_3', full_name: 'อ.สุรีย์พร ภาษีอากร', role: 'advisor', dept: 'แผนกวิชาการบัญชี', classroom: 'ปวช.3', departments: { name: 'แผนกวิชาการบัญชี' }, classrooms: { name: 'ปวช.3' } },
-  'adv_acc_pvs1': { id: '00000000-0000-0000-0000-000000000234', username: 'adv_acc_pvs1', full_name: 'อ.นงลักษณ์ การบัญชีชั้นสูง', role: 'advisor', dept: 'แผนกวิชาการบัญชี', classroom: 'ปวส.1', departments: { name: 'แผนกวิชาการบัญชี' }, classrooms: { name: 'ปวส.1' } },
-  'adv_acc_pvs2': { id: '00000000-0000-0000-0000-000000000235', username: 'adv_acc_pvs2', full_name: 'อ.ประภาศรี ตรวจสอบบัญชี', role: 'advisor', dept: 'แผนกวิชาการบัญชี', classroom: 'ปวส.2', departments: { name: 'แผนกวิชาการบัญชี' }, classrooms: { name: 'ปวส.2' } },
-
-  // 4. แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล
-  'adv_digit_1': { id: '00000000-0000-0000-0000-000000000241', username: 'adv_digit_1', full_name: 'อ.ธนากร ดิจิทัล', role: 'advisor', dept: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล', classroom: 'ปวช.1', departments: { name: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล' }, classrooms: { name: 'ปวช.1' } },
-  'adv_digit_2': { id: '00000000-0000-0000-0000-000000000242', username: 'adv_digit_2', full_name: 'อ.ศุภชัย คอมพิวเตอร์', role: 'advisor', dept: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล', classroom: 'ปวช.2', departments: { name: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล' }, classrooms: { name: 'ปวช.2' } },
-  'adv_digit_3': { id: '00000000-0000-0000-0000-000000000243', username: 'adv_digit_3', full_name: 'อ.วรวิทย์ พัฒนาเว็บ', role: 'advisor', dept: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล', classroom: 'ปวช.3', departments: { name: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล' }, classrooms: { name: 'ปวช.3' } },
-  'adv_digit_pvs1': { id: '00000000-0000-0000-0000-000000000244', username: 'adv_digit_pvs1', full_name: 'อ.เอกลักษณ์ ดิจิทัลมีเดีย', role: 'advisor', dept: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล', classroom: 'ปวส.1', departments: { name: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล' }, classrooms: { name: 'ปวส.1' } },
-  'adv_digit_pvs2': { id: '00000000-0000-0000-0000-000000000245', username: 'adv_digit_pvs2', full_name: 'อ.ชัยวัฒน์ นวัตกรรมดิจิทัล', role: 'advisor', dept: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล', classroom: 'ปวส.2', departments: { name: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล' }, classrooms: { name: 'ปวส.2' } },
-
-  // 5. แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล
-  'adv_office_1': { id: '00000000-0000-0000-0000-000000000251', username: 'adv_office_1', full_name: 'อ.นภาวรรณ สำนักงาน', role: 'advisor', dept: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล', classroom: 'ปวช.1', departments: { name: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล' }, classrooms: { name: 'ปวช.1' } },
-  'adv_office_2': { id: '00000000-0000-0000-0000-000000000252', username: 'adv_office_2', full_name: 'อ.สิริมา บริหารธุรกิจ', role: 'advisor', dept: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล', classroom: 'ปวช.2', departments: { name: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล' }, classrooms: { name: 'ปวช.2' } },
-  'adv_office_3': { id: '00000000-0000-0000-0000-000000000253', username: 'adv_office_3', full_name: 'อ.อรัญญา ธุรการดิจิทัล', role: 'advisor', dept: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล', classroom: 'ปวช.3', departments: { name: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล' }, classrooms: { name: 'ปวช.3' } },
-  'adv_office_pvs1': { id: '00000000-0000-0000-0000-000000000254', username: 'adv_office_pvs1', full_name: 'อ.จุฑารัตน์ การจัดการสารสนเทศ', role: 'advisor', dept: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล', classroom: 'ปวส.1', departments: { name: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล' }, classrooms: { name: 'ปวส.1' } },
-  'adv_office_pvs2': { id: '00000000-0000-0000-0000-000000000255', username: 'adv_office_pvs2', full_name: 'อ.เพ็ญศรี การพัฒนาองค์การ', role: 'advisor', dept: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล', classroom: 'ปวส.2', departments: { name: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล' }, classrooms: { name: 'ปวส.2' } },
-
-  // บัญชีเดิม (Backward-compatible Aliases)
-  'teacher_auto': { id: '00000000-0000-0000-0000-000000000011', username: 'teacher_auto', full_name: 'อ.สมชาย ใจดี', role: 'advisor', dept: 'แผนกวิชาช่างยนต์', classroom: 'ปวช.3', departments: { name: 'แผนกวิชาช่างยนต์' }, classrooms: { name: 'ปวช.3' } },
-  'teacher_electric': { id: '00000000-0000-0000-0000-000000000021', username: 'teacher_electric', full_name: 'อ.ธวัชชัย อิเล็กทรอนิกส์', role: 'advisor', dept: 'แผนกวิชาช่างไฟฟ้า', classroom: 'ปวช.3', departments: { name: 'แผนกวิชาช่างไฟฟ้า' }, classrooms: { name: 'ปวช.3' } },
-  'teacher_account': { id: '00000000-0000-0000-0000-000000000031', username: 'teacher_account', full_name: 'อ.สุรีย์พร ภาษีอากร', role: 'advisor', dept: 'แผนกวิชาการบัญชี', classroom: 'ปวช.3', departments: { name: 'แผนกวิชาการบัญชี' }, classrooms: { name: 'ปวช.3' } },
-  'teacher_digital': { id: '00000000-0000-0000-0000-000000000041', username: 'teacher_digital', full_name: 'อ.วรวิทย์ พัฒนาเว็บ', role: 'advisor', dept: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล', classroom: 'ปวช.3', departments: { name: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล' }, classrooms: { name: 'ปวช.3' } },
-  'teacher_office': { id: '00000000-0000-0000-0000-000000000051', username: 'teacher_office', full_name: 'อ.อรัญญา ธุรการดิจิทัล', role: 'advisor', dept: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล', classroom: 'ปวช.3', departments: { name: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล' }, classrooms: { name: 'ปวช.3' } },
-  'teacher': { id: '00000000-0000-0000-0000-000000000019', username: 'teacher', full_name: 'อ.สมชาย ใจดี', role: 'advisor', dept: 'แผนกวิชาช่างยนต์', classroom: 'ปวช.3/1 (ช่างยนต์)', departments: { name: 'แผนกวิชาช่างยนต์' } },
-
-  // ขั้นที่ 3: หัวหน้าแผนกวิชา (Department Heads)
-  'head_auto': { id: '00000000-0000-0000-0000-000000000012', username: 'head_auto', full_name: 'อ.ประสิทธิ์ ยานยนต์', role: 'dept_head', dept: 'แผนกวิชาช่างยนต์', departments: { name: 'แผนกวิชาช่างยนต์' } },
-  'head_electric': { id: '00000000-0000-0000-0000-000000000022', username: 'head_electric', full_name: 'อ.สมศักดิ์ พลังงาน', role: 'dept_head', dept: 'แผนกวิชาช่างไฟฟ้า', departments: { name: 'แผนกวิชาช่างไฟฟ้า' } },
-  'head_account': { id: '00000000-0000-0000-0000-000000000032', username: 'head_account', full_name: 'อ.วรรณา ยอดเงิน', role: 'dept_head', dept: 'แผนกวิชาการบัญชี', departments: { name: 'แผนกวิชาการบัญชี' } },
-  'head_digital': { id: '00000000-0000-0000-0000-000000000042', username: 'head_digital', full_name: 'อ.ณัฐพงษ์ เทคโนโลยี', role: 'dept_head', dept: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล', departments: { name: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล' } },
-  'head_office': { id: '00000000-0000-0000-0000-000000000052', username: 'head_office', full_name: 'อ.สุพรรณี การจัดการ', role: 'dept_head', dept: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล', departments: { name: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล' } },
-
-  // ขั้นที่ 4: ฝ่ายปกครอง (Discipline Head)
-  'discipline': { id: '00000000-0000-0000-0000-000000000004', username: 'discipline', full_name: 'อ.เกรียงไกร รักษา วินัย', role: 'discipline_head', dept: 'งานปกครองและนิติการ', departments: { name: 'งานปกครองและนิติการ' } },
-
-  // ขั้นที่ 5: รองผู้อำนวยการ (Deputy Director - ผู้อนุมัติขั้นที่ 5 ออก QR Pass)
-  'deputy': { id: '00000000-0000-0000-0000-000000000006', username: 'deputy', full_name: 'รองผอ.ดร.ภูมิพัฒน์ บริหารกิจ', role: 'deputy_director', dept: 'ฝ่ายพัฒนากิจการนักเรียน นักศึกษา', departments: { name: 'ฝ่ายพัฒนากิจการนักเรียน นักศึกษา' } },
-
-  // ผู้ดูแลระบบ (System Admin)
   'admin': { id: '00000000-0000-0000-0000-000000000099', username: 'admin', full_name: 'ผู้ดูแลระบบ OnePass (Admin)', role: 'admin', dept: 'งานศูนย์ข้อมูลและสารสนเทศ', departments: { name: 'งานศูนย์ข้อมูลและสารสนเทศ' } }
 };
 
@@ -1692,9 +1615,9 @@ app.post('/api/login', async (req, res) => {
 
   // ยกเลิกบัญชีอาจารย์และหัวหน้าแผนกอันเก่าอย่างถาวร
   if (cleanUser === 'teacher' || cleanUser === 'head') {
-    return res.status(401).json({ 
-      success: false, 
-      message: 'บัญชีอาจารย์และหัวหน้าแผนกเดิมถูกยกเลิกแล้ว กรุณาเลือกบัญชีประจำ 5 แผนกวิชาใหม่ (เช่น teacher_auto, head_auto)' 
+    return res.status(401).json({
+      success: false,
+      message: 'บัญชีนี้ถูกยกเลิกแล้ว กรุณาติดต่อแอดมินให้สร้างบัญชีจริงให้ผ่านหน้า "เพิ่มผู้ใช้งาน"'
     });
   }
 
@@ -3346,13 +3269,21 @@ app.delete('/api/delegations/:id', authenticateToken, (req, res) => {
 });
 
 // Helper: หาชื่อครูและตำแหน่งของแต่ละขั้นสำหรับแสดงบน Stepper (โครงสร้าง 4 ขั้นตอนตามวิทยาลัยการอาชีพ)
+// หาบัญชีจริงคนแรกที่มี role ตรงกัน (ใช้กับตำแหน่งที่มีคนเดียวทั้งโรงเรียน เช่น ฝ่ายปกครอง/รองผอ.)
+// ไม่พบ -> คืนค่า fallback ที่ส่งมาแทน (กันพังตอนยังไม่ได้สร้างบัญชีจริง)
+function resolveSingleRoleApprover(role, fallbackUsername, fallbackName) {
+  const allAccounts = getAllActiveTeacherAccountsMap();
+  const found = Object.values(allAccounts).find(u => u.role === role);
+  return found
+    ? { username: found.username, name: found.full_name }
+    : { username: fallbackUsername, name: fallbackName };
+}
+
 function resolveStepApproversInfo(deptName, meta = {}, totalSteps = 4) {
   const depts = loadDepartments();
-  const matchedDept = depts.find(d => isDepartmentMatchServer(d.name, deptName)) || depts[0] || {
-    name: 'แผนกวิชาช่างยนต์',
-    teacher: { username: 'teacher_auto', name: 'อ.อนุสรณ์ ช่างยนต์' },
-    head: { username: 'head_auto', name: 'อ.ประสิทธิ์ ยานยนต์' }
-  };
+  const matchedDept = depts.find(d => isDepartmentMatchServer(d.name, deptName)) || depts[0] || { name: 'แผนกวิชาช่างยนต์' };
+  const disciplineHead = resolveSingleRoleApprover('discipline_head', 'discipline', 'อ.เกรียงไกร รักษา วินัย');
+  const deputyDirector = resolveSingleRoleApprover('deputy_director', 'deputy', 'รองผอ.ดร.ภูมิพัฒน์ บริหารกิจ');
 
   // ครูที่ปรึกษาประจำระดับชั้นของนักเรียน (ค้นหาตามแผนกวิชา + ระดับชั้น ปวช.1 - ปวส.2)
   const targetClassroom = String(meta.classroom || meta.classroomName || meta.class_name || '').trim();
@@ -3393,15 +3324,15 @@ function resolveStepApproversInfo(deptName, meta = {}, totalSteps = 4) {
         step: 3,
         role: 'discipline_head',
         roleLabel: 'ฝ่ายปกครอง / งานหลักสูตร',
-        username: 'discipline',
-        name: 'อ.เกรียงไกร รักษา วินัย'
+        username: disciplineHead.username,
+        name: disciplineHead.name
       },
       4: {
         step: 4,
         role: 'deputy_director',
         roleLabel: 'รองผู้อำนวยการ',
-        username: 'deputy',
-        name: 'รองผอ.ดร.ภูมิพัฒน์ บริหารกิจ'
+        username: deputyDirector.username,
+        name: deputyDirector.name
       }
     };
   }
@@ -3410,7 +3341,7 @@ function resolveStepApproversInfo(deptName, meta = {}, totalSteps = 4) {
     return {
       1: { step: 1, role: 'advisor', roleLabel: 'ครูที่ปรึกษา', username: resolvedAdvisorUsername, name: resolvedAdvisorName },
       2: { step: 2, role: 'dept_head', roleLabel: 'หัวหน้าแผนกวิชา', username: matchedDept.head ? matchedDept.head.username : 'head_auto', name: matchedDept.head ? matchedDept.head.name : 'อ.ประสิทธิ์ ยานยนต์' },
-      3: { step: 3, role: 'discipline_head', roleLabel: 'ฝ่ายปกครอง', username: 'discipline', name: 'อ.เกรียงไกร รักษา วินัย' }
+      3: { step: 3, role: 'discipline_head', roleLabel: 'ฝ่ายปกครอง', username: disciplineHead.username, name: disciplineHead.name }
     };
   }
 

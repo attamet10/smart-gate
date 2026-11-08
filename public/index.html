@@ -3420,7 +3420,7 @@
           <!-- แผนกวิชา -->
           <div>
             <label class="block text-slate-700 font-semibold mb-1 text-xs">สาขาวิชา / แผนก *</label>
-            <select id="admin-new-dept-select" class="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-800">
+            <select id="admin-new-dept-select" onchange="updateStudentAdvisorOptions()" class="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-800">
               <option value="แผนกวิชาช่างยนต์">แผนกวิชาช่างยนต์</option>
               <option value="แผนกวิชาช่างไฟฟ้ากำลัง">แผนกวิชาช่างไฟฟ้ากำลัง</option>
               <option value="แผนกวิชาการบัญชี">แผนกวิชาการบัญชี</option>
@@ -3433,14 +3433,14 @@
           <div class="grid grid-cols-3 gap-2">
             <div>
               <label class="block text-slate-700 font-semibold mb-1 text-xs">ระดับชั้น</label>
-              <select id="admin-new-level" class="w-full px-2.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs">
+              <select id="admin-new-level" onchange="updateStudentAdvisorOptions()" class="w-full px-2.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs">
                 <option value="ปวช.">ปวช.</option>
                 <option value="ปวส.">ปวส.</option>
               </select>
             </div>
             <div>
               <label class="block text-slate-700 font-semibold mb-1 text-xs">ชั้นปี</label>
-              <select id="admin-new-year" class="w-full px-2.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs">
+              <select id="admin-new-year" onchange="updateStudentAdvisorOptions()" class="w-full px-2.5 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs">
                 <option value="1">ปี 1</option>
                 <option value="2">ปี 2</option>
                 <option value="3">ปี 3</option>
@@ -3456,15 +3456,11 @@
             </div>
           </div>
 
-          <!-- ครูที่ปรึกษา -->
+          <!-- ครูที่ปรึกษา (ดึงจากบัญชีครูที่ปรึกษาจริงที่สร้างไว้แล้วเท่านั้น) -->
           <div>
             <label class="block text-slate-700 font-semibold mb-1 text-xs">ครูที่ปรึกษา</label>
             <select id="admin-new-advisor-select" class="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-800">
-              <option value="teacher_auto">อ.อนุสรณ์ ช่างยนต์ (teacher_auto)</option>
-              <option value="teacher_elec">อ.วีระพล วงจรไฟฟ้า (teacher_elec)</option>
-              <option value="head_account">อ.ศิริพร การบัญชี (head_account)</option>
-              <option value="head_digital">อ.ณัฐพงษ์ เทคโนโลยี (head_digital)</option>
-              <option value="head_office">อ.สุพรรณี การจัดการ (head_office)</option>
+              <option value="">-- ยังไม่กำหนด --</option>
             </select>
           </div>
 

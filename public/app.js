@@ -74,48 +74,13 @@ async function ensureAuthToken(forceRefresh = false) {
   return getAuthToken();
 }
 
-// ====================== 5 แผนกวิชาและอาจารย์/หัวหน้าแผนก/ครูรายวิชา ======================
+// ====================== 5 แผนกวิชา (ชื่อ/ไอคอนคงที่ - ครูที่ปรึกษา/หัวหน้าแผนก/ครูรายวิชาดึงจากบัญชีจริงเท่านั้น ไม่ hardcode ไว้ที่นี่) ======================
 const DEPARTMENTS_DATA = {
-  'แผนกวิชาช่างยนต์': {
-    id: 'auto',
-    name: 'แผนกวิชาช่างยนต์',
-    icon: '🚗',
-    subjectTeacher: { username: 'subject_auto', name: 'อ.วิชัย เครื่องยนต์' },
-    teacher: { username: 'teacher_auto', name: 'อ.อนุสรณ์ ช่างยนต์' },
-    head: { username: 'head_auto', name: 'อ.ประสิทธิ์ ยานยนต์' }
-  },
-  'แผนกวิชาช่างไฟฟ้า': {
-    id: 'electric',
-    name: 'แผนกวิชาช่างไฟฟ้า',
-    icon: '⚡',
-    subjectTeacher: { username: 'subject_electric', name: 'อ.ธีรพงษ์ วงจรไฟฟ้า' },
-    teacher: { username: 'teacher_electric', name: 'อ.กิตติศักดิ์ ไฟฟ้า' },
-    head: { username: 'head_electric', name: 'อ.สมศักดิ์ พลังงาน' }
-  },
-  'แผนกวิชาการบัญชี': {
-    id: 'account',
-    name: 'แผนกวิชาการบัญชี',
-    icon: '📊',
-    subjectTeacher: { username: 'subject_account', name: 'อ.กมลชนก การเงิน' },
-    teacher: { username: 'teacher_account', name: 'อ.พิมพา บัญชี' },
-    head: { username: 'head_account', name: 'อ.วรรณา ยอดเงิน' }
-  },
-  'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล': {
-    id: 'digital',
-    name: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล',
-    icon: '💻',
-    subjectTeacher: { username: 'subject_digital', name: 'อ.ปิยะพงษ์ โปรแกรม' },
-    teacher: { username: 'teacher_digital', name: 'อ.ธนากร ดิจิทัล' },
-    head: { username: 'head_digital', name: 'อ.ณัฐพงษ์ เทคโนโลยี' }
-  },
-  'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล': {
-    id: 'office',
-    name: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล',
-    icon: '📁',
-    subjectTeacher: { username: 'subject_office', name: 'อ.ศิริพร งานเอกสาร' },
-    teacher: { username: 'teacher_office', name: 'อ.นภาวรรณ สำนักงาน' },
-    head: { username: 'head_office', name: 'อ.สุพรรณี การจัดการ' }
-  }
+  'แผนกวิชาช่างยนต์': { id: 'auto', name: 'แผนกวิชาช่างยนต์', icon: '🚗' },
+  'แผนกวิชาช่างไฟฟ้ากำลัง': { id: 'electric', name: 'แผนกวิชาช่างไฟฟ้ากำลัง', icon: '⚡' },
+  'แผนกวิชาการบัญชี': { id: 'account', name: 'แผนกวิชาการบัญชี', icon: '📊' },
+  'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล': { id: 'digital', name: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล', icon: '💻' },
+  'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล': { id: 'office', name: 'แผนกวิชาการจัดการสำนักงาน/การจัดการธุรกิจดิจิทัล', icon: '📁' }
 };
 
 const KNOWN_USERS = {
@@ -1156,16 +1121,14 @@ async function handleLoginSubmit(e) {
       if (result.token) {
         localStorage.setItem('onepass_auth_token', result.token);
       }
-      const matchedKnown = KNOWN_USERS[u.username.toLowerCase()] || {};
       const fullUserObj = {
-        ...matchedKnown,
         ...u,
-        full_name: u.full_name || matchedKnown.full_name || 'ผู้ใช้งาน OnePass',
+        full_name: u.full_name || 'ผู้ใช้งาน OnePass',
         username: u.username,
-        role: u.role || matchedKnown.role || 'student',
-        student_code: u.student_code || matchedKnown.student_code || '',
-        dept: u.dept || (u.departments ? u.departments.name : 'แผนกวิชาช่างไฟฟ้ากำลัง (ปวส.2/1)'),
-        advisor: u.advisor || u.advisor_name || (u.classrooms ? u.classrooms.advisor_name : 'อ.กิตติศักดิ์ ไฟฟ้า'),
+        role: u.role || 'student',
+        student_code: u.student_code || '',
+        dept: u.dept || (u.departments ? u.departments.name : ''),
+        advisor: u.advisor || u.advisor_name || (u.classrooms ? u.classrooms.advisor_name : ''),
         plate: u.plate || u.plate_no || '-',
         phone: u.phone || '-',
         parent_phone: u.parent_phone || '',
@@ -1184,18 +1147,7 @@ async function handleLoginSubmit(e) {
     console.warn('API login check fallback:', err);
   }
 
-  // 2. Fallback ตรวจสอบกับบัญชีทั้ง 4 บทบาท (รหัสผ่าน 1234)
-  const matched = KNOWN_USERS[username];
-  if (matched && password === '1234') {
-    if (errorAlert) errorAlert.classList.add('hidden');
-    localStorage.setItem('onepass_logged_in', 'true');
-    localStorage.setItem('onepass_current_user', JSON.stringify(matched));
-    applyCurrentUserUI(matched);
-    checkAuth();
-    return;
-  }
-
-  // 3. ตรวจสอบผู้ใช้ที่ลงทะเบียนในเครื่อง (Local Registered)
+  // 2. ตรวจสอบผู้ใช้ที่ลงทะเบียนในเครื่อง (Local Registered)
   const registeredUsers = JSON.parse(localStorage.getItem('onepass_registered_users') || '[]');
   const matchedReg = registeredUsers.find(u => (u.email === username || u.name === username) && u.password === password);
   if (matchedReg) {
@@ -1222,7 +1174,7 @@ async function handleLoginSubmit(e) {
   if (errorAlert) {
     errorAlert.classList.remove('hidden');
     const errText = errorAlert.querySelector('p:last-child');
-    if (errText) errText.innerHTML = 'Username หรือ Password ไม่ถูกต้อง (เลือกรหัสทดสอบ student / teacher / head / admin รหัส: <strong>1234</strong>)';
+    if (errText) errText.innerHTML = 'Username หรือ Password ไม่ถูกต้อง';
   }
 }
 
@@ -7356,6 +7308,8 @@ function openAddUserModal() {
     modal.classList.remove('hidden');
     handleAdminAddUserRoleChange();
   }
+  CACHED_TEACHER_ACCOUNTS = null;
+  updateStudentAdvisorOptions();
   document.querySelectorAll('.admin-new-subject-classroom-cb').forEach(cb => { cb.checked = false; });
   updateSubjectClassroomSummary();
   document.getElementById('admin-new-subject-classroom-panel')?.classList.add('hidden');
@@ -7403,7 +7357,7 @@ async function handleAdminCreateUser(e) {
     const curriculum_level = document.getElementById('admin-new-level')?.value || 'ปวช.';
     const class_year = document.getElementById('admin-new-year')?.value || '1';
     const room_number = document.getElementById('admin-new-room')?.value || '1';
-    const advisor_username = document.getElementById('admin-new-advisor-select')?.value || 'teacher_auto';
+    const advisor_username = document.getElementById('admin-new-advisor-select')?.value || '';
 
     if (!student_code) {
       alert('กรุณากรอกรหัสนักศึกษา (11 หลัก)');
@@ -7513,6 +7467,47 @@ async function loadAdminDepartments() {
     }
   } catch (err) {
     container.innerHTML = `<div class="p-4 text-center text-xs text-rose-500 font-bold">เกิดข้อผิดพลาด: ${err.message}</div>`;
+  }
+}
+
+let CACHED_TEACHER_ACCOUNTS = null;
+
+async function fetchAllUserAccounts() {
+  if (CACHED_TEACHER_ACCOUNTS) return CACHED_TEACHER_ACCOUNTS;
+  const token = await ensureAuthToken();
+  const res = await fetch('/api/admin/users', { headers: { 'Authorization': `Bearer ${token}` } });
+  const data = await res.json();
+  CACHED_TEACHER_ACCOUNTS = Array.isArray(data.users) ? data.users : (Array.isArray(data) ? data : []);
+  return CACHED_TEACHER_ACCOUNTS;
+}
+
+// เติมตัวเลือก "ครูที่ปรึกษา" ตอนเพิ่มนักเรียน จากบัญชีครูที่ปรึกษาจริงที่สร้างไว้แล้ว
+// กรองตามแผนก+ชั้นปีที่กำลังเลือกอยู่ ถ้าไม่พบที่ตรงเป๊ะ จะโชว์ครูที่ปรึกษาทั้งหมดแทนเผื่อยังไม่ได้ผูกชั้นไว้
+async function updateStudentAdvisorOptions() {
+  const select = document.getElementById('admin-new-advisor-select');
+  if (!select) return;
+
+  const dept = document.getElementById('admin-new-dept-select')?.value || '';
+  const level = document.getElementById('admin-new-level')?.value || '';
+  const year = document.getElementById('admin-new-year')?.value || '';
+  const targetClassroom = `${level}${year}`;
+  const deptShort = dept.replace('แผนกวิชา', '').split('/')[0].trim();
+
+  try {
+    const users = await fetchAllUserAccounts();
+    const advisors = users.filter(u => u.role === 'advisor');
+    const matched = advisors.filter(u => {
+      const classrooms = String(u.classroom || '').split(',').map(c => c.trim());
+      const sameClass = classrooms.includes(targetClassroom);
+      const sameDept = !deptShort || String(u.dept || '').includes(deptShort);
+      return sameClass && sameDept;
+    });
+    const list = matched.length ? matched : advisors;
+
+    select.innerHTML = '<option value="">-- ยังไม่กำหนด --</option>' +
+      list.map(u => `<option value="${u.username}">${u.full_name || u.username}${u.classroom ? ` (${u.classroom})` : ''}</option>`).join('');
+  } catch (err) {
+    console.warn('Load advisor options for student form error:', err.message);
   }
 }
 
