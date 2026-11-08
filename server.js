@@ -501,6 +501,29 @@ function mergeClassroomList(existingClassroom, newClassroom) {
   return list.join(',');
 }
 
+// หา department_id จริงจากชื่อแผนก ถ้ายังไม่มีแถวในตาราง departments ให้สร้างให้เลย (self-healing)
+async function resolveOrCreateDepartmentId(deptName) {
+  const clean = String(deptName || '').trim();
+  if (!clean) return null;
+  const existing = await db.query('SELECT id FROM departments WHERE name = ?', [clean]);
+  if (existing[0]) return existing[0].id;
+  const code = clean.replace('แผนกวิชา', '').trim().slice(0, 20) || ('DEPT' + Date.now());
+  const result = await db.query('INSERT INTO departments (name, code) VALUES (?, ?)', [clean, code]);
+  return result.insertId;
+}
+
+// หา classroom_id จริงจากชื่อชั้น+แผนก ถ้ายังไม่มีแถวให้สร้างให้เลย (self-healing)
+// หมายเหตุ: ครูรายวิชาเลือกได้หลายชั้น (เก็บเป็น "ปวช.1,ปวช.2" ใน profiles.json) แต่คอลัมน์ classroom_id
+// ในฐานข้อมูลเก็บได้ค่าเดียว จึงผูกกับชั้นแรกในรายการเป็นชั้นหลัก ส่วนรายการเต็มยังอยู่ใน profiles.json เหมือนเดิม
+async function resolveOrCreateClassroomId(classroomField, departmentId) {
+  const first = String(classroomField || '').split(',')[0].trim();
+  if (!first) return null;
+  const existing = await db.query('SELECT id FROM classrooms WHERE name = ? AND department_id <=> ?', [first, departmentId]);
+  if (existing[0]) return existing[0].id;
+  const result = await db.query('INSERT INTO classrooms (name, department_id) VALUES (?, ?)', [first, departmentId]);
+  return result.insertId;
+}
+
 // ตรวจสอบเวลาทับซ้อนในตารางสอน (ข้อ 12: ตรวจพบเวลาทับซ้อนต้องแจ้งเตือน)
 // Helper: ค้นหาหรือสร้างบัญชีครูรายวิชาอัตโนมัติเมื่อเพิ่มตารางสอน/นำเข้า Excel (รหัสผ่านเริ่มต้น 1234)
 function getAllActiveTeacherAccountsMap() {
@@ -1953,14 +1976,38 @@ app.post('/api/admin/users', authenticateToken, requireRole(['admin']), async (r
 
   if (supabase) {
     try {
+      // ผูก department_id/classroom_id จริงใน DB (เดิมโค้ดนี้ข้ามไปเก็บแค่ใน profiles.json ทำให้ query ตรงๆ ใน MySQL หาไม่เจอ)
+      let resolvedDeptId = null;
+      let resolvedClassroomId = null;
+      try {
+        if (userData.dept) resolvedDeptId = await resolveOrCreateDepartmentId(userData.dept);
+        if (userData.classroom) resolvedClassroomId = await resolveOrCreateClassroomId(userData.classroom, resolvedDeptId);
+      } catch (fkErr) {
+        console.warn('Resolve department/classroom id warning:', fkErr.message);
+      }
+
       // ลอง insert หรือ upsert (ON DUPLICATE KEY UPDATE ตาม username)
       const newId = crypto.randomUUID();
       await db.query(
-        `INSERT INTO users (id, username, password, full_name, role, student_code, plate_no, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE password=VALUES(password), full_name=VALUES(full_name), role=VALUES(role),
-           student_code=VALUES(student_code), plate_no=VALUES(plate_no), status=VALUES(status)`,
-        [newId, cleanUser, userData.password, finalFullName, role, userData.student_code, plate_no, 'active']
+        `INSERT INTO users (
+           id, username, password, password_hash, full_name, role, student_code, plate_no, status,
+           department_id, classroom_id, advisor_username, advisor_name,
+           student_prefix, first_name, last_name, curriculum_level, class_year, room_number
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE password=VALUES(password), password_hash=VALUES(password_hash),
+           full_name=VALUES(full_name), role=VALUES(role), student_code=VALUES(student_code),
+           plate_no=VALUES(plate_no), status=VALUES(status), department_id=VALUES(department_id),
+           classroom_id=VALUES(classroom_id), advisor_username=VALUES(advisor_username),
+           advisor_name=VALUES(advisor_name), student_prefix=VALUES(student_prefix),
+           first_name=VALUES(first_name), last_name=VALUES(last_name),
+           curriculum_level=VALUES(curriculum_level), class_year=VALUES(class_year), room_number=VALUES(room_number)`,
+        [
+          newId, cleanUser, userData.password, userData.password_hash, finalFullName, role, userData.student_code, plate_no, 'active',
+          resolvedDeptId, resolvedClassroomId, userData.advisor_username, userData.advisor_name,
+          userData.student_prefix, userData.first_name, userData.last_name,
+          userData.curriculum_level, userData.class_year, userData.room_number
+        ]
       );
       const rows = await db.query('SELECT * FROM users WHERE username = ?', [cleanUser]);
       const data = rows;
