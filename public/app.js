@@ -6727,7 +6727,7 @@ let gateStatusPollInterval = null;
 
 function switchAdminTab(tabName) {
   currentAdminTab = tabName;
-  const tabs = ['users', 'depts', 'timetables', 'settings', 'import_students', 'devices', 'gate_status'];
+  const tabs = ['users', 'depts', 'timetables', 'settings', 'import_students', 'devices', 'gate_status', 'all_requests'];
   tabs.forEach(t => {
     const btn = document.getElementById(`admin-tab-btn-${t}`);
     const panel = document.getElementById(`admin-panel-${t}`);
@@ -6765,6 +6765,101 @@ function switchAdminTab(tabName) {
   else if (tabName === 'gate_status') {
     fetchGateDeviceStatus();
     gateStatusPollInterval = setInterval(fetchGateDeviceStatus, 3000);
+  }
+  else if (tabName === 'all_requests') loadAdminAllRequests();
+}
+
+const ADMIN_REQUEST_STATUS_LABELS = {
+  'pending_advisor': 'รอครูที่ปรึกษา (ขั้น 1/4)',
+  'pending_dept_head': 'รอหัวหน้าแผนกวิชา (ขั้น 2/4)',
+  'pending_discipline': 'รอฝ่ายปกครอง/หลักสูตร (ขั้น 3/4)',
+  'pending_deputy': 'รอรองผู้อำนวยการ (ขั้น 4/4)',
+  'approved': 'อนุมัติแล้ว (ได้รับ QR Pass)',
+  'gate_opened': 'เปิดไม้กั้นแล้ว',
+  'exited': 'ออกนอกสถานศึกษาแล้ว',
+  'returned': 'กลับเข้าแล้ว',
+  'rejected': 'ไม่อนุมัติ',
+  'expired': 'หมดอายุอัตโนมัติ'
+};
+
+async function loadAdminAllRequests() {
+  const container = document.getElementById('admin-all-requests-list');
+  if (!container) return;
+  container.innerHTML = `<div class="text-center py-8 text-slate-400 text-xs"><i class="fa-solid fa-spinner fa-spin text-lg mb-2 block"></i> กำลังโหลดคำขอทั้งหมด...</div>`;
+
+  try {
+    const res = await fetch('/api/requests');
+    const data = await res.json();
+    const requests = Array.isArray(data.requests) ? data.requests : [];
+    renderAdminAllRequests(requests);
+  } catch (err) {
+    container.innerHTML = `<div class="p-4 text-center text-xs text-rose-500 font-bold">เกิดข้อผิดพลาด: ${err.message}</div>`;
+  }
+}
+
+function renderAdminAllRequests(requests) {
+  const container = document.getElementById('admin-all-requests-list');
+  if (!container) return;
+
+  if (!requests.length) {
+    container.innerHTML = `<div class="p-6 text-center text-slate-400 text-xs bg-slate-50 rounded-2xl">ยังไม่มีคำขอในระบบ</div>`;
+    return;
+  }
+
+  const sorted = [...requests].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+
+  container.innerHTML = sorted.map(r => {
+    const statusOptions = Object.keys(ADMIN_REQUEST_STATUS_LABELS).map(s =>
+      `<option value="${s}" ${s === r.status ? 'selected' : ''}>${ADMIN_REQUEST_STATUS_LABELS[s] || s}</option>`
+    ).join('');
+    return `
+      <div class="p-3.5 bg-white hover:bg-slate-50/80 rounded-2xl border border-slate-200 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition">
+        <div class="space-y-1 min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="font-bold text-slate-800 text-xs sm:text-sm">${escapeHtml(r.requestNo || '-')}</span>
+            <span class="text-[11px] text-slate-500">${escapeHtml(r.studentName || '-')} (${escapeHtml(r.studentCode || '-')})</span>
+          </div>
+          <div class="text-[11px] text-slate-500">${escapeHtml(r.deptName || '-')} • ${escapeHtml(r.classroomName || '-')} • ${escapeHtml(r.leaveDate || '-')}</div>
+          <div class="text-[11px] text-slate-400">สร้างเมื่อ: ${r.createdAt ? new Date(r.createdAt).toLocaleString('th-TH') : '-'}</div>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+          <select id="admin-req-status-${r.id}" class="px-2.5 py-1.5 bg-slate-50 border border-slate-300 rounded-xl text-[11px] font-bold text-slate-800">
+            ${statusOptions}
+          </select>
+          <button type="button" onclick="handleAdminChangeRequestStatus(${r.id})" class="px-2.5 py-1.5 rounded-xl bg-cyan-600 hover:bg-cyan-700 text-white text-[11px] font-bold transition shadow-2xs">
+            บันทึก
+          </button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function handleAdminChangeRequestStatus(requestId) {
+  const select = document.getElementById(`admin-req-status-${requestId}`);
+  if (!select) return;
+  const newStatus = select.value;
+  if (!confirm(`ยืนยันเปลี่ยนสถานะคำขอ #${requestId} เป็น "${ADMIN_REQUEST_STATUS_LABELS[newStatus] || newStatus}" หรือไม่?\n(การแก้ไขนี้ข้ามขั้นตอนอนุมัติปกติ ใช้เฉพาะกรณีจำเป็นเท่านั้น)`)) return;
+
+  try {
+    const token = await ensureAuthToken();
+    const res = await fetch(`/api/admin/requests/${requestId}/status`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ status: newStatus })
+    });
+    const data = await res.json();
+    if (data.success) {
+      alert('✅ ' + (data.message || 'แก้ไขสถานะสำเร็จแล้ว'));
+      loadAdminAllRequests();
+    } else {
+      alert('❌ ' + (data.message || 'แก้ไขสถานะไม่สำเร็จ'));
+    }
+  } catch (err) {
+    alert('❌ เกิดข้อผิดพลาด: ' + err.message);
   }
 }
 

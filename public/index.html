@@ -1467,6 +1467,15 @@
                   </span>
                   <i class="fa-solid fa-chevron-right text-[10px] opacity-0 group-hover:opacity-70 hidden lg:inline"></i>
                 </button>
+
+                <button type="button" onclick="switchAdminTab('all_requests')" id="admin-tab-btn-all_requests"
+                  class="w-full px-3.5 py-2.5 rounded-2xl text-slate-400 hover:text-white hover:bg-slate-800/60 font-medium transition flex items-center justify-between gap-2.5 text-left group">
+                  <span class="flex items-center gap-2.5 min-w-0">
+                    <i class="fa-solid fa-list-check text-sm shrink-0 text-indigo-400"></i>
+                    <span class="truncate">คำขอทั้งหมด</span>
+                  </span>
+                  <i class="fa-solid fa-chevron-right text-[10px] opacity-0 group-hover:opacity-70 hidden lg:inline"></i>
+                </button>
               </nav>
             </div>
 
@@ -2777,6 +2786,26 @@
               <button type="button" onclick="handleGateTestComponent('relay', this)" class="py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[11px] font-bold transition">Relay</button>
               <button type="button" onclick="handleGateTestComponent('buzzer', this)" class="py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-[11px] font-bold transition">บัซเซอร์</button>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB: คำขอทั้งหมด (All Leave Requests - Admin Override) -->
+      <div id="admin-panel-all_requests" class="space-y-4 hidden">
+        <div class="bg-white rounded-3xl p-4 sm:p-5 border border-slate-200 shadow-sm space-y-3">
+          <div class="flex items-center justify-between pb-2 border-b border-slate-100">
+            <div>
+              <h4 class="font-bold text-slate-800 text-sm flex items-center gap-2">
+                <i class="fa-solid fa-list-check text-indigo-600"></i> คำขอทั้งหมดในระบบ
+              </h4>
+              <p class="text-[11px] text-slate-500">ดูสถานะทุกคำขอ และแก้ไขสถานะได้โดยตรง (ข้ามขั้นตอนอนุมัติปกติ ใช้เมื่อจำเป็นเท่านั้น)</p>
+            </div>
+            <button type="button" onclick="loadAdminAllRequests()" class="text-xs text-blue-600 hover:text-blue-700 font-semibold flex items-center gap-1 shrink-0">
+              <i class="fa-solid fa-rotate-right"></i> รีเฟรช
+            </button>
+          </div>
+          <div id="admin-all-requests-list" class="space-y-2">
+            <p class="text-slate-400 italic text-xs">กำลังโหลด...</p>
           </div>
         </div>
       </div>

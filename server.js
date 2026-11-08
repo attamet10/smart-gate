@@ -4736,6 +4736,60 @@ app.delete('/api/requests/:id', authenticateToken, async (req, res) => {
   res.json({ success: true, message: 'ลบคำร้องเรียบร้อยแล้ว' });
 });
 
+// แอดมินแก้ไขสถานะคำร้องตรงๆ (ข้ามขั้นตอนอนุมัติปกติ) - ใช้เมื่อคำร้องค้างผิดปกติหรือต้องแก้ไขเร่งด่วน
+const ADMIN_REQUEST_STATUS_STEP_MAP = {
+  pending_advisor: 1,
+  pending_dept_head: 2,
+  pending_discipline: 3,
+  pending_deputy: 4,
+  approved: 5,
+  gate_opened: 5,
+  exited: 5,
+  returned: 5,
+  rejected: null,
+  expired: null
+};
+app.put('/api/admin/requests/:id/status', authenticateToken, requireRole(['admin']), async (req, res) => {
+  const requestId = parseInt(req.params.id);
+  const { status } = req.body || {};
+
+  if (!Object.prototype.hasOwnProperty.call(ADMIN_REQUEST_STATUS_STEP_MAP, status)) {
+    return res.status(400).json({ success: false, message: `สถานะ "${status}" ไม่ถูกต้อง` });
+  }
+
+  if (!supabase) {
+    return res.status(500).json({ success: false, message: 'ไม่ได้เชื่อมต่อฐานข้อมูล' });
+  }
+
+  try {
+    const rows = await db.query('SELECT * FROM leave_requests WHERE id = ?', [requestId]);
+    const existing = rows[0];
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'ไม่พบคำร้องนี้ในระบบ' });
+    }
+
+    const nextStep = ADMIN_REQUEST_STATUS_STEP_MAP[status];
+    const nowIso = new Date().toISOString();
+    const updateFields = { status, updated_at: nowIso };
+    if (nextStep !== null) updateFields.current_step = nextStep;
+
+    const setClause = Object.keys(updateFields).map(k => `${k} = ?`).join(', ');
+    await db.query(`UPDATE leave_requests SET ${setClause} WHERE id = ?`, [...Object.values(updateFields), requestId]);
+
+    await db.query(
+      `INSERT INTO approval_logs (request_id, step, step_name, approver_username, approver_name, approver_role, action, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [requestId, nextStep || existing.current_step, 'แอดมินแก้ไขสถานะโดยตรง', req.user.username, req.user.full_name || req.user.username, 'admin', 'admin_override', `เปลี่ยนสถานะจาก "${existing.status}" เป็น "${status}"`]
+    );
+
+    console.log(`⚙️ [ADMIN OVERRIDE] Request #${requestId} status ${existing.status} -> ${status} by ${req.user.username}`);
+    res.json({ success: true, message: `แก้ไขสถานะคำร้องเป็น "${status}" สำเร็จแล้ว` });
+  } catch (err) {
+    console.error('Admin override request status error:', err);
+    res.status(500).json({ success: false, message: 'แก้ไขสถานะไม่สำเร็จ: ' + err.message });
+  }
+});
+
 // งานปกครอง/แอดมิน จัดการละเว้นรายการไม่นับสถิติ (เช่น เครื่องสแกนเสีย)
 app.post('/api/requests/:id/waive', authenticateToken, requireRole(['discipline_head', 'admin']), async (req, res) => {
   const requestId = parseInt(req.params.id);
