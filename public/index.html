@@ -3479,6 +3479,29 @@
               <option value="ปวส.2">ปวส.2 (ประกาศนียบัตรวิชาชีพชั้นสูง ชั้นปีที่ 2)</option>
             </select>
           </div>
+
+          <!-- ชั้นที่สอน สำหรับครูรายวิชา (เลือกได้หลายชั้น เพราะครู 1 คนมักสอนหลายชั้นปี) -->
+          <div id="admin-add-subject-classroom-box" class="hidden">
+            <label class="block text-slate-700 font-semibold mb-1 text-xs">ชั้นที่สอน (เลือกได้หลายชั้น)</label>
+            <div class="grid grid-cols-3 gap-2">
+              <label class="flex items-center gap-1.5 px-2 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs cursor-pointer hover:border-cyan-400">
+                <input type="checkbox" class="admin-new-subject-classroom-cb w-3.5 h-3.5" value="ปวช.1"> ปวช.1
+              </label>
+              <label class="flex items-center gap-1.5 px-2 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs cursor-pointer hover:border-cyan-400">
+                <input type="checkbox" class="admin-new-subject-classroom-cb w-3.5 h-3.5" value="ปวช.2"> ปวช.2
+              </label>
+              <label class="flex items-center gap-1.5 px-2 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs cursor-pointer hover:border-cyan-400">
+                <input type="checkbox" class="admin-new-subject-classroom-cb w-3.5 h-3.5" value="ปวช.3"> ปวช.3
+              </label>
+              <label class="flex items-center gap-1.5 px-2 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs cursor-pointer hover:border-cyan-400">
+                <input type="checkbox" class="admin-new-subject-classroom-cb w-3.5 h-3.5" value="ปวส.1"> ปวส.1
+              </label>
+              <label class="flex items-center gap-1.5 px-2 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs cursor-pointer hover:border-cyan-400">
+                <input type="checkbox" class="admin-new-subject-classroom-cb w-3.5 h-3.5" value="ปวส.2"> ปวส.2
+              </label>
+            </div>
+            <p class="text-[10px] text-slate-400 mt-1">ไม่เลือกก็บันทึกได้ — ระบบจะเพิ่มชั้นให้อัตโนมัติเองทีหลังตอนนำเข้าตารางสอนที่มีชื่อครูท่านนี้</p>
+          </div>
         </div>
 
         <div class="pt-2 flex gap-2">

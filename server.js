@@ -569,6 +569,15 @@ function isClassroomMatchServer(classA, classB) {
   return cleanA === cleanB || cleanA.includes(cleanB) || cleanB.includes(cleanA);
 }
 
+// รวมรายชื่อ "ชั้นที่สอน" ของครูรายวิชาแบบไม่ซ้ำ (เก็บเป็น string คั่นด้วยจุลภาค เช่น "ปวช.1,ปวช.2")
+function mergeClassroomList(existingClassroom, newClassroom) {
+  const clean = String(newClassroom || '').trim();
+  if (!clean) return existingClassroom || null;
+  const list = String(existingClassroom || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!list.includes(clean)) list.push(clean);
+  return list.join(',');
+}
+
 // ตรวจสอบเวลาทับซ้อนในตารางสอน (ข้อ 12: ตรวจพบเวลาทับซ้อนต้องแจ้งเตือน)
 // Helper: ค้นหาหรือสร้างบัญชีครูรายวิชาอัตโนมัติเมื่อเพิ่มตารางสอน/นำเข้า Excel (รหัสผ่านเริ่มต้น 1234)
 function getAllActiveTeacherAccountsMap() {
@@ -592,10 +601,11 @@ function getAllActiveTeacherAccountsMap() {
   return map;
 }
 
-async function ensureTeacherAccountProvisioned({ teacherUsername, teacherName, department }) {
+async function ensureTeacherAccountProvisioned({ teacherUsername, teacherName, department, classroom }) {
   let cleanUser = String(teacherUsername || '').trim().toLowerCase();
   let cleanName = String(teacherName || '').trim();
   const cleanDept = String(department || 'แผนกวิชาช่างยนต์').trim();
+  const cleanClassroom = String(classroom || '').trim();
 
   // Map legacy aliases
   if (cleanUser === 'subject_elec') cleanUser = 'subject_electric';
@@ -616,6 +626,11 @@ async function ensureTeacherAccountProvisioned({ teacherUsername, teacherName, d
     const isDefaultPlaceholder = ['subject_auto', 'subject_electric', 'subject_account', 'subject_digital', 'subject_office'].includes(cleanUser);
     const nameMatchesExisting = !cleanName || cleanName === 'อาจารย์ผู้สอน' || cleanName === existing.full_name;
     if (nameMatchesExisting || !isDefaultPlaceholder) {
+      if (cleanClassroom) {
+        const prof = getStoredProfile(existing.username);
+        const merged = mergeClassroomList(prof.classroom, cleanClassroom);
+        if (merged !== prof.classroom) saveStoredProfile(existing.username, { classroom: merged });
+      }
       return {
         username: existing.username,
         fullName: cleanName && cleanName !== 'อาจารย์ผู้สอน' ? cleanName : existing.full_name,
@@ -632,6 +647,11 @@ async function ensureTeacherAccountProvisioned({ teacherUsername, teacherName, d
     );
     if (matchedByName) {
       ALL_SYSTEM_ACCOUNTS[matchedByName.username] = matchedByName;
+      if (cleanClassroom) {
+        const prof = getStoredProfile(matchedByName.username);
+        const merged = mergeClassroomList(prof.classroom, cleanClassroom);
+        if (merged !== prof.classroom) saveStoredProfile(matchedByName.username, { classroom: merged });
+      }
       return {
         username: matchedByName.username,
         fullName: matchedByName.full_name,
@@ -663,6 +683,7 @@ async function ensureTeacherAccountProvisioned({ teacherUsername, teacherName, d
     role: 'subject_teacher',
     dept: cleanDept,
     departments: { name: cleanDept },
+    classroom: cleanClassroom || null,
     isAutoCreated: true
   };
 
@@ -673,6 +694,7 @@ async function ensureTeacherAccountProvisioned({ teacherUsername, teacherName, d
     full_name: finalFullName,
     role: 'subject_teacher',
     dept: cleanDept,
+    classroom: cleanClassroom || null,
     isAutoCreated: true
   });
 
@@ -2322,7 +2344,8 @@ app.post('/api/timetables', authenticateToken, requireRole(['admin']), async (re
     provisionedTeacher = await ensureTeacherAccountProvisioned({
       teacherUsername,
       teacherName,
-      department
+      department,
+      classroom
     });
     teacherUsername = provisionedTeacher.username;
     teacherName = provisionedTeacher.fullName;
@@ -2388,6 +2411,7 @@ app.put('/api/timetables/:id', authenticateToken, requireRole(['admin']), async 
   const existing = ttData.entries[idx];
   const body = req.body || {};
   const nextDept = (body.department || body.deptName || existing.department || existing.deptName || '').trim();
+  const nextClassroom = (body.classroom !== undefined ? String(body.classroom) : (existing.classroom || '')).trim();
   const nextPeriodType = (body.periodType || existing.periodType || 'study').trim();
 
   let resolvedTeacherUsername = body.teacherUsername !== undefined ? String(body.teacherUsername).trim() : existing.teacherUsername;
@@ -2398,7 +2422,8 @@ app.put('/api/timetables/:id', authenticateToken, requireRole(['admin']), async 
     provisionedTeacher = await ensureTeacherAccountProvisioned({
       teacherUsername: resolvedTeacherUsername,
       teacherName: resolvedTeacherName,
-      department: nextDept
+      department: nextDept,
+      classroom: nextClassroom
     });
     resolvedTeacherUsername = provisionedTeacher.username;
     resolvedTeacherName = provisionedTeacher.fullName;
@@ -2510,7 +2535,8 @@ app.post('/api/timetables/import', authenticateToken, requireRole(['admin']), as
       const prov = await ensureTeacherAccountProvisioned({
         teacherUsername: r.teacherUsername || '',
         teacherName: r.teacherName || 'อาจารย์ผู้สอน',
-        department: dept
+        department: dept,
+        classroom: cls
       });
       finalTeacherUsername = prov.username;
       finalTeacherName = prov.fullName;

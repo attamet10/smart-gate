@@ -7304,18 +7304,18 @@ function handleAdminAddUserRoleChange() {
   const studentFields = document.getElementById('admin-add-student-fields');
   const staffFields = document.getElementById('admin-add-staff-fields');
   const advClassBox = document.getElementById('admin-add-advisor-classroom-box');
+  const subjClassBox = document.getElementById('admin-add-subject-classroom-box');
 
   if (role === 'student') {
     if (studentFields) studentFields.classList.remove('hidden');
     if (staffFields) staffFields.classList.add('hidden');
     if (advClassBox) advClassBox.classList.add('hidden');
+    if (subjClassBox) subjClassBox.classList.add('hidden');
   } else {
     if (studentFields) studentFields.classList.add('hidden');
     if (staffFields) staffFields.classList.remove('hidden');
-    if (advClassBox) {
-      if (role === 'advisor') advClassBox.classList.remove('hidden');
-      else advClassBox.classList.add('hidden');
-    }
+    if (advClassBox) advClassBox.classList.toggle('hidden', role !== 'advisor');
+    if (subjClassBox) subjClassBox.classList.toggle('hidden', role !== 'subject_teacher');
   }
 }
 
@@ -7394,6 +7394,9 @@ async function handleAdminCreateUser(e) {
     if (role === 'advisor') {
       const advClass = document.getElementById('admin-new-advisor-classroom')?.value || 'ปวช.1';
       payload.classroom = advClass;
+    } else if (role === 'subject_teacher') {
+      const selectedClassrooms = Array.from(document.querySelectorAll('.admin-new-subject-classroom-cb:checked')).map(cb => cb.value);
+      if (selectedClassrooms.length) payload.classroom = selectedClassrooms.join(',');
     }
   }
 
