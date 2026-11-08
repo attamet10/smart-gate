@@ -465,6 +465,22 @@ function saveRequestMeta(requestKey, metaPatch) {
   }
 }
 
+function deleteRequestMeta(requestKey) {
+  if (!requestKey) return false;
+  try {
+    const all = loadRequestsMeta();
+    const key = String(requestKey);
+    if (all[key]) {
+      delete all[key];
+      fs.writeFileSync(REQUESTS_META_FILE, JSON.stringify(all, null, 2), 'utf8');
+      return true;
+    }
+  } catch (e) {
+    console.warn('Delete request meta error:', e.message);
+  }
+  return false;
+}
+
 function parseTimeToMins(tStr) {
   if (!tStr || typeof tStr !== 'string' || !tStr.includes(':')) return 0;
   const [h, m] = tStr.trim().substring(0, 5).split(':').map(Number);
@@ -3508,7 +3524,7 @@ app.get('/api/requests', async (req, res) => {
             status: r.status,
             currentStep,
             totalSteps,
-            workflowVersion: isFiveStep ? 5 : 3,
+            workflowVersion: totalSteps === 5 ? 5 : (totalSteps === 3 ? 3 : 4),
             qrToken: r.qr_token,
             isQrUsed: r.is_qr_used,
             rejectionReason: r.rejection_reason || meta.rejectionReason || null,

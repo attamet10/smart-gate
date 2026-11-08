@@ -10523,8 +10523,6 @@ async function fetchAdminImportLogs() {
 }
 
 // Expose globally
-window.handleActivationStep1 = handleActivationStep1;
-window.handleActivationStep2 = handleActivationStep2;
 window.handleRosterFileSelect = handleRosterFileSelect;
 window.commitRosterImport = commitRosterImport;
 window.setAdminRoleFilter = setAdminRoleFilter;
