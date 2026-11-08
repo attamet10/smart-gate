@@ -197,17 +197,26 @@ void runLocalTests() {
 
   drainQrSerial();
   updateLcd();
+}
 
-  outputCycleState = !outputCycleState;
-  gateServo.write(outputCycleState ? 90 : 0);
-  digitalWrite(PIN_LED_GREEN, outputCycleState ? HIGH : LOW);
-  digitalWrite(PIN_LED_RED, outputCycleState ? LOW : HIGH);
-  digitalWrite(PIN_LED_YELLOW, outputCycleState ? HIGH : LOW);
-  digitalWrite(PIN_RELAY, outputCycleState ? HIGH : LOW);
+// สั่งงาน Servo/LED/Relay/บัซเซอร์ครั้งเดียวตอนบูต เพื่อยืนยันว่าสายต่อถูก (ไม่วนซ้ำทุกรอบ
+// เพราะถ้าต่อกับประตูจริงจะทำให้ไม้กั้น/กลอนขยับเองทุก 3 วิ ซึ่งไม่ต้องการ)
+void runStartupOutputCheck() {
+  gateServo.write(90);
+  digitalWrite(PIN_LED_GREEN, HIGH);
+  digitalWrite(PIN_LED_RED, LOW);
+  digitalWrite(PIN_LED_YELLOW, HIGH);
+  digitalWrite(PIN_RELAY, HIGH);
+  tone(PIN_SPEAKER, 1200, 120);
+  delay(500);
 
-  if (outputCycleState) {
-    tone(PIN_SPEAKER, 1200, 120);
-  }
+  gateServo.write(0);
+  digitalWrite(PIN_LED_GREEN, LOW);
+  digitalWrite(PIN_LED_RED, HIGH);
+  digitalWrite(PIN_LED_YELLOW, LOW);
+  digitalWrite(PIN_RELAY, LOW);
+
+  outputCycleState = true; // ยืนยันแล้วว่าสั่งงานได้ตอนบูต ไม่ต้องวนซ้ำอีก
 }
 
 void connectWiFi() {
@@ -388,6 +397,7 @@ void setup() {
 
   QrSerial.begin(QR_BAUD, SERIAL_8N1, QR_RX_PIN, QR_TX_PIN);
 
+  runStartupOutputCheck();
   connectWiFi();
   Serial.println("📡 เริ่มรายงานสถานะไปที่ " + String(SERVER_HOST) + " ทุก 3 วินาที");
 }
