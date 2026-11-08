@@ -1878,17 +1878,30 @@ app.get('/api/departments', (req, res) => {
 });
 
 app.post('/api/admin/departments', authenticateToken, requireRole(['admin']), (req, res) => {
-  const { name, teacherName, headName, subjectTeacherName } = req.body;
+  const { name, teacherUsername, headUsername } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ success: false, message: 'กรุณาระบุชื่อแผนกวิชา' });
+
+  // ผูกกับบัญชีครูจริงที่มีอยู่แล้วเท่านั้น (ห้ามสร้าง username ปลอมขึ้นมาเอง เพราะจะไม่มีใครล็อกอินเข้าไปอนุมัติได้จริง)
+  const allAccounts = getAllActiveTeacherAccountsMap();
+  const cleanTeacherUsername = String(teacherUsername || '').trim().toLowerCase();
+  const cleanHeadUsername = String(headUsername || '').trim().toLowerCase();
+  const matchedTeacher = cleanTeacherUsername ? allAccounts[cleanTeacherUsername] : null;
+  const matchedHead = cleanHeadUsername ? allAccounts[cleanHeadUsername] : null;
+
+  if (cleanTeacherUsername && !matchedTeacher) {
+    return res.status(400).json({ success: false, message: `ไม่พบบัญชีครูที่ปรึกษา "${teacherUsername}" ในระบบ` });
+  }
+  if (cleanHeadUsername && !matchedHead) {
+    return res.status(400).json({ success: false, message: `ไม่พบบัญชีหัวหน้าแผนก "${headUsername}" ในระบบ` });
+  }
 
   const depts = loadDepartments();
   const newId = 'dept_' + Date.now();
   const newDept = {
     id: newId,
     name: name.trim(),
-    subjectTeacher: { username: `subject_${newId}`, name: subjectTeacherName ? subjectTeacherName.trim() : 'อ.ครูรายวิชาประจำแผนก' },
-    teacher: { username: `teacher_${newId}`, name: teacherName ? teacherName.trim() : 'อ.ผู้ดูแลแผนก' },
-    head: { username: `head_${newId}`, name: headName ? headName.trim() : 'อ.หัวหน้าแผนก' }
+    teacher: matchedTeacher ? { username: matchedTeacher.username, name: matchedTeacher.full_name } : null,
+    head: matchedHead ? { username: matchedHead.username, name: matchedHead.full_name } : null
   };
   depts.push(newDept);
   saveDepartments(depts);

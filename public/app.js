@@ -7501,6 +7501,8 @@ async function loadAdminDepartments() {
     </div>
   `;
 
+  loadDeptFormTeacherOptions();
+
   try {
     const res = await fetch('/api/departments');
     const data = await res.json();
@@ -7511,6 +7513,30 @@ async function loadAdminDepartments() {
     }
   } catch (err) {
     container.innerHTML = `<div class="p-4 text-center text-xs text-rose-500 font-bold">เกิดข้อผิดพลาด: ${err.message}</div>`;
+  }
+}
+
+// เติมตัวเลือกครูที่ปรึกษา/หัวหน้าแผนก ในฟอร์มเพิ่มแผนกวิชา จากบัญชีครูจริงที่มีอยู่แล้ว (ไม่ให้พิมพ์ชื่อเอง)
+async function loadDeptFormTeacherOptions() {
+  const teacherSelect = document.getElementById('admin-new-dept-teacher');
+  const headSelect = document.getElementById('admin-new-dept-head');
+  if (!teacherSelect || !headSelect) return;
+
+  try {
+    const token = await ensureAuthToken();
+    const res = await fetch('/api/admin/users', { headers: { 'Authorization': `Bearer ${token}` } });
+    const data = await res.json();
+    const users = Array.isArray(data.users) ? data.users : (Array.isArray(data) ? data : []);
+
+    const buildOptions = (role) => users
+      .filter(u => u.role === role)
+      .map(u => `<option value="${u.username}">${u.full_name || u.username}${u.dept ? ` (${u.dept})` : ''}</option>`)
+      .join('');
+
+    teacherSelect.innerHTML = '<option value="">-- ยังไม่กำหนด --</option>' + buildOptions('advisor');
+    headSelect.innerHTML = '<option value="">-- ยังไม่กำหนด --</option>' + buildOptions('dept_head');
+  } catch (err) {
+    console.warn('Load teacher options for dept form error:', err.message);
   }
 }
 
@@ -7550,11 +7576,11 @@ function renderAdminDepartments(depts) {
 async function handleAdminCreateDept(e) {
   if (e) e.preventDefault();
   const name = document.getElementById('admin-new-dept-name')?.value.trim();
-  const teacherName = document.getElementById('admin-new-dept-teacher')?.value.trim();
-  const headName = document.getElementById('admin-new-dept-head')?.value.trim();
+  const teacherUsername = document.getElementById('admin-new-dept-teacher')?.value.trim();
+  const headUsername = document.getElementById('admin-new-dept-head')?.value.trim();
 
   if (!name) {
-    alert('กรุณากรอกชื่อแผนกวิชา');
+    alert('กรุณาเลือกชื่อแผนกวิชา');
     return;
   }
 
@@ -7566,12 +7592,11 @@ async function handleAdminCreateDept(e) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`
       },
-      body: JSON.stringify({ name, teacherName, headName })
+      body: JSON.stringify({ name, teacherUsername, headUsername })
     });
     const data = await res.json();
     if (data.success) {
       alert(`✅ เพิ่มแผนกวิชา "${name}" สำเร็จ`);
-      document.getElementById('admin-new-dept-name').value = '';
       document.getElementById('admin-new-dept-teacher').value = '';
       document.getElementById('admin-new-dept-head').value = '';
       loadAdminDepartments();
