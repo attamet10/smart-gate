@@ -20,11 +20,15 @@
 #include <ESP32Servo.h>
 
 // ====================== กำหนดขาพิน ======================
-#define PIN_SERVO        18    // มอเตอร์ Servo ไม้กั้น (0° = ปิด, 90° = เปิด)
+#define PIN_SERVO        18    // มอเตอร์ Servo ไม้กั้น
 #define PIN_LED_GREEN    32    // LED สีเขียว: อนุญาตผ่าน / ไม้กั้นเปิด
 #define PIN_LED_RED      33    // LED สีแดง: รอสแกน / ไม้กั้นปิด
 #define PIN_RELAY        26    // Relay กลอนไฟฟ้า/ไม้กั้น (HIGH = ทำงาน)
 #define PIN_BUTTON       15    // ปุ่มเปิดฉุกเฉินแบบปุ่มกด (Active LOW)
+
+// กำหนดองศา Servo ไม้กั้น (ปรับทิศทางตามการติดตั้งจริง: 0° = ยกขึ้นเปิดทาง, 90° = ยกลงปิดทาง)
+#define SERVO_ANGLE_OPEN    0     // ยกไม้กั้นขึ้น (เปิดทาง)
+#define SERVO_ANGLE_CLOSE   90    // ลดไม้กั้นลง (ปิดกั้นทาง)
 
 // Ultrasonic HC-SR04 (เซนเซอร์ตรวจจับคน/รถผ่าน)
 #define PIN_TRIG         5
@@ -65,7 +69,7 @@ void openGate(int durationSec = 30, String reqId = "") {
   objectDetectTime = 0;
 
   // ควบคุมฮาร์ดแวร์
-  gateServo.write(90);                // ยกไม้กั้นขึ้น 90 องศา
+  gateServo.write(SERVO_ANGLE_OPEN);  // ยกไม้กั้นขึ้น
   digitalWrite(PIN_RELAY, HIGH);      // ทำงาน Relay
   digitalWrite(PIN_LED_GREEN, HIGH);  // ไฟเขียวติด
   digitalWrite(PIN_LED_RED, LOW);     // ไฟแดงดับ
@@ -82,7 +86,7 @@ void closeGate(const char* reason = "TIMEOUT_30S") {
   isGateOpen = false;
 
   // ควบคุมฮาร์ดแวร์
-  gateServo.write(0);                 // ลดไม้กั้นลง 0 องศา
+  gateServo.write(SERVO_ANGLE_CLOSE); // ลดไม้กั้นลงปิดกั้นทาง
   digitalWrite(PIN_RELAY, LOW);       // ตัด Relay
   digitalWrite(PIN_LED_GREEN, LOW);   // ไฟเขียวดับ
   digitalWrite(PIN_LED_RED, HIGH);    // ไฟแดงติด

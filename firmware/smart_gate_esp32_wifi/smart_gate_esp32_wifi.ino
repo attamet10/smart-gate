@@ -47,6 +47,10 @@
 #define PIN_RELAY        26
 #define PIN_BUTTON       15
 
+// กำหนดองศา Servo ไม้กั้น (ปรับทิศทางตามการติดตั้งจริง: 0° = ยกขึ้นเปิดทาง, 90° = ยกลงปิดทาง)
+#define SERVO_ANGLE_OPEN    0     // ยกไม้กั้นขึ้น (เปิดทาง)
+#define SERVO_ANGLE_CLOSE   90    // ลดไม้กั้นลง (ปิดกั้นทาง)
+
 #define PIN_TRIG         5
 #define PIN_ECHO         19
 
@@ -126,7 +130,7 @@ void openGate(int durationSec, String reqId) {
   objectPassed = false;
   objectDetectTime = 0;
 
-  gateServo.write(90);
+  gateServo.write(SERVO_ANGLE_OPEN);
   digitalWrite(PIN_RELAY, HIGH);
   digitalWrite(PIN_LED_GREEN, HIGH);
   digitalWrite(PIN_LED_RED, LOW);
@@ -138,7 +142,7 @@ void openGate(int durationSec, String reqId) {
 void closeGate(const String& reason) {
   isGateOpen = false;
 
-  gateServo.write(0);
+  gateServo.write(SERVO_ANGLE_CLOSE);
   digitalWrite(PIN_RELAY, LOW);
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_RED, HIGH);
@@ -231,7 +235,7 @@ void setup() {
 
   // เริ่มต้นที่สถานะปิด (ไม่ publish เพราะยังไม่เชื่อมต่อ MQTT)
   isGateOpen = false;
-  gateServo.write(0);
+  gateServo.write(SERVO_ANGLE_CLOSE);
   digitalWrite(PIN_RELAY, LOW);
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_RED, HIGH);

@@ -27,6 +27,9 @@
 #include "secrets.h"
 
 #define PIN_SERVO        18
+// กำหนดองศา Servo ไม้กั้น (ปรับทิศทางตามการติดตั้งจริง: 0° = ยกขึ้นเปิดทาง, 90° = ยกลงปิดทาง)
+#define SERVO_ANGLE_OPEN    0     // ยกไม้กั้นขึ้น (เปิดทาง)
+#define SERVO_ANGLE_CLOSE   90    // ลดไม้กั้นลง (ปิดกั้นทาง)
 #define PIN_LED_GREEN    32
 #define PIN_LED_RED      33
 #define PIN_RELAY        26
@@ -67,7 +70,7 @@ void runTestCycle() {
   buttonPressed = (digitalRead(PIN_BUTTON) == LOW);
 
   outputCycleState = !outputCycleState;
-  gateServo.write(outputCycleState ? 90 : 0);
+  gateServo.write(outputCycleState ? SERVO_ANGLE_OPEN : SERVO_ANGLE_CLOSE);
   digitalWrite(PIN_LED_GREEN, outputCycleState ? HIGH : LOW);
   digitalWrite(PIN_LED_RED, outputCycleState ? LOW : HIGH);
   digitalWrite(PIN_RELAY, outputCycleState ? HIGH : LOW);
@@ -199,7 +202,7 @@ void setup() {
 
   gateServo.setPeriodHertz(50);
   gateServo.attach(PIN_SERVO, 500, 2400);
-  gateServo.write(0);
+  gateServo.write(SERVO_ANGLE_CLOSE);
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);

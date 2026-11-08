@@ -44,6 +44,9 @@
 #include "secrets.h"
 
 #define PIN_SERVO        18
+// กำหนดองศา Servo ไม้กั้น (ปรับทิศทางตามการติดตั้งจริง: 0° = ยกขึ้นเปิดทาง, 90° = ยกลงปิดทาง)
+#define SERVO_ANGLE_OPEN    0     // ยกไม้กั้นขึ้น (เปิดทาง)
+#define SERVO_ANGLE_CLOSE   90    // ลดไม้กั้นลง (ปิดกั้นทาง)
 #define PIN_LED_GREEN    27
 #define PIN_LED_RED      33
 #define PIN_LED_YELLOW   25
@@ -204,7 +207,7 @@ void runLocalTests() {
 // สั่งงาน Servo/LED/Relay/บัซเซอร์ครั้งเดียวตอนบูต เพื่อยืนยันว่าสายต่อถูก (ไม่วนซ้ำทุกรอบ
 // เพราะถ้าต่อกับประตูจริงจะทำให้ไม้กั้น/กลอนขยับเองทุก 3 วิ ซึ่งไม่ต้องการ)
 void runStartupOutputCheck() {
-  gateServo.write(90);
+  gateServo.write(SERVO_ANGLE_OPEN);
   digitalWrite(PIN_LED_GREEN, HIGH);
   digitalWrite(PIN_LED_RED, LOW);
   digitalWrite(PIN_LED_YELLOW, HIGH);
@@ -212,7 +215,7 @@ void runStartupOutputCheck() {
   tone(PIN_SPEAKER, 1200, 120);
   delay(500);
 
-  gateServo.write(0);
+  gateServo.write(SERVO_ANGLE_CLOSE);
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_RED, HIGH);
   digitalWrite(PIN_LED_YELLOW, LOW);
@@ -317,7 +320,7 @@ void reportStatus() {
 
 // ทดสอบเปิดไม้กั้นค้างไว้สักครู่ตามคำสั่งจากหน้าแอดมิน (ปุ่ม "ทดสอบเปิด")
 void testOpenSequence() {
-  gateServo.write(90);
+  gateServo.write(SERVO_ANGLE_OPEN);
   digitalWrite(PIN_RELAY, HIGH);
   digitalWrite(PIN_LED_GREEN, HIGH);
   digitalWrite(PIN_LED_RED, LOW);
@@ -326,7 +329,7 @@ void testOpenSequence() {
 
   delay(4000); // เปิดค้างไว้ 4 วินาทีให้เห็นผลชัดเจน
 
-  gateServo.write(0);
+  gateServo.write(SERVO_ANGLE_CLOSE);
   digitalWrite(PIN_RELAY, LOW);
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_RED, HIGH);
@@ -335,9 +338,9 @@ void testOpenSequence() {
 
 // ทดสอบอุปกรณ์ทีละชิ้น (ปุ่มแยกในหน้าแอดมิน) - สั่งงานสั้นๆ ให้เห็น/ได้ยินผลแล้วคืนค่าเดิม
 void testServoOnly() {
-  gateServo.write(90);
+  gateServo.write(SERVO_ANGLE_OPEN);
   delay(800);
-  gateServo.write(0);
+  gateServo.write(SERVO_ANGLE_CLOSE);
   Serial.println("✅ ทดสอบ Servo เสร็จสิ้น");
 }
 
@@ -378,7 +381,7 @@ void setup() {
 
   gateServo.setPeriodHertz(50);
   gateServo.attach(PIN_SERVO, 500, 2400);
-  gateServo.write(0);
+  gateServo.write(SERVO_ANGLE_CLOSE);
 
   Wire.begin(21, 22); // SDA=GPIO21, SCL=GPIO22
   Wire.setClock(50000); // ลดความเร็ว I2C ลงเหลือ 50kHz กันจอตัวอักษรขาดหาย
