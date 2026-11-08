@@ -1,12 +1,20 @@
 /**
  * OnePass Server - Node.js Express Application
- * Database: XAMPP MySQL (ongkharak_std)
+ * Database: MySQL (Local XAMPP & Production Plesk)
  * No PHP used - Pure JavaScript Backend & Frontend
  */
+
+process.on('uncaughtException', (err) => {
+  console.error('[Process Uncaught Exception]:', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Process Unhandled Rejection]:', reason);
+});
 
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const QRCode = require('qrcode');
@@ -1846,11 +1854,20 @@ app.get('*', (req, res) => {
 });
 
 // Start Server
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(`=================================================`);
   console.log(`OnePass Web Application (Node.js + Vanilla JS)`);
   console.log(`Server is running at: http://localhost:${PORT}`);
   console.log(`=================================================`);
-  await initDatabase();
-  telegram.startTelegramPolling();
+
+  // Non-blocking initialization so the HTTP web server never crashes on startup
+  initDatabase().catch(err => {
+    console.error('[DB Startup Warning]:', err.message);
+  });
+
+  try {
+    telegram.startTelegramPolling();
+  } catch (tgErr) {
+    console.error('[Telegram Startup Warning]:', tgErr.message);
+  }
 });

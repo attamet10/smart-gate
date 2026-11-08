@@ -1,12 +1,30 @@
 /**
  * OnePass - Database Connection & Table Initialization
- * Using mysql2/promise for XAMPP MySQL (ongkharak_std)
- * Supports dynamic auto-detection for both 3307 and 3306
+ * Using mysql2/promise for MySQL (Local XAMPP 3307/3306 & Production Plesk 3306)
  */
 
 const fs = require('fs');
+const path = require('path');
 const net = require('net');
 const mysql = require('mysql2/promise');
+
+// Auto-load .env if file exists without needing external dotenv
+try {
+  const envPath = path.join(__dirname, '.env');
+  if (fs.existsSync(envPath)) {
+    const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+    lines.forEach(line => {
+      line = line.trim();
+      if (!line || line.startsWith('#')) return;
+      const idx = line.indexOf('=');
+      if (idx > 0) {
+        const k = line.substring(0, idx).trim();
+        const v = line.substring(idx + 1).trim().replace(/^['"]|['"]$/g, '');
+        if (!process.env[k]) process.env[k] = v;
+      }
+    });
+  }
+} catch (e) {}
 
 function checkPort(port) {
   return new Promise((resolve) => {
@@ -15,12 +33,13 @@ function checkPort(port) {
     socket.on('connect', () => { socket.destroy(); resolve(true); });
     socket.on('timeout', () => { socket.destroy(); resolve(false); });
     socket.on('error', () => { socket.destroy(); resolve(false); });
-    socket.connect(port, '127.0.0.1');
+    socket.connect(port, process.env.DB_HOST || '127.0.0.1');
   });
 }
 
 function detectDefaultPort() {
   if (process.env.DB_PORT) return parseInt(process.env.DB_PORT, 10);
+  if (process.platform !== 'win32') return 3306; // Linux / Plesk standard
   try {
     const iniPath = 'C:\\xampp\\mysql\\bin\\my.ini';
     if (fs.existsSync(iniPath)) {
@@ -40,7 +59,7 @@ function createPool(port) {
     host: process.env.DB_HOST || '127.0.0.1',
     port: port,
     user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || '',
+    password: process.env.DB_PASSWORD !== undefined ? process.env.DB_PASSWORD : '',
     database: process.env.DB_NAME || 'ongkharak_std',
     waitForConnections: true,
     connectionLimit: 10,
@@ -52,24 +71,31 @@ function createPool(port) {
 pool = createPool(activePort);
 
 async function getConnectedPool() {
-  // If current pool works, use it
   try {
     const conn = await pool.getConnection();
     conn.release();
     return pool;
   } catch (err) {
-    // If port failed, test alternative ports
-    if (await checkPort(3307)) {
-      activePort = 3307;
-      pool = createPool(3307);
-      return pool;
+    // If port failed, try alternative ports
+    if (process.platform === 'win32') {
+      if (await checkPort(3307)) {
+        activePort = 3307;
+        pool = createPool(3307);
+        return pool;
+      }
+      if (await checkPort(3306)) {
+        activePort = 3306;
+        pool = createPool(3306);
+        return pool;
+      }
+    } else {
+      if (await checkPort(3306)) {
+        activePort = 3306;
+        pool = createPool(3306);
+        return pool;
+      }
     }
-    if (await checkPort(3306)) {
-      activePort = 3306;
-      pool = createPool(3306);
-      return pool;
-    }
-    throw new Error(`ไม่สามารถเชื่อมต่อ MySQL ได้ (พอร์ต 3307/3306) กรุณาเปิดโปรแกรม XAMPP แล้วกดปุ่ม "Start" ที่ MySQL`);
+    throw new Error(`ไม่สามารถเชื่อมต่อ MySQL ได้ (${err.message}) กรุณาตรวจสอบการตั้งค่าฐานข้อมูล`);
   }
 }
 
@@ -78,9 +104,8 @@ async function getConnectedPool() {
  */
 async function initDatabase() {
   try {
-    const p = await getConnectedPool();
-    const connection = await p.getConnection();
-    console.log(`[DB] Connected successfully to MySQL (ongkharak_std on port ${activePort})`);
+    const connection = await getConnectedPool();
+    console.log(`[DB] Connected successfully to MySQL (${process.env.DB_NAME || 'ongkharak_std'} on port ${activePort})`);
 
     // 1. Create onepass_requests table
     await connection.query(`
@@ -129,45 +154,49 @@ async function initDatabase() {
           'completed',
           'expired'
         ) NOT NULL DEFAULT 'pending_subject',
-        \`qr_token\` VARCHAR(128) UNIQUE DEFAULT NULL,
+        \`qr_token\` VARCHAR(64) DEFAULT NULL,
         \`qr_expires_at\` DATETIME DEFAULT NULL,
         \`gate_out_by\` INT DEFAULT NULL,
         \`gate_out_at\` DATETIME DEFAULT NULL,
         \`gate_in_by\` INT DEFAULT NULL,
         \`gate_in_at\` DATETIME DEFAULT NULL,
-        \`created_at\` DATETIME DEFAULT CURRENT_TIMESTAMP,
-        \`updated_at\` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        INDEX (\`student_id\`),
-        INDEX (\`user_id\`),
-        INDEX (\`subject_teacher_id\`),
-        INDEX (\`advisor_teacher_id\`),
-        INDEX (\`head_major_teacher_id\`),
-        INDEX (\`head_discipline_user_id\`),
-        INDEX (\`deputy_director_user_id\`),
-        INDEX (\`status\`),
-        INDEX (\`qr_token\`)
+        \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX \`idx_student_id\` (\`student_id\`),
+        INDEX \`idx_user_id\` (\`user_id\`),
+        INDEX \`idx_status\` (\`status\`),
+        INDEX \`idx_qr_token\` (\`qr_token\`)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
 
-    // 2. Create onepass_logs table
+    // 2. Create advisor_assignments table
     await connection.query(`
-      CREATE TABLE IF NOT EXISTS \`onepass_logs\` (
+      CREATE TABLE IF NOT EXISTS \`advisor_assignments\` (
         \`id\` INT AUTO_INCREMENT PRIMARY KEY,
-        \`request_id\` INT NOT NULL,
-        \`user_id\` INT NOT NULL,
-        \`role_acted\` VARCHAR(64) NOT NULL,
-        \`action\` ENUM('created', 'approved', 'rejected', 'gate_exit', 'gate_return', 'cancelled') NOT NULL,
-        \`comment\` TEXT DEFAULT NULL,
-        \`created_at\` DATETIME DEFAULT CURRENT_TIMESTAMP,
-        INDEX (\`request_id\`),
-        INDEX (\`user_id\`)
+        \`level_id\` INT NOT NULL,
+        \`major_id\` INT NOT NULL,
+        \`teacher_id\` INT NOT NULL,
+        \`academic_year\` VARCHAR(10) NOT NULL DEFAULT '2569',
+        \`term\` VARCHAR(5) NOT NULL DEFAULT '2',
+        \`created_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY \`uk_advisor_assignment\` (\`level_id\`, \`major_id\`, \`teacher_id\`, \`academic_year\`, \`term\`)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
 
-    connection.release();
+    // 3. Create gate_duty_assignments table
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS \`gate_duty_assignments\` (
+        \`id\` INT AUTO_INCREMENT PRIMARY KEY,
+        \`head_of_discipline_user_id\` INT DEFAULT NULL,
+        \`deputy_director_user_id\` INT DEFAULT NULL,
+        \`updated_by\` INT DEFAULT NULL,
+        \`updated_at\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    `);
+
     console.log('[DB] OnePass tables verified/initialized.');
   } catch (err) {
-    console.error(`[DB] Database initialization error:`, err.message);
+    console.error(`[DB Warning] Database connection/initialization error:`, err.message);
   }
 }
 
