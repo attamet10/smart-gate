@@ -1,1039 +1,790 @@
-// ============================================================================
-// OnePass IoT Smart Gate: Telegram Bot & Notification Service
-// ============================================================================
+/**
+ * OnePass Telegram Notification & Inline Approval Service
+ * - Displays all dates in Thai Buddhist Era (พ.ศ.)
+ * - Allows teachers and administrators to approve/reject directly in Telegram via Inline Buttons
+ * - Sends official Digital Gate Pass QR Code directly in Telegram upon final approval
+ * - Automatically notifies the student at EVERY step of the process
+ * - Long-polling loop listens for button clicks without requiring public webhooks/tunnels!
+ */
 
+const https = require('https');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
-const db = require('./db');
+const QRCode = require('qrcode');
+const { query } = require('./db');
 
-// Local storage fallback for tokens and logs
-const DATA_DIR = path.join(__dirname, 'data');
-const TOKENS_FILE = path.join(DATA_DIR, 'telegram_tokens.json');
-const LOGS_FILE = path.join(DATA_DIR, 'telegram_logs.json');
-
-function ensureDataFiles() {
-  if (!fs.existsSync(DATA_DIR)) {
-    try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {}
-  }
-  if (!fs.existsSync(TOKENS_FILE)) {
-    try { fs.writeFileSync(TOKENS_FILE, JSON.stringify({}), 'utf8'); } catch (e) {}
-  }
-  if (!fs.existsSync(LOGS_FILE)) {
-    try { fs.writeFileSync(LOGS_FILE, JSON.stringify([]), 'utf8'); } catch (e) {}
-  }
-}
-ensureDataFiles();
-
-function readLocalTokens() {
-  try {
-    return JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8') || '{}');
-  } catch (e) {
-    return {};
-  }
-}
-
-function writeLocalTokens(tokens) {
-  try {
-    fs.writeFileSync(TOKENS_FILE, JSON.stringify(tokens, null, 2), 'utf8');
-  } catch (e) {}
-}
-
-function appendLocalLog(logEntry) {
-  try {
-    const logs = JSON.parse(fs.readFileSync(LOGS_FILE, 'utf8') || '[]');
-    logs.unshift({ id: crypto.randomUUID(), ...logEntry, created_at: new Date().toISOString() });
-    if (logs.length > 500) logs.length = 500; // Keep last 500
-    fs.writeFileSync(LOGS_FILE, JSON.stringify(logs, null, 2), 'utf8');
-  } catch (e) {}
-}
-
-let botPollingActive = false;
+let cachedConfig = null;
+let lastCacheTime = 0;
+let isPollingStarted = false;
 let lastUpdateId = 0;
 
-function getBotToken() {
-  return process.env.TELEGRAM_BOT_TOKEN ? process.env.TELEGRAM_BOT_TOKEN.trim() : '';
-}
-
-function getBotUsername() {
-  return process.env.TELEGRAM_BOT_USERNAME ? process.env.TELEGRAM_BOT_USERNAME.replace('@', '').trim() : 'OnePassGateBot';
-}
-
-function getAppUrl() {
-  return process.env.APP_BASE_URL || 'https://statistical-part-unsigned-considerable.trycloudflare.com';
-}
-
-// ----------------------------------------------------------------------------
-// Telegram API Client (using native fetch)
-// ----------------------------------------------------------------------------
-async function callTelegramApi(method, body = {}) {
-  const token = getBotToken();
-  if (!token) {
-    return { ok: false, simulated: true, description: 'TELEGRAM_BOT_TOKEN is not configured in .env' };
+// Thai Date & Time Formatters (พ.ศ.)
+function formatThaiDate(dateStr) {
+  if (!dateStr) return '-';
+  const parts = String(dateStr).split('T')[0].split(' ')[0].split('-');
+  const thaiMonths = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+  if (parts.length === 3) {
+    const y = parseInt(parts[0], 10);
+    const m = parseInt(parts[1], 10) - 1;
+    const d = parseInt(parts[2], 10);
+    return `${d} ${thaiMonths[m]} ${y + 543}`;
   }
+  const dt = new Date(dateStr);
+  if (isNaN(dt.getTime())) return dateStr;
+  return `${dt.getDate()} ${thaiMonths[dt.getMonth()]} ${dt.getFullYear() + 543}`;
+}
 
-  const url = `https://api.telegram.org/bot${token}/${method}`;
+function formatThaiDateTime(dateTimeStr) {
+  if (!dateTimeStr) return '-';
+  const dt = new Date(dateTimeStr);
+  if (isNaN(dt.getTime())) return dateTimeStr;
+  const datePart = formatThaiDate(dt);
+  const hours = String(dt.getHours()).padStart(2, '0');
+  const minutes = String(dt.getMinutes()).padStart(2, '0');
+  return `${datePart} เวลา ${hours}:${minutes} น.`;
+}
+
+async function getTelegramConfig() {
+  const now = Date.now();
+  if (cachedConfig && now - lastCacheTime < 30000) {
+    return cachedConfig;
+  }
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    const data = await res.json();
-    return data;
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-}
-
-// ----------------------------------------------------------------------------
-// Core Notification Dispatcher (Non-blocking, Retry & Block Detection)
-// ----------------------------------------------------------------------------
-async function sendTelegramMessage(chatId, text, options = {}, retries = 2) {
-  if (!chatId) return { ok: false, error: 'No chatId provided' };
-
-  const payload = {
-    chat_id: chatId,
-    text: text,
-    parse_mode: options.parse_mode || 'HTML',
-    disable_web_page_preview: options.disable_web_page_preview ?? true
-  };
-
-  if (options.reply_markup) {
-    payload.reply_markup = options.reply_markup;
-  }
-
-  let attempt = 0;
-  while (attempt <= retries) {
-    attempt++;
-    const res = await callTelegramApi('sendMessage', payload);
-
-    if (res.ok) {
-      appendLocalLog({
-        chat_id: chatId,
-        notify_type: options.notify_type || 'general',
-        message_preview: text.substring(0, 100),
-        status: 'success'
-      });
-      return { ok: true, result: res.result };
-    }
-
-    // Check if user blocked the bot (Error 403)
-    if (res.error_code === 403 || (res.description && res.description.toLowerCase().includes('bot was blocked'))) {
-      console.warn(`⚠️ [TELEGRAM] User blocked the bot (chat_id: ${chatId}). Disconnecting...`);
-      await handleUserBlockedBot(chatId);
-      appendLocalLog({
-        chat_id: chatId,
-        notify_type: options.notify_type || 'general',
-        message_preview: text.substring(0, 100),
-        status: 'blocked',
-        error_message: res.description
-      });
-      return { ok: false, blocked: true, description: res.description };
-    }
-
-    // If simulated mode (no token set)
-    if (res.simulated) {
-      console.log(`ℹ️ [TELEGRAM:SIMULATION] Message to ${chatId}:\n${text}`);
-      appendLocalLog({
-        chat_id: chatId,
-        notify_type: options.notify_type || 'simulation',
-        message_preview: text.substring(0, 100),
-        status: 'simulated'
-      });
-      return { ok: true, simulated: true };
-    }
-
-    console.warn(`⚠️ [TELEGRAM] Attempt ${attempt} failed:`, res.description || res.error);
-    if (attempt <= retries) {
-      // Exponential backoff wait (e.g. 1.5s, 3s)
-      await new Promise(r => setTimeout(r, attempt * 1500));
-    } else {
-      appendLocalLog({
-        chat_id: chatId,
-        notify_type: options.notify_type || 'general',
-        message_preview: text.substring(0, 100),
-        status: 'failed',
-        error_message: res.description || res.error
-      });
-      return { ok: false, error: res.description || res.error };
-    }
-  }
-}
-
-// When user blocks the bot, reset connection in DB and local store
-async function handleUserBlockedBot(chatId) {
-  try {
-    if (db.pool) {
-      await db.query(
-        'UPDATE users SET telegram_chat_id = NULL, telegram_username = NULL, telegram_connected_at = NULL WHERE telegram_chat_id = ?',
-        [chatId]
-      );
+    const [rows] = await query('SELECT bot_token, chat_id FROM telegram_settings WHERE id = 1 LIMIT 1');
+    if (rows.length > 0 && rows[0].bot_token) {
+      cachedConfig = {
+        botToken: rows[0].bot_token.trim(),
+        defaultChatId: rows[0].chat_id ? rows[0].chat_id.trim() : null
+      };
+      lastCacheTime = now;
+      return cachedConfig;
     }
   } catch (e) {
-    console.error('Error unlinking blocked telegram user in DB:', e.message);
+    console.error('[Telegram] Error reading telegram_settings:', e.message);
   }
 
-  // Update in profiles.json if present
-  try {
-    const profPath = path.join(DATA_DIR, 'profiles.json');
-    if (fs.existsSync(profPath)) {
-      const profs = JSON.parse(fs.readFileSync(profPath, 'utf8') || '{}');
-      for (const k in profs) {
-        if (profs[k].telegram_chat_id == chatId) {
-          profs[k].telegram_chat_id = null;
-          profs[k].telegram_username = null;
-          profs[k].telegram_connected_at = null;
-        }
-      }
-      fs.writeFileSync(profPath, JSON.stringify(profs, null, 2), 'utf8');
-    }
-  } catch (e) {}
+  return {
+    botToken: '9171059639:AAFnCl0tqD356M2UsY6Q8tVO1vvlnruy4-c',
+    defaultChatId: '8527824695'
+  };
 }
 
-// ----------------------------------------------------------------------------
-// Link Token Management (Unguessable, 1-time use, 10-minute expiry)
-// ----------------------------------------------------------------------------
-async function createLinkToken(userId, username) {
-  const token = crypto.randomBytes(16).toString('hex'); // 32 chars hex
-  const shortCode = String(Math.floor(100000 + Math.random() * 900000)); // 6-digit easy pairing code
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 mins
+/**
+ * Send Telegram message with optional Inline Keyboard
+ */
+async function sendTelegramMessage(chatId, text, inlineKeyboard = null) {
+  const config = await getTelegramConfig();
+  const targetChatId = chatId || config.defaultChatId;
 
-  // Save to database
-  if (db.pool) {
-    try {
-      await db.insertWithUuid('telegram_link_tokens', {
-        user_id: userId,
-        token: token,
-        expires_at: expiresAt,
-        used: false
-      });
-    } catch (err) {
-      console.warn('⚠️ [TELEGRAM] Fallback saving token locally:', err.message);
-    }
+  if (!config.botToken || !targetChatId) {
+    console.log('[Telegram] Missing bot token or target chat_id, skipped.');
+    return null;
   }
 
-  // Also save to local tokens store for rapid lookup and fallback
-  const tokens = readLocalTokens();
-  // Clear old expired tokens for this user
-  for (const k in tokens) {
-    if (tokens[k].userId === userId || new Date(tokens[k].expiresAt) < new Date()) {
-      delete tokens[k];
-    }
-  }
-
-  const tokenData = {
-    userId,
-    username,
-    token,
-    shortCode,
-    expiresAt,
-    used: false,
-    createdAt: new Date().toISOString()
+  const payloadObj = {
+    chat_id: targetChatId,
+    text: text,
+    parse_mode: 'HTML'
   };
 
-  // Map both 32-char hex token AND 6-digit numeric shortCode
-  tokens[token] = tokenData;
-  tokens[shortCode] = tokenData;
-  writeLocalTokens(tokens);
-
-  const botName = getBotUsername();
-  const link = `https://t.me/${botName}?start=${token}`;
-  const nativeLink = `tg://resolve?domain=${botName}&start=${token}`;
-  return { token, shortCode, link, nativeLink, expiresAt, botUsername: botName };
-}
-
-async function verifyAndConsumeLinkToken(token) {
-  if (!token) return null;
-  const clean = String(token).trim();
-  const now = new Date();
-
-  // Check database first
-  if (db.pool) {
-    try {
-      const rows = await db.query(
-        'SELECT * FROM telegram_link_tokens WHERE token = ? AND used = FALSE AND expires_at > ?',
-        [clean, now.toISOString().slice(0, 19).replace('T', ' ')]
-      );
-      const data = rows[0];
-
-      if (data) {
-        // Mark as used
-        await db.query('UPDATE telegram_link_tokens SET used = TRUE WHERE id = ?', [data.id]);
-        return data.user_id;
-      }
-    } catch (e) {}
+  if (inlineKeyboard && inlineKeyboard.length > 0) {
+    payloadObj.reply_markup = { inline_keyboard: inlineKeyboard };
   }
 
-  // Check local fallback
-  const tokens = readLocalTokens();
-  const item = tokens[clean];
-  if (item && !item.used && new Date(item.expiresAt) > now) {
-    item.used = true;
-    if (item.token && tokens[item.token]) tokens[item.token].used = true;
-    if (item.shortCode && tokens[item.shortCode]) tokens[item.shortCode].used = true;
-    writeLocalTokens(tokens);
-    return item.userId;
-  }
+  const payload = JSON.stringify(payloadObj);
 
-  return null;
-}
-
-// ----------------------------------------------------------------------------
-// Link Account with Chat ID (1-to-1 pairing guarantee)
-// ----------------------------------------------------------------------------
-async function linkTelegramAccount(userId, chatId, tgUsername, tgFullName) {
-  const connectedAt = new Date().toISOString();
-  let updatedUser = null;
-
-  // 1. Check if another user has this chatId, unlink them first (Requirement: 1 TG = 1 User)
-  if (db.pool) {
-    try {
-      await db.query(
-        'UPDATE users SET telegram_chat_id = NULL, telegram_username = NULL, telegram_connected_at = NULL WHERE telegram_chat_id = ?',
-        [chatId]
-      );
-    } catch (e) {}
-  }
-
-  // 2. Link this user in the database (try both id and username)
-  if (db.pool) {
-    try {
-      const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId);
-      const field = isUUID ? 'id' : 'username';
-
-      await db.query(
-        `UPDATE users SET telegram_chat_id = ?, telegram_username = ?, telegram_connected_at = ? WHERE ${field} = ?`,
-        [chatId, tgUsername || tgFullName || 'Telegram User', connectedAt, userId]
-      );
-      const rows = await db.query(`SELECT * FROM users WHERE ${field} = ?`, [userId]);
-      if (rows[0]) updatedUser = rows[0];
-    } catch (e) {
-      console.warn('⚠️ [TELEGRAM] Update user in database failed:', e.message);
+  const options = {
+    hostname: 'api.telegram.org',
+    port: 443,
+    path: `/bot${config.botToken}/sendMessage`,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(payload)
     }
-  }
+  };
 
-  // 3. Update in profiles.json fallback
-  try {
-    const profPath = path.join(DATA_DIR, 'profiles.json');
-    if (fs.existsSync(profPath)) {
-      const profs = JSON.parse(fs.readFileSync(profPath, 'utf8') || '{}');
-
-      // Resolve user details from the database if available
-      let dbUser = null;
-      if (db.pool) {
+  return new Promise((resolve) => {
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
         try {
-          const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId);
-          const field = isUUID ? 'id' : 'username';
-          const rows = await db.query(`SELECT id, username, full_name, role FROM users WHERE ${field} = ?`, [userId]);
-          dbUser = rows[0] || null;
-        } catch (e) {}
-      }
-
-      const aliasKeys = [userId, dbUser?.id, dbUser?.username, dbUser?.role].filter(Boolean);
-
-      for (const ak of aliasKeys) {
-        if (!profs[ak]) profs[ak] = {};
-        profs[ak].telegram_chat_id = chatId;
-        profs[ak].telegram_username = tgUsername || tgFullName;
-        profs[ak].telegram_connected_at = connectedAt;
-        if (dbUser) {
-          profs[ak].full_name = dbUser.full_name;
-          profs[ak].role = dbUser.role;
-          profs[ak].username = dbUser.username;
+          const json = JSON.parse(data);
+          if (json.ok) {
+            console.log(`[Telegram] Sent successfully to ${targetChatId} (Msg ID: ${json.result.message_id})`);
+            resolve(json.result);
+          } else {
+            console.warn(`[Telegram] API error:`, json.description);
+            resolve(null);
+          }
+        } catch (e) {
+          resolve(null);
         }
-      }
+      });
+    });
 
-      for (const k in profs) {
-        if (!aliasKeys.includes(k) && profs[k].telegram_chat_id == chatId) {
-          profs[k].telegram_chat_id = null;
-        }
-      }
-      fs.writeFileSync(profPath, JSON.stringify(profs, null, 2), 'utf8');
-      if (!updatedUser) updatedUser = profs[userId];
-    }
-  } catch (e) {}
+    req.on('error', (err) => {
+      console.error(`[Telegram] Network request error:`, err.message);
+      resolve(null);
+    });
 
-  return updatedUser;
+    req.write(payload);
+    req.end();
+  });
 }
 
-async function unlinkTelegramAccount(userId) {
-  if (db.pool) {
-    try {
-      const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId);
-      const field = isUUID ? 'id' : 'username';
-      await db.query(
-        `UPDATE users SET telegram_chat_id = NULL, telegram_username = NULL, telegram_connected_at = NULL WHERE ${field} = ?`,
-        [userId]
-      );
-    } catch (e) {}
+/**
+ * Send Telegram Photo (Multipart / form-data)
+ */
+async function sendTelegramPhoto(chatId, photoBuffer, caption = '') {
+  const config = await getTelegramConfig();
+  const targetChatId = chatId || config.defaultChatId;
+  if (!config.botToken || !targetChatId || !photoBuffer) return null;
+
+  const boundary = '----WebKitFormBoundary' + crypto.randomBytes(16).toString('hex');
+  const crlf = '\r\n';
+  let body = [];
+
+  body.push(Buffer.from(`--${boundary}${crlf}Content-Disposition: form-data; name="chat_id"${crlf}${crlf}${targetChatId}${crlf}`));
+
+  if (caption) {
+    body.push(Buffer.from(`--${boundary}${crlf}Content-Disposition: form-data; name="caption"${crlf}${crlf}${caption}${crlf}`));
+    body.push(Buffer.from(`--${boundary}${crlf}Content-Disposition: form-data; name="parse_mode"${crlf}${crlf}HTML${crlf}`));
   }
 
-  try {
-    const profPath = path.join(DATA_DIR, 'profiles.json');
-    if (fs.existsSync(profPath)) {
-      const profs = JSON.parse(fs.readFileSync(profPath, 'utf8') || '{}');
-      for (const k in profs) {
-        if (k === userId || profs[k].id === userId || profs[k].username === userId) {
-          profs[k].telegram_chat_id = null;
-          profs[k].telegram_username = null;
-          profs[k].telegram_connected_at = null;
-        }
-      }
-      fs.writeFileSync(profPath, JSON.stringify(profs, null, 2), 'utf8');
+  body.push(Buffer.from(`--${boundary}${crlf}Content-Disposition: form-data; name="photo"; filename="onepass_qr.png"${crlf}Content-Type: image/png${crlf}${crlf}`));
+  body.push(photoBuffer);
+  body.push(Buffer.from(`${crlf}--${boundary}--${crlf}`));
+
+  const payload = Buffer.concat(body);
+
+  const options = {
+    hostname: 'api.telegram.org',
+    port: 443,
+    path: `/bot${config.botToken}/sendPhoto`,
+    method: 'POST',
+    headers: {
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      'Content-Length': payload.length
     }
-  } catch (e) {}
-}
-
-async function findUserByChatId(chatId) {
-  if (!chatId) return null;
-  if (db.pool) {
-    try {
-      const rows = await db.query('SELECT * FROM users WHERE telegram_chat_id = ?', [chatId]);
-      if (rows[0]) return rows[0];
-    } catch (e) {}
-  }
-  try {
-    const profPath = path.join(DATA_DIR, 'profiles.json');
-    if (fs.existsSync(profPath)) {
-      const profs = JSON.parse(fs.readFileSync(profPath, 'utf8') || '{}');
-      for (const k in profs) {
-        if (profs[k].telegram_chat_id == chatId) {
-          return profs[k];
-        }
-      }
-    }
-  } catch (e) {}
-  return null;
-}
-
-// ----------------------------------------------------------------------------
-// Telegram Update Processing (Handles /start <token>)
-// ----------------------------------------------------------------------------
-async function processTelegramUpdate(update) {
-  if (!update || !update.message) return;
-  const msg = update.message;
-  const chatId = msg.chat?.id;
-  const rawText = (msg.text || '').trim();
-  const from = msg.from || {};
-  const tgUsername = from.username ? `@${from.username}` : (from.first_name || 'ผู้ใช้งาน');
-
-  // ตรวจสอบหารหัส Token (32-char hex หรือ 6-digit numeric shortCode)
-  let candidateToken = '';
-  if (rawText.startsWith('/start')) {
-    const parts = rawText.split(/\s+/);
-    candidateToken = parts[1] ? parts[1].trim() : '';
-  } else if (rawText.startsWith('/link')) {
-    const parts = rawText.split(/\s+/);
-    candidateToken = parts[1] ? parts[1].trim() : '';
-  } else if (/^[0-9]{6}$/.test(rawText)) {
-    candidateToken = rawText;
-  }
-
-  // 1. กรณีผู้ใช้ส่ง Token หรือ รหัส 6 หลักมา
-  if (candidateToken) {
-    const userId = await verifyAndConsumeLinkToken(candidateToken);
-    if (userId) {
-      // ผูกบัญชีสำเร็จ
-      const user = await linkTelegramAccount(userId, chatId, tgUsername, `${from.first_name || ''} ${from.last_name || ''}`.trim());
-      const displayName = user ? (user.full_name || user.username) : 'ผู้ใช้งาน';
-      const roleLabel = getRoleLabel(user ? user.role : '');
-
-      await sendTelegramMessage(
-        chatId,
-        `🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว (ถาวร)!</b>\n\n` +
-        `👤 <b>บัญชี:</b> ${displayName}\n` +
-        `🏷️ <b>ตำแหน่ง/บทบาท:</b> ${roleLabel}\n` +
-        `⏰ <b>วันที่เชื่อมต่อ:</b> ${new Date().toLocaleString('th-TH')}\n\n` +
-        `📲 คุณจะได้รับการแจ้งเตือนสถานะคำร้อง การอนุมัติ และการผ่านประตูแบบเรียลไทม์ที่นี่ตลอดไปครับ (การเชื่อมต่อเป็นแบบถาวร ไม่ต้องเชื่อมต่อซ้ำ)`,
-        { notify_type: 'account_linked' }
-      );
-      console.log(`✅ [TELEGRAM] Linked chatId ${chatId} with user: ${displayName} (${userId})`);
-      return;
-    } else {
-      // รหัสไม่ถูกต้องหรือหมดอายุ
-      await sendTelegramMessage(
-        chatId,
-        `⚠️ <b>รหัสเชื่อมต่อไม่ถูกต้องหรือหมดอายุแล้ว</b>\n\n` +
-        `รหัส 6 หลักและลิงก์มีอายุ 10 นาที (เพื่อความปลอดภัย)\n` +
-        `กรุณากดเปิดหน้าต่าง "เชื่อมต่อ Telegram" บนหน้าเว็บ OnePass เพื่อดูรหัสใหม่อีกครั้งครับ\n\n` +
-        `🆔 <b>Chat ID ของคุณคือ:</b> <code>${chatId}</code>`,
-        { notify_type: 'token_invalid' }
-      );
-      return;
-    }
-  }
-
-  // 2. ตรวจสอบว่า Chat ID นี้ผูกบัญชีไว้อยู่แล้วหรือไม่
-  const existing = await findUserByChatId(chatId);
-  if (existing) {
-    const displayName = existing.full_name || existing.username || 'ผู้ใช้งาน';
-    const roleLabel = getRoleLabel(existing.role || '');
-    await sendTelegramMessage(
-      chatId,
-      `✅ <b>บัญชีของคุณเชื่อมต่อกับ OnePass เรียบร้อยแล้ว (สถานะ: ถาวร)</b>\n\n` +
-      `👤 <b>บัญชีที่ผูก:</b> ${displayName}\n` +
-      `🏷️ <b>ตำแหน่ง/บทบาท:</b> ${roleLabel}\n` +
-      `🟢 <b>การแจ้งเตือน:</b> พร้อมทำงานตามปกติ\n\n` +
-      `<i>ระบบจะส่งการแจ้งเตือนคำร้องและการผ่านประตูมาที่นี่โดยอัตโนมัติครับ</i>`,
-      { notify_type: 'bot_status' }
-    );
-    return;
-  }
-
-  // 3. ผู้ใช้ยังไม่เคยผูก และไม่ได้ส่งรหัสมา -> ส่งคู่มือพร้อมแสดง Chat ID ชัดเจน
-  await sendTelegramMessage(
-    chatId,
-    `👋 <b>ยินดีต้อนรับสู่ OnePass IoT Smart Gate Bot</b>\n` +
-    `วิทยาลัยการอาชีพองครักษ์\n\n` +
-    `🆔 <b>Telegram Chat ID ของคุณคือ:</b>\n` +
-    `👉 <code>${chatId}</code> 👈 <i>(แตะที่ตัวเลขเพื่อคัดลอก)</i>\n\n` +
-    `📌 <b>วิธีเชื่อมต่อบัญชี (เลือกทำ 1 วิธี):</b>\n` +
-    `1️⃣ <b>พิมพ์รหัส 6 หลัก:</b> เปิดหน้าเว็บ OnePass แล้วพิมพ์รหัส 6 หลักที่แสดงบนหน้าเว็บ ส่งตอบกลับมาที่นี่ได้ทันที\n` +
-    `2️⃣ <b>กรอก Chat ID บนเว็บ:</b> คัดลอกเลข <code>${chatId}</code> ด้านบน ไปวางในช่อง "ระบุ Chat ID ด้วยตนเอง" บนหน้าเว็บ แล้วกดปุ่มเชื่อมต่อ\n\n` +
-    `เมื่อเชื่อมต่อแล้ว ระบบจะส่งแจ้งเตือนการขออนุญาตและผลการอนุมัติให้คุณทันทีครับ`,
-    { notify_type: 'welcome_guide' }
-  );
-}
-
-function getRoleLabel(role) {
-  const map = {
-    student: 'นักเรียน/นักศึกษา',
-    teacher: 'ครูผู้สอน / ครูที่ปรึกษา',
-    subject_teacher: 'ครูประจำวิชา',
-    head_dept: 'หัวหน้าแผนกวิชา',
-    discipline_head: 'ฝ่ายปกครอง',
-    deputy: 'รองผู้อำนวยการ',
-    director: 'ผู้อำนวยการ',
-    security: 'เจ้าหน้าที่ รปภ. / ประตู',
-    admin: 'ผู้ดูแลระบบ (Admin)'
   };
-  return map[role] || 'บุคลากร';
+
+  return new Promise((resolve) => {
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          if (json.ok) {
+            console.log(`[Telegram] QR Code Photo sent successfully to ${targetChatId} (Msg ID: ${json.result.message_id})`);
+            resolve(json.result);
+          } else {
+            console.warn(`[Telegram] sendPhoto API error:`, json.description);
+            resolve(null);
+          }
+        } catch (e) {
+          resolve(null);
+        }
+      });
+    });
+
+    req.on('error', (err) => {
+      console.error(`[Telegram] sendPhoto Network error:`, err.message);
+      resolve(null);
+    });
+
+    req.write(payload);
+    req.end();
+  });
 }
 
-// ----------------------------------------------------------------------------
-// Background Polling Engine (If no Webhook configured)
-// ----------------------------------------------------------------------------
-async function startBotPolling() {
-  const token = getBotToken();
-  if (!token) {
-    console.log('ℹ️ [TELEGRAM] Bot polling standby (No TELEGRAM_BOT_TOKEN set in .env)');
+/**
+ * Edit an existing message in Telegram
+ */
+async function editTelegramMessage(chatId, messageId, newText) {
+  const config = await getTelegramConfig();
+  if (!config.botToken || !chatId || !messageId) return;
+
+  const payload = JSON.stringify({
+    chat_id: chatId,
+    message_id: messageId,
+    text: newText,
+    parse_mode: 'HTML'
+  });
+
+  const options = {
+    hostname: 'api.telegram.org',
+    port: 443,
+    path: `/bot${config.botToken}/editMessageText`,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(payload)
+    }
+  };
+
+  return new Promise((resolve) => {
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => resolve(true));
+    });
+    req.on('error', () => resolve(false));
+    req.write(payload);
+    req.end();
+  });
+}
+
+/**
+ * Answer Telegram callback query (closes loading spinner)
+ */
+async function answerCallbackQuery(queryId, text = '', showAlert = false) {
+  const config = await getTelegramConfig();
+  if (!config.botToken || !queryId) return;
+
+  const payload = JSON.stringify({
+    callback_query_id: queryId,
+    text: text,
+    show_alert: showAlert
+  });
+
+  const options = {
+    hostname: 'api.telegram.org',
+    port: 443,
+    path: `/bot${config.botToken}/answerCallbackQuery`,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(payload)
+    }
+  };
+
+  return new Promise((resolve) => {
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => resolve(true));
+    });
+    req.on('error', () => resolve(false));
+    req.write(payload);
+    req.end();
+  });
+}
+
+/**
+ * Get user's preferred chat_id or fallback
+ */
+async function getUserChatId(userId) {
+  try {
+    const [rows] = await query('SELECT telegram_chat_id FROM users WHERE id = ? LIMIT 1', [userId]);
+    if (rows.length > 0 && rows[0].telegram_chat_id) {
+      return rows[0].telegram_chat_id.trim();
+    }
+  } catch (e) {}
+  const cfg = await getTelegramConfig();
+  return cfg.defaultChatId;
+}
+
+// -------------------------------------------------------------
+// WORKFLOW NOTIFICATIONS (WITH INLINE APPROVAL BUTTONS)
+// -------------------------------------------------------------
+
+/**
+ * 1. Student creates new leave request
+ */
+async function notifyRequestCreated(request, studentUser, subjectTeacherUser) {
+  const studentChatId = await getUserChatId(studentUser.id);
+  const teacherChatId = await getUserChatId(subjectTeacherUser.id);
+
+  const thaiLeaveDate = formatThaiDate(request.leave_date);
+  const thaiSubmitTime = formatThaiDateTime(new Date());
+
+  // A) Notify Student (ทุกลำดับ - ไม่มีปุ่มอนุมัติใดๆ)
+  const studentMsg = 
+`🎓 <b>[การแจ้งเตือนสำหรับผู้เรียน] OnePass</b>
+━━━━━━━━━━━━━━━━━━━━
+📌 <b>เลขที่คำขอ:</b> <code>${request.request_no}</code>
+👤 <b>ผู้ขอ:</b> ${studentUser.full_name} (${studentUser.username})
+📅 <b>วันที่ขอออก:</b> ${thaiLeaveDate} เวลา ${request.leave_time} น.
+📝 <b>ประเภท:</b> ${request.is_not_returning ? 'ออกแล้วไม่กลับ (กลับบ้าน)' : 'ออกชั่วคราว'}
+💡 <b>เหตุผล:</b> ${request.reason} ${request.reason_detail ? '(' + request.reason_detail + ')' : ''}
+🕒 <b>เวลาที่ส่งคำขอ:</b> ${thaiSubmitTime}
+━━━━━━━━━━━━━━━━━━━━
+⏳ <b>สถานะปัจจุบัน:</b> ส่งคำขอเรียบร้อยแล้ว อยู่ระหว่างรอครูรายวิชา (<b>${subjectTeacherUser.full_name}</b>) พิจารณาอนุมัติ (ลำดับที่ 1/5)
+ℹ️ <i>(ข้อความนี้เป็นการแจ้งเตือนสถานะสำหรับนักเรียนเท่านั้น ไม่มีปุ่มอนุมัติ)</i>`;
+
+  await sendTelegramMessage(studentChatId, studentMsg);
+
+  // B) Notify Subject Teacher WITH INLINE BUTTONS (เฉพาะคุณครูผู้มีอำนาจเท่านั้น)
+  const teacherMsg = 
+`🧑‍🏫 <b>[สำหรับคุณครูผู้สอน / ผู้มีอำนาจลงนามเท่านั้น]</b>
+━━━━━━━━━━━━━━━━━━━━
+📌 <b>เลขที่คำขอ:</b> <code>${request.request_no}</code>
+👤 <b>ผู้เรียนที่ขอออก:</b> ${studentUser.full_name} (${studentUser.username})
+📅 <b>วันที่ขอออก:</b> ${thaiLeaveDate} เวลา ${request.leave_time} น.
+💡 <b>เหตุผล:</b> ${request.reason} ${request.reason_detail ? '(' + request.reason_detail + ')' : ''}
+🕒 <b>เวลายื่น:</b> ${thaiSubmitTime}
+━━━━━━━━━━━━━━━━━━━━
+👉 <b>เรียน:</b> ${subjectTeacherUser.full_name} (ครูรายวิชา - ลำดับที่ 1/5)
+⚠️ <i>เฉพาะคุณครูที่มีรายชื่อข้างต้นเท่านั้นที่มีสิทธิ์กดปุ่มด้านล่าง (นักเรียนไม่มีสิทธิ์อนุมัติ):</i>`;
+
+  const inlineKeyboard = [
+    [
+      { text: '✅ อนุมัติคำขอ (ในนามครูผู้สอน)', callback_data: `appr:${request.id}:subject_teacher` },
+      { text: '❌ ไม่อนุมัติ', callback_data: `rejt:${request.id}:subject_teacher` }
+    ]
+  ];
+
+  await sendTelegramMessage(teacherChatId, teacherMsg, inlineKeyboard);
+}
+
+/**
+ * 2. Approver performs action (Approve / Reject)
+ */
+async function notifyApprovalAction({
+  request,
+  actorRole,
+  actorName,
+  decision,
+  comment,
+  studentUser,
+  nextApproverUser,
+  isFullyApproved
+}) {
+  const studentChatId = await getUserChatId(studentUser.id);
+
+  const roleLabels = {
+    subject_teacher: '1. ครูรายวิชา',
+    advisor: '2. ครูที่ปรึกษา',
+    head_major: '3. หัวหน้าแผนกวิชา',
+    head_discipline: '4. หัวหน้างานปกครอง',
+    deputy_director: '5. รองผู้อำนวยการฝ่ายกิจการนักเรียน นักศึกษา'
+  };
+  const roleLabel = roleLabels[actorRole] || actorRole;
+  const thaiNow = formatThaiDateTime(new Date());
+  const thaiLeaveDate = formatThaiDate(request.leave_date);
+
+  // Case A: REJECTED
+  if (decision === 'reject') {
+    const rejectMsg = 
+`❌ <b>[OnePass] คำขอออกนอกสถานศึกษา "ไม่อนุมัติ"</b>
+━━━━━━━━━━━━━━━━━━━━
+📌 <b>เลขที่คำขอ:</b> <code>${request.request_no}</code>
+👤 <b>ผู้ขอ:</b> ${studentUser.full_name} (${studentUser.username})
+🚫 <b>พิจารณาโดย:</b> ${roleLabel} (${actorName})
+🕒 <b>เวลาที่ไม่อนุมัติ:</b> ${thaiNow}
+💬 <b>เหตุผล:</b> ${comment || 'ไม่อนุมัติ'}
+━━━━━━━━━━━━━━━━━━━━
+⚠️ คำขอนี้สิ้นสุดลงแล้วและไม่สามารถใช้งานผ่านประตูได้`;
+
+    await sendTelegramMessage(studentChatId, rejectMsg);
     return;
   }
-  if (botPollingActive) return;
-  botPollingActive = true;
 
-  console.log(`🤖 [TELEGRAM] Starting Bot Polling service for @${getBotUsername()}...`);
+  // Case B: FULLY APPROVED (All 5 stages completed) -> SEND QR CODE PHOTO DIRECTLY TO TELEGRAM!
+  if (isFullyApproved) {
+    const qrToken = request.qr_token || ('OP-' + crypto.randomBytes(8).toString('hex').toUpperCase());
+    const expDate = request.qr_expires_at ? new Date(request.qr_expires_at) : new Date(Date.now() + 30 * 60 * 1000);
+    const thaiExpiresTime = formatThaiDateTime(expDate);
+
+    const approvedCaption = 
+`🎉 <b>[OnePass] บัตรผ่านดิจิทัล (Digital Gate Pass)</b>
+━━━━━━━━━━━━━━━━━━━━
+📌 <b>เลขที่คำขอ:</b> <code>${request.request_no}</code>
+👤 <b>ผู้ขอ:</b> ${studentUser.full_name} (${studentUser.username})
+📅 <b>วันที่อนุญาตให้ออก:</b> ${thaiLeaveDate} เวลา ${request.leave_time} น.
+📝 <b>ประเภท:</b> ${request.is_not_returning ? 'ออกแล้วไม่กลับ (กลับบ้าน)' : 'ออกชั่วคราว'}
+🔑 <b>รหัสบัตรผ่าน (Token):</b> <code>${qrToken}</code>
+✅ <b>อนุมัติครบทั้ง 5 ระดับเรียบร้อยแล้ว</b>
+👑 <b>ผู้อนุมัติขั้นสุดท้าย:</b> ${actorName} (รอง ผอ. ฝ่ายกิจการฯ)
+🕒 <b>เวลาอนุมัติ:</b> ${thaiNow}
+━━━━━━━━━━━━━━━━━━━━
+⏳ <b>อายุการใช้งาน QR Code: 30 นาที</b>
+⚠️ <b>หมดอายุเวลา: ${thaiExpiresTime}</b>
+<i>(หากไม่สแกนออกภายใน 30 นาที QR Code จะถูกทำลายอัตโนมัติ และต้องยื่นขออนุญาตใหม่)</i>
+━━━━━━━━━━━━━━━━━━━━
+📱 <b>คำแนะนำ:</b> ยื่นภาพ QR Code ด้านบนนี้ให้เครื่องสแกนที่ตู้ประตูเพื่อยกไม้กั้นอัตโนมัติได้ทันที`;
+
+    try {
+      const qrBuffer = await QRCode.toBuffer(qrToken, { width: 450, margin: 2 });
+      await sendTelegramPhoto(studentChatId, qrBuffer, approvedCaption);
+    } catch (e) {
+      console.error('[Telegram] Error sending QR Code Photo:', e.message);
+      await sendTelegramMessage(studentChatId, approvedCaption);
+    }
+    return;
+  }
+
+  // Case C: APPROVED STEP (Advancing to next approver)
+  const stepApprovedMsg = 
+`✅ <b>[OnePass] อัปเดตสถานะคำขอ (ผ่านระดับ ${roleLabel} แล้ว)</b>
+━━━━━━━━━━━━━━━━━━━━
+📌 <b>เลขที่คำขอ:</b> <code>${request.request_no}</code>
+👤 <b>ผู้ขอ:</b> ${studentUser.full_name} (${studentUser.username})
+ผู้ลงนาม: ${roleLabel} (${actorName}) - อนุมัติเรียบร้อย
+🕒 <b>เวลาที่ลงนาม:</b> ${thaiNow}
+💬 <b>ความเห็น:</b> ${comment || 'อนุมัติ'}
+━━━━━━━━━━━━━━━━━━━━
+⏳ <b>ขั้นตอนถัดไป:</b> ส่งต่อไปยัง <b>${nextApproverUser ? nextApproverUser.full_name : 'ผู้มีอำนาจลำดับถัดไป'}</b> เพื่อพิจารณาอนุมัติ`;
+
+  // Always notify Student at this step!
+  await sendTelegramMessage(studentChatId, stepApprovedMsg);
+
+  // Notify the NEXT approver in line WITH INLINE BUTTONS!
+  if (nextApproverUser) {
+    const nextApproverChatId = await getUserChatId(nextApproverUser.id);
+    let nextRole = 'advisor';
+    let stepTitle = 'ครูที่ปรึกษา (ลำดับที่ 2/5)';
+    if (actorRole === 'subject_teacher') { nextRole = 'advisor'; stepTitle = 'ครูที่ปรึกษา (ลำดับที่ 2/5)'; }
+    else if (actorRole === 'advisor') { nextRole = 'head_major'; stepTitle = 'หัวหน้าแผนก (ลำดับที่ 3/5)'; }
+    else if (actorRole === 'head_major') { nextRole = 'head_discipline'; stepTitle = 'หัวหน้างานปกครอง (ลำดับที่ 4/5)'; }
+    else if (actorRole === 'head_discipline') { nextRole = 'deputy_director'; stepTitle = 'รอง ผอ. ฝ่ายกิจการฯ (ลำดับที่ 5/5)'; }
+
+    const nextMsg = 
+`🧑‍🏫 <b>[สำหรับคุณครูผู้สอน / ผู้มีอำนาจลงนามเท่านั้น]</b>
+━━━━━━━━━━━━━━━━━━━━
+📌 <b>เลขที่คำขอ:</b> <code>${request.request_no}</code>
+👤 <b>ผู้เรียนที่ขอออก:</b> ${studentUser.full_name} (${studentUser.username})
+(ผ่านการพิจารณาอนุมัติจาก ${roleLabel} แล้ว)
+📅 <b>วันที่ขอออก:</b> ${thaiLeaveDate} เวลา ${request.leave_time} น.
+💡 <b>เหตุผล:</b> ${request.reason}
+🕒 <b>เวลาที่ส่งต่อ:</b> ${thaiNow}
+━━━━━━━━━━━━━━━━━━━━
+👉 <b>เรียน:</b> ${nextApproverUser.full_name} (${stepTitle})
+⚠️ <i>เฉพาะคุณครูที่มีรายชื่อข้างต้นเท่านั้นที่มีสิทธิ์กดปุ่มด้านล่าง (นักเรียนไม่มีสิทธิ์อนุมัติ):</i>`;
+
+    const inlineKeyboard = [
+      [
+        { text: `✅ อนุมัติคำขอ (ในนาม ${stepTitle.split(' ')[0]})`, callback_data: `appr:${request.id}:${nextRole}` },
+        { text: '❌ ไม่อนุมัติ', callback_data: `rejt:${request.id}:${nextRole}` }
+      ]
+    ];
+
+    await sendTelegramMessage(nextApproverChatId, nextMsg, inlineKeyboard);
+  }
+}
+
+/**
+ * 3. Gate Staff records student exit / return
+ */
+async function notifyGateRecord(request, studentUser, actionType, timestamp) {
+  const studentChatId = await getUserChatId(studentUser.id);
+  const thaiTimeStr = formatThaiDateTime(timestamp);
+
+  let msg = '';
+  if (actionType === 'exit') {
+    msg = 
+`🚶 <b>[OnePass] บันทึกเวลาออกจากสถานศึกษา</b>
+━━━━━━━━━━━━━━━━━━━━
+📌 <b>เลขที่คำขอ:</b> <code>${request.request_no}</code>
+👤 <b>ผู้เรียน:</b> ${studentUser.full_name} (${studentUser.username})
+⏱️ <b>เวลาออกจากประตูจริง:</b> ${thaiTimeStr}
+👮 เจ้าหน้าที่เวรประตูได้บันทึกเวลาออกเรียบร้อยแล้ว`;
+  } else {
+    msg = 
+`🏠 <b>[OnePass] บันทึกเวลากลับเข้าสถานศึกษาเรียบร้อยแล้ว</b>
+━━━━━━━━━━━━━━━━━━━━
+📌 <b>เลขที่คำขอ:</b> <code>${request.request_no}</code>
+👤 <b>ผู้เรียน:</b> ${studentUser.full_name} (${studentUser.username})
+⏱️ <b>เวลากลับเข้าประตูจริง:</b> ${thaiTimeStr}
+✅ <b>สถานะคำขอ: สิ้นสุดสมบูรณ์ (Completed)</b> ขอบคุณที่ปฏิบัติตามระเบียบของสถานศึกษา`;
+  }
+
+  await sendTelegramMessage(studentChatId, msg);
+}
+
+// -------------------------------------------------------------
+// TELEGRAM INLINE APPROVAL LISTENER (LONG-POLLING)
+// -------------------------------------------------------------
+
+/**
+ * Process a button tap from Telegram (callback_query)
+ */
+async function handleTelegramCallbackQuery(callbackQuery) {
+  const queryId = callbackQuery.id;
+  const fromUser = callbackQuery.from;
+  const message = callbackQuery.message;
+  const chatId = message.chat.id;
+  const messageId = message.message_id;
+  const data = callbackQuery.data; // e.g. "appr:15:subject_teacher" or "rejt:15:advisor"
+
+  console.log(`[Telegram] Received button tap from ${fromUser.first_name} (${fromUser.id}): ${data}`);
+
+  if (!data || (!data.startsWith('appr:') && !data.startsWith('rejt:'))) {
+    await answerCallbackQuery(queryId, 'คำสั่งไม่ถูกต้อง');
+    return;
+  }
+
+  const [action, reqIdStr, roleActed] = data.split(':');
+  const requestId = parseInt(reqIdStr, 10);
+  const isApprove = (action === 'appr');
+
+  if (!requestId || isNaN(requestId)) {
+    console.error(`[Telegram] Invalid requestId in callback data: ${data}`);
+    await answerCallbackQuery(queryId, 'รหัสคำขอไม่ถูกต้อง');
+    await editTelegramMessage(chatId, messageId, '⚠️ ไม่พบรหัสคำขอที่ถูกต้อง หรือคำขอนี้ถูกสร้างขึ้นก่อนการอัปเดตระบบ กรุณาสร้างคำขอใหม่');
+    return;
+  }
+
+  await answerCallbackQuery(queryId, isApprove ? 'กำลังดำเนินการอนุมัติ...' : 'กำลังดำเนินการไม่อนุมัติ...');
+
+  try {
+    // 1. Fetch current request
+    const [rows] = await query('SELECT * FROM onepass_requests WHERE id = ? LIMIT 1', [requestId]);
+    if (rows.length === 0) {
+      await editTelegramMessage(chatId, messageId, '⚠️ ไม่พบคำขอนี้ในระบบ หรือคำขอถูกลบไปแล้ว');
+      return;
+    }
+
+    const current = rows[0];
+
+    // Security check: If telegram user is linked to a user in the system
+    const [linkedUsers] = await query('SELECT id, role, full_name, username FROM users WHERE telegram_chat_id = ? LIMIT 1', [String(fromUser.id)]);
+    if (linkedUsers.length > 0) {
+      const clicker = linkedUsers[0];
+      if (clicker.id === current.user_id || clicker.role === 'student') {
+        console.warn(`[Telegram Security] Blocked student ${clicker.username} (${clicker.full_name}) from approving request ${requestId}`);
+        await answerCallbackQuery(queryId, '⛔ คุณคือนักเรียนผู้ยื่นคำขอ ไม่มีสิทธิ์ในการอนุมัติคำขอของตนเองหรือผู้อื่น', true);
+        return;
+      }
+
+      const isAdmin = ['admin', 'super_admin'].includes(clicker.role);
+      if (!isAdmin) {
+        let isAuthorized = false;
+        if (roleActed === 'subject_teacher' && current.subject_teacher_id === clicker.id) isAuthorized = true;
+        else if (roleActed === 'advisor' && current.advisor_teacher_id === clicker.id) isAuthorized = true;
+        else if (roleActed === 'head_major' && current.head_major_teacher_id === clicker.id) isAuthorized = true;
+        else if (roleActed === 'head_discipline' && current.head_discipline_user_id === clicker.id) isAuthorized = true;
+        else if (roleActed === 'deputy_director' && current.deputy_director_user_id === clicker.id) isAuthorized = true;
+
+        if (!isAuthorized) {
+          console.warn(`[Telegram Security] Blocked user ${clicker.username} from approving role ${roleActed} for request ${requestId}`);
+          await answerCallbackQuery(queryId, `⛔ ท่านไม่มีสิทธิ์พิจารณาในขั้นตอนนี้ (${config.label})`, true);
+          return;
+        }
+      }
+    }
+
+    // Check if already processed
+    if (['approved', 'rejected', 'completed', 'cancelled'].includes(current.status)) {
+      await editTelegramMessage(chatId, messageId, `⚠️ คำขอนี้ได้รับการดำเนินการเสร็จสิ้นไปแล้ว (สถานะปัจจุบัน: ${current.status})`);
+      return;
+    }
+
+    const roleMap = {
+      subject_teacher: { prefix: 'subject', nextStatus: 'pending_advisor', label: 'ครูรายวิชา' },
+      advisor: { prefix: 'advisor', nextStatus: 'pending_head_major', label: 'ครูที่ปรึกษา' },
+      head_major: { prefix: 'head_major', nextStatus: 'pending_head_discipline', label: 'หัวหน้าแผนกวิชา' },
+      head_discipline: { prefix: 'head_discipline', nextStatus: 'pending_deputy', label: 'หัวหน้างานปกครอง' },
+      deputy_director: { prefix: 'deputy_director', nextStatus: 'approved', label: 'รองผู้อำนวยการฝ่ายกิจการนักเรียน นักศึกษา' }
+    };
+
+    const config = roleMap[roleActed];
+    if (!config) {
+      await editTelegramMessage(chatId, messageId, '⚠️ บทบาทผู้ลงนามไม่ถูกต้อง');
+      return;
+    }
+
+    // Check if already signed this tier
+    if (current[`${config.prefix}_status`] === 'approved' || current[`${config.prefix}_status`] === 'rejected') {
+      await editTelegramMessage(chatId, messageId, `ℹ️ ขั้นตอนนี้ (${config.label}) ได้รับการพิจารณาไปแล้ว`);
+      return;
+    }
+
+    const now = new Date();
+    const updateFields = [];
+    const updateParams = [];
+    const decisionStatus = isApprove ? 'approved' : 'rejected';
+    const comment = isApprove ? 'อนุมัติผ่าน Telegram' : 'ไม่อนุมัติผ่าน Telegram';
+
+    updateFields.push(`\`${config.prefix}_status\` = ?`, `\`${config.prefix}_comment\` = ?`, `\`${config.prefix}_action_at\` = ?`);
+    updateParams.push(decisionStatus, comment, now);
+
+    let newStatus = current.status;
+    let qrToken = current.qr_token;
+    let qrExpiresAt = current.qr_expires_at;
+
+    if (!isApprove) {
+      newStatus = 'rejected';
+    } else {
+      newStatus = config.nextStatus;
+      if (newStatus === 'approved') {
+        qrToken = 'OP-' + crypto.randomBytes(8).toString('hex').toUpperCase();
+        // QR Code expires in exactly 30 minutes from approval!
+        const expDate = new Date(Date.now() + 30 * 60 * 1000);
+        const pad = n => String(n).padStart(2, '0');
+        qrExpiresAt = `${expDate.getFullYear()}-${pad(expDate.getMonth()+1)}-${pad(expDate.getDate())} ${pad(expDate.getHours())}:${pad(expDate.getMinutes())}:${pad(expDate.getSeconds())}`;
+      }
+    }
+
+    updateFields.push('`status` = ?');
+    updateParams.push(newStatus);
+
+    if (qrToken && !current.qr_token) {
+      updateFields.push('`qr_token` = ?', '`qr_expires_at` = ?');
+      updateParams.push(qrToken, qrExpiresAt);
+    }
+
+    updateParams.push(requestId);
+    await query(`UPDATE onepass_requests SET ${updateFields.join(', ')} WHERE id = ?`, updateParams);
+
+    // Find actor user id
+    let actorUserId = null;
+    if (roleActed === 'subject_teacher') actorUserId = current.subject_teacher_id;
+    else if (roleActed === 'advisor') actorUserId = current.advisor_teacher_id;
+    else if (roleActed === 'head_major') actorUserId = current.head_major_teacher_id;
+    else if (roleActed === 'head_discipline') actorUserId = current.head_discipline_user_id;
+    else if (roleActed === 'deputy_director') actorUserId = current.deputy_director_user_id;
+
+    // Log action
+    await query(`
+      INSERT INTO onepass_logs (request_id, user_id, role_acted, action, comment)
+      VALUES (?, ?, ?, ?, ?)
+    `, [requestId, actorUserId || 1, roleActed, isApprove ? 'approved' : 'rejected', `[${config.label}] ${comment}`]);
+
+    // Edit original message in Telegram to show completed action
+    const actorName = fromUser.first_name + (fromUser.last_name ? ' ' + fromUser.last_name : '');
+    const thaiSignTime = formatThaiDateTime(now);
+    const updatedOriginalMsg = isApprove
+      ? `✅ <b>[OnePass] ท่านได้ "อนุมัติคำขอ" เรียบร้อยแล้วผ่าน Telegram</b>
+━━━━━━━━━━━━━━━━━━━━
+📌 <b>เลขที่คำขอ:</b> <code>${current.request_no}</code>
+👤 <b>ผู้ลงนาม:</b> ${config.label} (${actorName})
+🕒 <b>เวลาที่บันทึก:</b> ${thaiSignTime}
+⏳ <b>สถานะล่าสุด:</b> ${newStatus === 'approved' ? 'อนุมัติครบ 5 ระดับแล้ว (ออกบัตรผ่าน QR ให้ผู้เรียนแล้ว)' : 'ส่งต่อไปยังขั้นถัดไปเรียบร้อยแล้ว'}`
+      : `❌ <b>[OnePass] ท่านได้บันทึก "ไม่อนุมัติ" คำขอนี้แล้วผ่าน Telegram</b>
+━━━━━━━━━━━━━━━━━━━━
+📌 <b>เลขที่คำขอ:</b> <code>${current.request_no}</code>
+👤 <b>ผู้ลงนาม:</b> ${config.label} (${actorName})
+🕒 <b>เวลาที่บันทึก:</b> ${thaiSignTime}
+⚠️ <b>สถานะ:</b> คำขอถูกปฏิเสธ`;
+
+    await editTelegramMessage(chatId, messageId, updatedOriginalMsg);
+
+    // Trigger next notifications (Student + Next Approver)
+    const [studentRows] = await query('SELECT * FROM users WHERE id = ? LIMIT 1', [current.user_id]);
+    let nextApproverUser = null;
+
+    if (isApprove && newStatus !== 'approved') {
+      let nextApproverId = null;
+      if (roleActed === 'subject_teacher') nextApproverId = current.advisor_teacher_id;
+      else if (roleActed === 'advisor') nextApproverId = current.head_major_teacher_id;
+      else if (roleActed === 'head_major') nextApproverId = current.head_discipline_user_id;
+      else if (roleActed === 'head_discipline') nextApproverId = current.deputy_director_user_id;
+
+      if (nextApproverId) {
+        const [nextRows] = await query('SELECT * FROM users WHERE id = ? LIMIT 1', [nextApproverId]);
+        if (nextRows.length > 0) nextApproverUser = nextRows[0];
+      }
+    }
+
+    if (studentRows.length > 0) {
+      await notifyApprovalAction({
+        request: { ...current, qr_token: qrToken || current.qr_token },
+        actorRole: roleActed,
+        actorName: `${config.label} (${actorName})`,
+        decision: isApprove ? 'approve' : 'reject',
+        comment: comment,
+        studentUser: studentRows[0],
+        nextApproverUser: nextApproverUser,
+        isFullyApproved: (newStatus === 'approved')
+      });
+    }
+
+    console.log(`[Telegram] Successfully processed ${action} for request ${requestId} via Telegram button!`);
+  } catch (err) {
+    console.error('[Telegram] Error processing callback query:', err);
+    await editTelegramMessage(chatId, messageId, '⚠️ เกิดข้อผิดพลาดในการประมวลผลคำขอ: ' + err.message);
+  }
+}
+
+/**
+ * Handle incoming text messages (e.g. /start)
+ */
+async function handleTelegramMessage(msg) {
+  const chatId = msg.chat.id;
+  const text = (msg.text || '').trim();
+
+  if (text === '/start') {
+    const welcomeText = 
+`👋 <b>ยินดีต้อนรับสู่ OnePass Bot</b>
+ระบบขออนุญาตออกนอกสถานศึกษา ด้วยระบบ QR Code
+━━━━━━━━━━━━━━━━━━━━
+🆔 <b>Chat ID ของท่านคือ:</b> <code>${chatId}</code>
+━━━━━━━━━━━━━━━━━━━━
+ℹ️ <b>วิธีใช้งาน:</b>
+1. นำ Chat ID ด้านบนไปกรอกในระบบข้อมูลผู้ใช้ หรือตั้งค่าระบบ OnePass เพื่อรับการแจ้งเตือน
+2. เมื่อมีคำขอถึงท่าน ระบบจะส่งการแจ้งเตือนมายังห้องแชทนี้โดยอัตโนมัติ
+3. ผู้มีอำนาจสามารถกดปุ่ม [อนุมัติ] หรือ [ไม่อนุมัติ] ได้ทันทีผ่าน Telegram นี้
+4. เมื่อคำขออนุมัติครบสาย ผู้เรียนจะได้รับรูปภาพ <b>QR Code บัตรผ่านดิจิทัล</b> ทาง Telegram ทันที เพื่อนำไปสแกนที่ป้อมยามหน้าประตู`;
+
+    await sendTelegramMessage(chatId, welcomeText);
+  }
+}
+
+/**
+ * Start Background Polling Loop for Telegram Bot
+ */
+async function startTelegramPolling() {
+  if (isPollingStarted) return;
+  isPollingStarted = true;
+
+  console.log('[Telegram] Background Polling Listener started (Listening for button approvals)...');
 
   const poll = async () => {
-    if (!botPollingActive) return;
     try {
-      const res = await callTelegramApi('getUpdates', {
-        offset: lastUpdateId + 1,
-        timeout: 20
-      });
-
-      if (res.ok && Array.isArray(res.result)) {
-        for (const update of res.result) {
-          lastUpdateId = Math.max(lastUpdateId, update.update_id);
-          try {
-            await processTelegramUpdate(update);
-          } catch (procErr) {
-            console.error('Error processing update:', procErr);
-          }
-        }
-      } else if (!res.ok && res.error_code === 409) {
-        // Webhook conflict, delete webhook
-        console.warn('⚠️ [TELEGRAM] Conflict: Webhook active, removing webhook to use polling...');
-        await callTelegramApi('deleteWebhook');
+      const config = await getTelegramConfig();
+      if (!config.botToken) {
+        setTimeout(poll, 5000);
+        return;
       }
+
+      const url = `https://api.telegram.org/bot${config.botToken}/getUpdates?offset=${lastUpdateId + 1}&timeout=20`;
+
+      https.get(url, (res) => {
+        let rawData = '';
+        res.on('data', chunk => rawData += chunk);
+        res.on('end', async () => {
+          try {
+            const data = JSON.parse(rawData);
+            if (data.ok && Array.isArray(data.result)) {
+              for (const update of data.result) {
+                lastUpdateId = Math.max(lastUpdateId, update.update_id);
+
+                // Handle button click (callback_query)
+                if (update.callback_query) {
+                  await handleTelegramCallbackQuery(update.callback_query);
+                }
+
+                // Handle text message (/start)
+                if (update.message) {
+                  await handleTelegramMessage(update.message);
+                }
+              }
+            }
+          } catch (e) {}
+          setTimeout(poll, 1000);
+        });
+      }).on('error', (err) => {
+        setTimeout(poll, 3000);
+      });
     } catch (err) {
-      // Ignore network abort
+      setTimeout(poll, 5000);
     }
-    setTimeout(poll, 1500);
   };
 
   poll();
 }
 
-function stopBotPolling() {
-  botPollingActive = false;
-}
-
-// ----------------------------------------------------------------------------
-// High-Level Notification Triggers (Requirements 7, 8, 9, 10, 11)
-// ----------------------------------------------------------------------------
-
-// Helper to get user telegram info
-async function getUserTelegramInfo(ident) {
-  if (!ident) return null;
-  const target = typeof ident === 'object' ? (ident.id || ident.username || ident.role) : String(ident);
-  const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(target);
-
-  // 1. Look up user record in DB to get both ID and username
-  let dbUser = null;
-  if (db.pool) {
-    try {
-      const field = isUUID ? 'id' : 'username';
-      const rows = await db.query(`SELECT id, username, full_name, role FROM users WHERE ${field} = ?`, [target]);
-      if (rows[0]) dbUser = rows[0];
-    } catch (e) {}
-  }
-
-  // 2. Check profiles.json fallback
-  try {
-    const profPath = path.join(DATA_DIR, 'profiles.json');
-    if (fs.existsSync(profPath)) {
-      const profs = JSON.parse(fs.readFileSync(profPath, 'utf8') || '{}');
-      const keysToCheck = [
-        target,
-        dbUser ? dbUser.id : null,
-        dbUser ? dbUser.username : null,
-        typeof ident === 'object' ? ident.role : null,
-        typeof ident === 'object' ? ident.username : null
-      ].filter(Boolean);
-
-      for (const k of keysToCheck) {
-        if (profs[k] && profs[k].telegram_chat_id) {
-          return { ...(dbUser || {}), ...profs[k], telegram_chat_id: profs[k].telegram_chat_id };
-        }
-      }
-
-      for (const k in profs) {
-        const u = profs[k];
-        if (keysToCheck.includes(u.id) || keysToCheck.includes(u.username) || keysToCheck.includes(k)) {
-          if (u.telegram_chat_id) {
-            return { ...(dbUser || {}), ...u, telegram_chat_id: u.telegram_chat_id };
-          }
-        }
-      }
-    }
-  } catch (e) {}
-
-  return dbUser;
-}
-
-// Requirement 7: แจ้งเตือนผู้อนุมัติเมื่อคำร้องถึงคิว
-async function notifyApproverQueue(approverUser, request, stepNumber) {
-  if (!approverUser) return;
-  const user = await getUserTelegramInfo(approverUser.id || approverUser.username || approverUser);
-  if (!user || !user.telegram_chat_id) return;
-
-  const settings = user.telegram_notify_settings || {};
-  if (settings.pending_approval === false) return; // User opted out
-
-  const appUrl = getAppUrl();
-  const depTime = request.departure_time || request.departureTime || request.start_time || request.startTime || '13:00';
-  const retTime = request.no_return || request.noReturn
-    ? 'ลากลับบ้าน'
-    : (request.expected_return_time || request.expectedReturnTime || request.end_time || request.endTime || '15:30') + ' น.';
-
-  const text = 
-    `📋 <b>มีคำร้องขอออกนอกสถานศึกษาใหม่รอการอนุมัติ (ขั้นตอนที่ ${stepNumber})</b>\n\n` +
-    `👤 <b>นักเรียน:</b> ${request.student_name || request.studentName || 'นักเรียน'} (${request.student_code || request.studentCode || '-'})\n` +
-    `🏢 <b>แผนก:</b> ${request.department_name || request.deptName || request.department || '-'}\n` +
-    `📅 <b>วันที่:</b> ${request.leave_date || request.leaveDate || request.date || 'วันนี้'}\n` +
-    `⏰ <b>ช่วงเวลา:</b> ${depTime} - ${retTime}\n` +
-    `📝 <b>เหตุผล:</b> ${request.reason || '-'}\n\n` +
-    `👉 <a href="${appUrl}">กดที่นี่เพื่อเข้าสู่ระบบ OnePass และอนุมัติคำร้อง</a>`;
-
-  // Send non-blocking
-  return sendTelegramMessage(user.telegram_chat_id, text, { notify_type: 'approver_queue' });
-}
-
-// Requirement 7: เตือนซ้ำเมื่อคำร้องค้างเกินเวลา
-async function notifyApproverOverdueReminder(approverUser, request, minutesWaiting) {
-  const user = await getUserTelegramInfo(approverUser.id || approverUser.username || approverUser);
-  if (!user || !user.telegram_chat_id) return;
-
-  const settings = user.telegram_notify_settings || {};
-  if (settings.pending_approval === false) return;
-
-  const appUrl = getAppUrl();
-  const text = 
-    `⏳ <b>แจ้งเตือนคำร้องค้างการอนุมัติเกิน ${minutesWaiting} นาที</b>\n\n` +
-    `👤 <b>นักเรียน:</b> ${request.student_name || request.studentName}\n` +
-    `📝 <b>เหตุผล:</b> ${request.reason || '-'}\n` +
-    `⏰ <b>เวลาที่ขอออก:</b> ${request.start_time || request.startTime}\n\n` +
-    `กรุณาเข้าสู่ระบบเพื่อดำเนินการพิจารณา:\n` +
-    `👉 <a href="${appUrl}">เปิดหน้าการอนุมัติ OnePass</a>`;
-
-  sendTelegramMessage(user.telegram_chat_id, text, { notify_type: 'overdue_reminder' });
-}
-
-// Requirement 8: แจ้งเตือนนักเรียนเมื่อผลคำร้องออก (อนุมัติ / ได้ QR Pass)
-async function notifyStudentApproved(studentUser, request) {
-  const user = await getUserTelegramInfo(studentUser.id || studentUser.username || studentUser);
-  if (!user || !user.telegram_chat_id) return;
-
-  const settings = user.telegram_notify_settings || {};
-  if (settings.request_result === false) return;
-
-  const appUrl = getAppUrl();
-  const text = 
-    `🎉 <b>คำร้องขอออกนอกสถานศึกษาได้รับการอนุมัติเรียบร้อยแล้ว!</b>\n\n` +
-    `📅 <b>วันที่:</b> ${request.leave_date || request.date || 'วันนี้'}\n` +
-    `⏰ <b>ช่วงเวลา:</b> ${request.start_time || request.startTime} - ${request.end_time || request.endTime}\n` +
-    `📝 <b>เหตุผล:</b> ${request.reason || '-'}\n\n` +
-    `📲 <b>บัตรผ่านดิจิทัล (QR Pass) พร้อมใช้งานแล้ว</b>\n` +
-    `⚠️ <i>เพื่อความปลอดภัยและความเป็นส่วนตัว ระบบจะไม่ส่งรหัส QR ผ่านแชท กรุณากดเปิดบัตรผ่านในแอป:</i>\n` +
-    `👉 <a href="${appUrl}">เปิดบัตรผ่าน QR Pass บนมือถือ</a>`;
-
-  sendTelegramMessage(user.telegram_chat_id, text, { notify_type: 'student_approved' });
-}
-
-// Requirement 8: แจ้งเตือนนักเรียนเมื่อคำร้องไม่ผ่าน (พร้อมเหตุผล)
-async function notifyStudentRejected(studentUser, request, approverRole, rejectReason) {
-  const user = await getUserTelegramInfo(studentUser.id || studentUser.username || studentUser);
-  if (!user || !user.telegram_chat_id) return;
-
-  const settings = user.telegram_notify_settings || {};
-  if (settings.request_result === false) return;
-
-  const appUrl = getAppUrl();
-  const text = 
-    `❌ <b>คำร้องขอออกนอกสถานศึกษาไม่ได้รับการอนุมัติ</b>\n\n` +
-    `👤 <b>พิจารณาโดย:</b> ${getRoleLabel(approverRole)}\n` +
-    `📝 <b>เหตุผลที่ปฏิเสธ:</b> ${rejectReason || 'ไม่ระบุเหตุผล'}\n` +
-    `📅 <b>วันที่:</b> ${request.leave_date || request.date || 'วันนี้'}\n\n` +
-    `👉 <a href="${appUrl}">ตรวจสอบรายละเอียดคำร้องในระบบ</a>`;
-
-  sendTelegramMessage(user.telegram_chat_id, text, { notify_type: 'student_rejected' });
-}
-
-// Requirement 10: แจ้งเตือนสแกนเข้า/ออก (นักเรียน และ ผู้ปกครองที่ยินยอม)
-async function notifyScanGateEvent(studentUser, type, timestamp, gateName) {
-  const user = await getUserTelegramInfo(studentUser.id || studentUser.username || studentUser);
-  if (!user || !user.telegram_chat_id) return;
-
-  const settings = user.telegram_notify_settings || {};
-  if (settings.parent_scan === false) return;
-
-  const isExit = (type === 'exit');
-  const actionText = isExit ? '🚪 <b>บันทึกการสแกน: เดินทางออกจากสถานศึกษา</b>' : '🏫 <b>บันทึกการสแกน: กลับเข้าสถานศึกษาเรียบร้อยแล้ว</b>';
-  const caution = isExit ? `\n⚠️ <i>กรุณาเดินทางกลับเข้าสถานศึกษาให้ตรงตามเวลาที่ได้รับอนุมัติ</i>` : `\n✅ <i>ขอบคุณที่ปฏิบัติตามกฎระเบียบของวิทยาลัย</i>`;
-
-  const text = 
-    `${actionText}\n\n` +
-    `👤 <b>นักเรียน:</b> ${user.full_name || user.username}\n` +
-    `📍 <b>จุดตรวจ:</b> ${gateName || 'ประตูใหญ่ OnePass IoT Gate'}\n` +
-    `⏰ <b>เวลาที่บันทึก:</b> ${timestamp || new Date().toLocaleTimeString('th-TH')}` +
-    caution;
-
-  sendTelegramMessage(user.telegram_chat_id, text, { notify_type: 'scan_event' });
-}
-
-// Requirement 9: แจ้งเตือนแอดมิน (ไม้กั้นออฟไลน์, สแกนล้มเหลวผิดปกติ)
-async function notifyAdminAlert(alertTitle, alertMessage, severity = 'warning') {
-  // Find all admin users with telegram connected
-  let admins = [];
-  if (db.pool) {
-    try {
-      const rows = await db.query(
-        "SELECT id, username, telegram_chat_id, telegram_notify_settings FROM users WHERE role = ? AND telegram_chat_id IS NOT NULL",
-        ['admin']
-      );
-      if (rows) admins = rows;
-    } catch (e) {}
-  }
-
-  // Fallback profiles.json
-  if (admins.length === 0) {
-    try {
-      const profPath = path.join(DATA_DIR, 'profiles.json');
-      if (fs.existsSync(profPath)) {
-        const profs = JSON.parse(fs.readFileSync(profPath, 'utf8') || '{}');
-        for (const k in profs) {
-          if (profs[k].role === 'admin' && profs[k].telegram_chat_id) {
-            admins.push(profs[k]);
-          }
-        }
-      }
-    } catch (e) {}
-  }
-
-  const icon = severity === 'danger' ? '🚨' : '⚠️';
-  const text = 
-    `${icon} <b>แจ้งเตือนเหตุขัดข้องระบบ OnePass Gate (Admin)</b>\n\n` +
-    `📌 <b>หัวข้อ:</b> ${alertTitle}\n` +
-    `📝 <b>รายละเอียด:</b> ${alertMessage}\n` +
-    `⏰ <b>เวลา:</b> ${new Date().toLocaleString('th-TH')}`;
-
-  for (const admin of admins) {
-    const settings = admin.telegram_notify_settings || {};
-    if (settings.gate_alert !== false) {
-      sendTelegramMessage(admin.telegram_chat_id, text, { notify_type: 'admin_alert' });
-    }
-  }
-}
-
-// Requirement 5, 6, 9: แจ้งเตือนฝ่ายปกครองเมื่อมีนักเรียนบันทึกกลับเข้าสถานศึกษา
-async function notifyDisciplineStudentReturn({
-  studentName,
-  studentCode,
-  dept,
-  classroom,
-  plateNo,
-  returnTime,
-  expectedTime,
-  returnMethod = 'button',
-  verificationStatus = 'verified',
-  distanceCm = null,
-  maxDistanceCm = 60,
-  note = '',
-  notifyMode = 'all'
-}) {
-  const isFlagged = verificationStatus === 'flagged_review';
-  if (notifyMode === 'abnormal_only' && !isFlagged) {
-    return; // ข้ามการแจ้งเตือนกรณีตั้งค่าให้แจ้งเฉพาะรายการผิดปกติ
-  }
-
-  let recipients = [];
-  if (db.pool) {
-    try {
-      const rows = await db.query(
-        "SELECT id, username, role, telegram_chat_id, telegram_notify_settings FROM users WHERE role IN (?) AND telegram_chat_id IS NOT NULL",
-        [['discipline_head', 'admin']]
-      );
-      if (rows) recipients = rows;
-    } catch (e) {}
-  }
-
-  try {
-    const profPath = path.join(DATA_DIR, 'profiles.json');
-    if (fs.existsSync(profPath)) {
-      const profs = JSON.parse(fs.readFileSync(profPath, 'utf8') || '{}');
-      for (const k in profs) {
-        if (['discipline_head', 'admin'].includes(profs[k].role) && profs[k].telegram_chat_id) {
-          if (!recipients.some(r => r.username === profs[k].username)) {
-            recipients.push(profs[k]);
-          }
-        }
-      }
-    }
-  } catch (e) {}
-
-  const methodLabel = returnMethod === 'button' ? '📱 กดปุ่มในแอป (นักเรียน)' : (returnMethod === 'manual' ? '✍️ ฝ่ายปกครองบันทึกแทน' : 'สแกน QR');
-  const statusBadge = isFlagged 
-    ? '🚨 <b>ต้องตรวจสอบ! (ผิดเงื่อนไข)</b>' 
-    : (verificationStatus === 'manual_verified' ? '🟢 รับรองโดยฝ่ายปกครอง' : '✅ ตรวจสอบผ่านแล้ว');
-
-  let distInfo = '';
-  if (distanceCm !== null && distanceCm !== undefined) {
-    const distNum = Number(distanceCm).toFixed(1);
-    distInfo = `\n📏 <b>ระยะห่างจำลอง:</b> ${distNum} ซม. (เกณฑ์ไม่เกิน ${maxDistanceCm} ซม.)`;
-  }
-
-  let noteInfo = note ? `\n📝 <b>หมายเหตุ:</b> ${note}` : '';
-
-  const header = isFlagged
-    ? `🚨 <b>[OnePass แจ้งฝ่ายปกครอง: พบการกลับที่ต้องตรวจสอบ!]</b>`
-    : `📍 <b>[OnePass: นักเรียนบันทึกกลับเข้าสถานศึกษา]</b>`;
-
-  const text = 
-    `${header}\n` +
-    `━━━━━━━━━━━━━━━━━━━\n` +
-    `👤 <b>นักเรียน:</b> ${studentName} (${studentCode || '-'})\n` +
-    `🏢 <b>แผนกวิชา:</b> ${dept || '-'} (${classroom || '-'})\n` +
-    `🛵 <b>ยานพาหนะ:</b> ${plateNo || '-'}\n` +
-    `⏰ <b>เวลากลับเข้า:</b> ${returnTime} น. (กำหนด: ${expectedTime || '-'} น.)\n` +
-    `🎯 <b>สถานะ:</b> ${statusBadge}\n` +
-    `🔄 <b>วิธีกลับ:</b> ${methodLabel}${distInfo}${noteInfo}\n` +
-    `━━━━━━━━━━━━━━━━━━━\n` +
-    `💡 สามารถตรวจสอบรายการสดหรือเพิกถอนได้ในระบบ OnePass`;
-
-  for (const r of recipients) {
-    sendTelegramMessage(r.telegram_chat_id, text, { notify_type: 'student_return' });
-  }
-}
-
-// ----------------------------------------------------------------------------
-// Express Router
-// ----------------------------------------------------------------------------
-function createTelegramRouter(authenticateToken) {
-  const express = require('express');
-  const router = express.Router();
-
-  // 1. Generate Pairing Link & Token (Expires 10m)
-  router.post('/generate-link', authenticateToken, async (req, res) => {
-    try {
-      const userId = req.user.id || req.user.username;
-      const username = req.user.username;
-      const result = await createLinkToken(userId, username);
-      res.json({ success: true, ...result });
-    } catch (err) {
-      res.status(500).json({ success: false, message: err.message });
-    }
-  });
-
-  // 1.5 Manual Link by Chat ID (ทางเลือกกรอก Chat ID ด้วยตนเอง)
-  router.post('/manual-link', authenticateToken, async (req, res) => {
-    try {
-      const userId = req.user.id || req.user.username;
-      const { chatId, telegramUsername } = req.body;
-      const numericChatId = Number(chatId);
-      if (!chatId || isNaN(numericChatId)) {
-        return res.status(400).json({ success: false, message: 'กรุณากรอก Chat ID เป็นตัวเลขให้ถูกต้อง' });
-      }
-
-      const user = await linkTelegramAccount(userId, numericChatId, telegramUsername || 'Telegram User', 'Direct Link');
-      const displayName = user ? (user.full_name || req.user.username) : req.user.username;
-
-      // ส่งข้อความยืนยันเข้า Telegram ทันที
-      await sendTelegramMessage(
-        numericChatId,
-        `🎉 <b>เชื่อมต่อบัญชี OnePass สำเร็จเรียบร้อยแล้ว!</b>\n\n` +
-        `👤 <b>บัญชี:</b> ${displayName}\n` +
-        `⏰ <b>เวลา:</b> ${new Date().toLocaleString('th-TH')}\n\n` +
-        `ระบบจะส่งการแจ้งเตือนคำร้องและการผ่านประตูมาที่นี่ตลอดไปครับ`,
-        { notify_type: 'account_linked' }
-      );
-
-      res.json({ success: true, message: 'เชื่อมต่อบัญชี Telegram สำเร็จเรียบร้อยแล้ว!', user });
-    } catch (err) {
-      res.status(500).json({ success: false, message: err.message });
-    }
-  });
-
-  // 2. Get Telegram Connection Status & Preferences
-  router.get('/status', authenticateToken, async (req, res) => {
-    try {
-      const userId = req.user.id || req.user.username;
-      const user = await getUserTelegramInfo(userId);
-      if (!user || !user.telegram_chat_id) {
-        return res.json({
-          connected: false,
-          botUsername: getBotUsername(),
-          hasBotToken: !!getBotToken()
-        });
-      }
-      res.json({
-        connected: true,
-        chatId: user.telegram_chat_id,
-        username: user.telegram_username,
-        connectedAt: user.telegram_connected_at,
-        settings: user.telegram_notify_settings || {
-          pending_approval: true,
-          request_result: true,
-          qr_ready: true,
-          parent_scan: true,
-          gate_alert: true
-        },
-        botUsername: getBotUsername(),
-        hasBotToken: !!getBotToken()
-      });
-    } catch (err) {
-      res.status(500).json({ success: false, message: err.message });
-    }
-  });
-
-  // 3. Disconnect Telegram Account
-  router.post('/disconnect', authenticateToken, async (req, res) => {
-    try {
-      const userId = req.user.id || req.user.username;
-      await unlinkTelegramAccount(userId);
-      res.json({ success: true, message: 'ยกเลิกการเชื่อมต่อ Telegram เรียบร้อยแล้ว' });
-    } catch (err) {
-      res.status(500).json({ success: false, message: err.message });
-    }
-  });
-
-  // 4. Update Notification Preferences
-  router.post('/settings', authenticateToken, async (req, res) => {
-    try {
-      const userId = req.user.id || req.user.username;
-      const newSettings = req.body.settings;
-      if (!newSettings || typeof newSettings !== 'object') {
-        return res.status(400).json({ success: false, message: 'Invalid settings payload' });
-      }
-
-      if (db.pool) {
-        await db.query(
-          'UPDATE users SET telegram_notify_settings = ? WHERE id = ?',
-          [JSON.stringify(newSettings), userId]
-        );
-      }
-
-      // Local fallback
-      const profPath = path.join(DATA_DIR, 'profiles.json');
-      if (fs.existsSync(profPath)) {
-        const profs = JSON.parse(fs.readFileSync(profPath, 'utf8') || '{}');
-        for (const k in profs) {
-          if (profs[k].id === userId || profs[k].username === req.user.username) {
-            profs[k].telegram_notify_settings = newSettings;
-          }
-        }
-        fs.writeFileSync(profPath, JSON.stringify(profs, null, 2), 'utf8');
-      }
-
-      res.json({ success: true, settings: newSettings });
-    } catch (err) {
-      res.status(500).json({ success: false, message: err.message });
-    }
-  });
-
-  // 5. Webhook endpoint (for production HTTPS)
-  router.post('/webhook', async (req, res) => {
-    try {
-      await processTelegramUpdate(req.body);
-      res.json({ ok: true });
-    } catch (err) {
-      console.error('Webhook error:', err);
-      res.status(500).json({ ok: false, error: err.message });
-    }
-  });
-
-  // 6. Simulation Test Endpoint (for local dev pairing test without real bot)
-  router.post('/simulate-pairing', authenticateToken, async (req, res) => {
-    try {
-      const { token } = req.body;
-      const userId = await verifyAndConsumeLinkToken(token);
-      if (!userId) {
-        return res.status(400).json({ success: false, message: 'Token ไม่ถูกต้องหรือหมดอายุแล้ว' });
-      }
-
-      const mockChatId = 998877665;
-      const mockTgUsername = `@Test_${req.user.username}`;
-      const user = await linkTelegramAccount(userId, mockChatId, mockTgUsername, 'Simulated User');
-
-      res.json({
-        success: true,
-        message: 'จำลองการเชื่อมต่อ Telegram สำเร็จ!',
-        user
-      });
-    } catch (err) {
-      res.status(500).json({ success: false, message: err.message });
-    }
-  });
-
-  return router;
-}
-
-// ----------------------------------------------------------------------------
-// Module Initialization
-// ----------------------------------------------------------------------------
-// เดิมรับ Supabase client ผ่าน initTelegramBot(supabaseInstance) จาก server.js แล้วเก็บไว้ที่ supabaseClient
-// ตอนนี้ db.js เป็น singleton module เหมือน require('@supabase/supabase-js') เดิม จึง require('./db') ตรงนี้ได้เลย
-// ไม่ต้องรับการ inject client จากภายนอกอีกต่อไป - เริ่ม Bot Polling ทันทีที่โมดูลนี้ถูก require
-(function initTelegramBot() {
-  const token = getBotToken();
-  if (token) {
-    startBotPolling();
-  } else {
-    console.log('ℹ️ [TELEGRAM] Bot ready in Simulation Mode (Add TELEGRAM_BOT_TOKEN in .env to activate live bot)');
-  }
-})();
-
 module.exports = {
-  createTelegramRouter,
+  formatThaiDate,
+  formatThaiDateTime,
+  getUserChatId,
   sendTelegramMessage,
-  notifyApproverQueue,
-  notifyApproverOverdueReminder,
-  notifyStudentApproved,
-  notifyStudentRejected,
-  notifyScanGateEvent,
-  notifyAdminAlert,
-  notifyDisciplineStudentReturn,
-  createLinkToken,
-  getUserTelegramInfo
+  sendTelegramPhoto,
+  notifyRequestCreated,
+  notifyApprovalAction,
+  notifyGateRecord,
+  startTelegramPolling
 };

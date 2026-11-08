@@ -15,4 +15,10 @@ const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 const char* TELEGRAM_BOT_TOKEN = "YOUR_BOT_TOKEN";
 const char* TELEGRAM_CHAT_ID   = "YOUR_CHAT_ID";
 
+// 3. Server Configuration (ตั้งค่าเซิร์ฟเวอร์ OnePass)
+#define SERVER_HOST "onepass.ongkharak.ac.th"
+#define SERVER_PORT 443
+// #define SERVER_HOST "192.168.1.100"
+// #define SERVER_PORT 3000
+
 #endif

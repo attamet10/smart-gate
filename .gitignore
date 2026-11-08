@@ -1,8 +1,19 @@
+# Dependencies
 node_modules/
+package-lock.json.backup
+
+# Environment variables & secrets
 .env
-secrets.h
-.DS_Store
+.env.local
+.env.*.local
+
+# Logs
 *.log
-cloudflared.exe
-data/backups/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Scratch & temporary
 scratch/
+.DS_Store
+Thumbs.db

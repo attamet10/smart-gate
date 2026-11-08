@@ -1,5675 +1,1856 @@
-// ต้องโหลด .env ก่อน require('./db') และ require('./telegram') เสมอ เพราะทั้งสองไฟล์อ่าน
-// process.env (DB_HOST/DB_USER, TELEGRAM_BOT_TOKEN ฯลฯ) ทันทีตอนถูก require เข้ามา (module load time)
-require('dotenv').config();
+/**
+ * OnePass Server - Node.js Express Application
+ * Database: XAMPP MySQL (ongkharak_std)
+ * No PHP used - Pure JavaScript Backend & Frontend
+ */
 
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const {
-  createTelegramRouter,
-  notifyApproverQueue,
-  notifyApproverOverdueReminder,
-  notifyStudentApproved,
-  notifyStudentRejected,
-  notifyScanGateEvent,
-  notifyAdminAlert,
-  notifyDisciplineStudentReturn,
-  sendTelegramMessage
-} = require('./telegram');
-const mqtt = require('mqtt');
-const db = require('./db');
-const fs = require('fs');
-
-const JWT_SECRET = process.env.JWT_SECRET || 'onepass_jwt_secret_key_2026_smartgate_secure_token';
-const BCRYPT_ROUNDS = 10;
-
-function generateToken(user) {
-  if (!user) return null;
-  return jwt.sign(
-    {
-      id: user.id || 'u-' + (user.username || 'unknown'),
-      username: user.username,
-      role: user.role || 'student',
-      full_name: user.full_name || '',
-      department_id: user.department_id || null
-    },
-    JWT_SECRET,
-    { expiresIn: '7d' }
-  );
-}
-
-// Middleware ตรวจสอบ JWT Token (Authentication)
-function authenticateToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  let token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : null;
-  if (!token && req.headers['x-access-token']) {
-    token = req.headers['x-access-token'];
-  }
-
-  if (!token) {
-    return res.status(401).json({ 
-      success: false, 
-      message: '⛔ ปฏิเสธการเข้าถึง: ไม่พบ Token ยืนยันตัวตน กรุณาเข้าสู่ระบบก่อนทำรายการ' 
-    });
-  }
-
-  jwt.verify(token, JWT_SECRET, (err, decodedUser) => {
-    if (err) {
-      return res.status(403).json({ 
-        success: false, 
-        message: '⛔ เซสชันหมดอายุหรือไม่ถูกต้อง กรุณาเข้าสู่ระบบใหม่อีกครั้ง' 
-      });
-    }
-    req.user = decodedUser;
-    next();
-  });
-}
-
-// Middleware ตรวจสอบสิทธิ์บทบาทผู้ใช้งาน (RBAC Authorization)
-function requireRole(allowedRoles) {
-  return (req, res, next) => {
-    if (!req.user || !allowedRoles.includes(req.user.role)) {
-      return res.status(403).json({
-        success: false,
-        message: `⛔ สิทธิ์ไม่เพียงพอ: บัญชีของคุณ (${req.user ? req.user.role : 'guest'}) ไม่มีสิทธิ์ทำรายการนี้ (อนุญาตเฉพาะ: ${allowedRoles.join(', ')})`
-      });
-    }
-    next();
-  };
-}
-
-// ฟังก์ชันส่งการแจ้งเตือนผ่าน LINE (รองรับทั้ง LINE Notify Token และโหมดจำลอง)
-async function sendLineNotification(message) {
-  const token = process.env.LINE_NOTIFY_TOKEN || process.env.LINE_TOKEN;
-  console.log(`📱 [LINE NOTIFICATION]\n${message.trim()}`);
-
-  if (!token || token.trim() === '' || token.includes('your_line')) {
-    // โหมดจำลอง (ยังไม่ได้ใส่ Token ใน .env หรืออยู่ในโหมดทดสอบ)
-    return { success: true, simulated: true };
-  }
-
-  try {
-    const params = new URLSearchParams();
-    params.append('message', message);
-
-    const res = await fetch('https://notify-api.line.me/api/notify', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Authorization': `Bearer ${token}`
-      },
-      body: params
-    });
-
-    const data = await res.json();
-    if (res.ok) {
-      console.log('✅ [LINE] Message delivered successfully to LINE!');
-      return { success: true, data };
-    } else {
-      console.warn('⚠️ [LINE] API responded with error:', data);
-      return { success: false, data };
-    }
-  } catch (err) {
-    console.warn('⚠️ [LINE] Failed to send LINE notification:', err.message);
-    return { success: false, error: err.message };
-  }
-}
-
-function isBcryptHash(str) {
-  return typeof str === 'string' && /^\$2[aby]\$\d{2}\$.{53}$/.test(str);
-}
-
-async function hashPassword(plainPassword) {
-  return await bcrypt.hash(String(plainPassword).trim(), BCRYPT_ROUNDS);
-}
-
-async function verifyPassword(plainPassword, storedPassword) {
-  if (!plainPassword || !storedPassword) return false;
-  const cleanPlain = String(plainPassword).trim();
-  const cleanStored = String(storedPassword).trim();
-  if (isBcryptHash(cleanStored)) {
-    return await bcrypt.compare(cleanPlain, cleanStored);
-  }
-  // รองรับรหัสผ่านเดิมแบบข้อความปกติ (Backward-compatible สำหรับบัญชีเดิม/บัญชีทดสอบ เช่น 1234)
-  return cleanPlain === cleanStored;
-}
-
-function sanitizeUser(userObj) {
-  if (!userObj || typeof userObj !== 'object') return userObj;
-  const copy = { ...userObj };
-  delete copy.password;
-  delete copy.password_hash;
-  return copy;
-}
-
-// ============================================================================
-// ROTATING QR CODE (Time-Based One-Time Password / Anti-Screenshot Engine)
-// ============================================================================
-const ROTATING_QR_INTERVAL_SEC = 30; // รหัส QR หมุนเวียนเปลี่ยนทุก 30 วินาที
-
-function generateTotp(baseToken, timeWindow) {
-  return crypto.createHmac('sha256', baseToken)
-    .update(timeWindow.toString())
-    .digest('hex')
-    .substring(0, 6)
-    .toUpperCase();
-}
-
-function verifyTotp(baseToken, totpCode) {
-  if (!totpCode || totpCode.trim().length !== 6) {
-    return { valid: false, reason: 'Invalid format' };
-  }
-  const currentWindow = Math.floor(Date.now() / (ROTATING_QR_INTERVAL_SEC * 1000));
-  // ตรวจสอบช่วงเวลาปัจจุบัน และช่วงผ่อนปรน +/- 1 window (กันเหลื่อมวินาที รวม 90 วิ)
-  for (let offset = -1; offset <= 1; offset++) {
-    const expected = generateTotp(baseToken, currentWindow + offset);
-    if (expected === totpCode.trim().toUpperCase()) {
-      return { valid: true, offset };
-    }
-  }
-  return { valid: false, reason: 'Expired' };
-}
-
-const DATA_DIR = path.join(__dirname, 'data');
-const PROFILES_FILE = path.join(DATA_DIR, 'profiles.json');
-const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
-const DEPTS_FILE = path.join(DATA_DIR, 'departments.json');
-const DELEGATIONS_FILE = path.join(DATA_DIR, 'delegations.json');
-const REQUESTS_META_FILE = path.join(DATA_DIR, 'requests_meta.json');
-const DEVICE_REQUESTS_FILE = path.join(DATA_DIR, 'device_requests.json');
-const LOGIN_LOGS_FILE = path.join(DATA_DIR, 'login_logs.json');
-const DELETED_USERS_FILE = path.join(DATA_DIR, 'deleted_users.json');
-
-function loadDeletedUsers() {
-  try {
-    if (fs.existsSync(DELETED_USERS_FILE)) {
-      const arr = JSON.parse(fs.readFileSync(DELETED_USERS_FILE, 'utf8'));
-      if (Array.isArray(arr)) {
-        return new Set(arr.map(u => String(u).trim().toLowerCase()).filter(Boolean));
-      }
-    }
-  } catch (e) {}
-  return new Set();
-}
-
-function markUserAsDeleted(username) {
-  if (!username) return;
-  const clean = username.trim().toLowerCase();
-  try {
-    const set = loadDeletedUsers();
-    set.add(clean);
-    fs.writeFileSync(DELETED_USERS_FILE, JSON.stringify(Array.from(set), null, 2), 'utf8');
-    console.log(`🗑️ [BLACKLIST] Marked user @${clean} as deleted`);
-  } catch (e) {
-    console.warn('Save deleted user error:', e.message);
-  }
-}
-
-function unmarkUserAsDeleted(username) {
-  if (!username) return;
-  const clean = username.trim().toLowerCase();
-  try {
-    const set = loadDeletedUsers();
-    if (set.has(clean)) {
-      set.delete(clean);
-      fs.writeFileSync(DELETED_USERS_FILE, JSON.stringify(Array.from(set), null, 2), 'utf8');
-      console.log(`♻️ [BLACKLIST] Unmarked user @${clean} from deleted list`);
-    }
-  } catch (e) {}
-}
-
-function loadDeviceRequests() {
-  try {
-    if (fs.existsSync(DEVICE_REQUESTS_FILE)) {
-      return JSON.parse(fs.readFileSync(DEVICE_REQUESTS_FILE, 'utf8'));
-    }
-  } catch (e) {}
-  return [];
-}
-
-function saveDeviceRequests(list) {
-  try {
-    fs.writeFileSync(DEVICE_REQUESTS_FILE, JSON.stringify(list, null, 2), 'utf8');
-  } catch (e) {}
-}
-
-function appendLoginLog(entry) {
-  try {
-    let logs = [];
-    if (fs.existsSync(LOGIN_LOGS_FILE)) {
-      logs = JSON.parse(fs.readFileSync(LOGIN_LOGS_FILE, 'utf8') || '[]');
-    }
-    logs.unshift({
-      id: 'log_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
-      created_at: new Date().toISOString(),
-      ...entry
-    });
-    if (logs.length > 500) logs = logs.slice(0, 500);
-    fs.writeFileSync(LOGIN_LOGS_FILE, JSON.stringify(logs, null, 2), 'utf8');
-  } catch (e) {}
-}
-
-if (!fs.existsSync(DATA_DIR)) {
-  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) {}
-}
-
-const DEFAULT_SETTINGS = {
-  entryTime: "08:00",
-  lunchStart: "12:00",
-  lunchEnd: "13:00",
-  leaveMinTime: "08:00",
-  leaveMaxTime: "16:00",
-  dismissalTime: "16:00",
-  gracePeriodMinutes: 15,
-  preWarningMinutes: 30,
-  approvalReminderMinutes: 15,
-  autoExpireAfterDismissal: true,
-  returnMaxDistanceCm: 60,
-  returnNotifyMode: "all",
-  returnRequireWifi: false
-};
-
-// บัญชีระบบจริง - เหลือแค่ admin สำหรับ bootstrap เข้าระบบครั้งแรกเท่านั้น
-// (เดิมมีบัญชีสาธิตปลอมกว่า 30 บัญชี เช่น teacher_auto, adv_auto_1, head_account, discipline, deputy
-//  ที่ login ผ่านได้ด้วยรหัสผ่าน 1234 เสมอ ไม่ผูกกับใครจริง และยังอนุมัติคำร้องจริงได้ด้วย - ถือเป็นช่องโหว่
-//  ล็อกอินปลอม จึงลบออกทั้งหมด ให้สร้างบัญชีจริงผ่านหน้า "เพิ่มผู้ใช้งาน" ของแอดมินแทน)
-const ALL_SYSTEM_ACCOUNTS = {
-  'admin': { id: '00000000-0000-0000-0000-000000000099', username: 'admin', full_name: 'ผู้ดูแลระบบ OnePass (Admin)', role: 'admin', dept: 'งานศูนย์ข้อมูลและสารสนเทศ', departments: { name: 'งานศูนย์ข้อมูลและสารสนเทศ' } }
-};
-
-function loadSettings() {
-  try {
-    if (fs.existsSync(SETTINGS_FILE)) {
-      return { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
-    }
-  } catch (e) {
-    console.warn('Load settings error:', e.message);
-  }
-  return DEFAULT_SETTINGS;
-}
-
-function saveSettings(newSettings) {
-  try {
-    const current = loadSettings();
-    if (newSettings.dismissalTime && !newSettings.leaveMaxTime) {
-      newSettings.leaveMaxTime = newSettings.dismissalTime;
-    }
-    if (newSettings.morningGateClose && !newSettings.entryTime) {
-      newSettings.entryTime = newSettings.morningGateClose;
-    }
-    const merged = { ...current, ...newSettings, updatedAt: new Date().toISOString() };
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(merged, null, 2), 'utf8');
-    return merged;
-  } catch (e) {
-    console.warn('Save settings error:', e.message);
-    return null;
-  }
-}
-
-function loadDepartments() {
-  try {
-    if (fs.existsSync(DEPTS_FILE)) {
-      return JSON.parse(fs.readFileSync(DEPTS_FILE, 'utf8'));
-    }
-  } catch (e) {
-    console.warn('Load departments error:', e.message);
-  }
-  return [];
-}
-
-function saveDepartments(deptsList) {
-  try {
-    fs.writeFileSync(DEPTS_FILE, JSON.stringify(deptsList, null, 2), 'utf8');
-    return true;
-  } catch (e) {
-    console.warn('Save departments error:', e.message);
-    return false;
-  }
-}
-
-function loadProfiles() {
-  try {
-    if (fs.existsSync(PROFILES_FILE)) {
-      return JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf8'));
-    }
-  } catch (e) {
-    console.warn('Load profiles error:', e.message);
-  }
-  return {};
-}
-
-function saveStoredProfile(username, data) {
-  if (!username) return null;
-  try {
-    const all = loadProfiles();
-    const key = username.toLowerCase().trim();
-    all[key] = { ...(all[key] || {}), ...data, updatedAt: new Date().toISOString() };
-    fs.writeFileSync(PROFILES_FILE, JSON.stringify(all, null, 2), 'utf8');
-    return all[key];
-  } catch (e) {
-    console.error('Save profile error:', e.message);
-    return null;
-  }
-}
-
-function getStoredProfile(username) {
-  if (!username) return {};
-  const all = loadProfiles();
-  return all[username.toLowerCase().trim()] || {};
-}
-
-function deleteStoredProfile(username) {
-  if (!username) return false;
-  try {
-    const all = loadProfiles();
-    const key = username.toLowerCase().trim();
-    if (all[key]) {
-      delete all[key];
-      fs.writeFileSync(PROFILES_FILE, JSON.stringify(all, null, 2), 'utf8');
-      return true;
-    }
-  } catch (e) {
-    console.error('Delete stored profile error:', e.message);
-  }
-  return false;
-}
-
-// ============================================================================
-// DELEGATIONS & 5-STEP METADATA ENGINE
-// ============================================================================
-function loadDelegations() {
-  try {
-    if (fs.existsSync(DELEGATIONS_FILE)) {
-      return JSON.parse(fs.readFileSync(DELEGATIONS_FILE, 'utf8'));
-    }
-  } catch (e) {
-    console.warn('Load delegations error:', e.message);
-  }
-  return [];
-}
-
-function saveDelegations(list) {
-  try {
-    fs.writeFileSync(DELEGATIONS_FILE, JSON.stringify(list, null, 2), 'utf8');
-    return true;
-  } catch (e) {
-    console.warn('Save delegations error:', e.message);
-    return false;
-  }
-}
-
-function loadRequestsMeta() {
-  try {
-    if (fs.existsSync(REQUESTS_META_FILE)) {
-      return JSON.parse(fs.readFileSync(REQUESTS_META_FILE, 'utf8'));
-    }
-  } catch (e) {
-    console.warn('Load requests meta error:', e.message);
-  }
-  return {};
-}
-
-function getRequestMeta(requestKey) {
-  if (!requestKey) return null;
-  const all = loadRequestsMeta();
-  return all[String(requestKey)] || null;
-}
-
-function saveRequestMeta(requestKey, metaPatch) {
-  if (!requestKey) return null;
-  try {
-    const all = loadRequestsMeta();
-    const key = String(requestKey);
-    all[key] = { ...(all[key] || {}), ...metaPatch, updatedAt: new Date().toISOString() };
-    fs.writeFileSync(REQUESTS_META_FILE, JSON.stringify(all, null, 2), 'utf8');
-    return all[key];
-  } catch (e) {
-    console.warn('Save request meta error:', e.message);
-    return null;
-  }
-}
-
-function deleteRequestMeta(requestKey) {
-  if (!requestKey) return false;
-  try {
-    const all = loadRequestsMeta();
-    const key = String(requestKey);
-    if (all[key]) {
-      delete all[key];
-      fs.writeFileSync(REQUESTS_META_FILE, JSON.stringify(all, null, 2), 'utf8');
-      return true;
-    }
-  } catch (e) {
-    console.warn('Delete request meta error:', e.message);
-  }
-  return false;
-}
-
-function parseTimeToMins(tStr) {
-  if (!tStr || typeof tStr !== 'string' || !tStr.includes(':')) return 0;
-  const [h, m] = tStr.trim().substring(0, 5).split(':').map(Number);
-  return (h || 0) * 60 + (m || 0);
-}
-
-function isDepartmentMatchServer(deptA, deptB) {
-  if (!deptA || !deptB) return false;
-  const cleanA = String(deptA).replace('แผนกวิชา', '').split('(')[0].trim();
-  const cleanB = String(deptB).replace('แผนกวิชา', '').split('(')[0].trim();
-  if (!cleanA || !cleanB) return false;
-  if (cleanA.includes(cleanB) || cleanB.includes(cleanA)) return true;
-  if (cleanA.includes('ไฟฟ้า') && cleanB.includes('ไฟฟ้า')) return true;
-  if (cleanA.includes('ยนต์') && cleanB.includes('ยนต์')) return true;
-  if (cleanA.includes('บัญชี') && cleanB.includes('บัญชี')) return true;
-  if (cleanA.includes('ดิจิทัล') && !cleanA.includes('สำนักงาน') && cleanB.includes('ดิจิทัล') && !cleanB.includes('สำนักงาน')) return true;
-  if ((cleanA.includes('สำนักงาน') || cleanA.includes('จัดการ')) && (cleanB.includes('สำนักงาน') || cleanB.includes('จัดการ'))) return true;
-  return false;
-}
-
-function isClassroomMatchServer(classA, classB) {
-  if (!classA || !classB) return false;
-  const cleanA = String(classA).trim();
-  const cleanB = String(classB).trim();
-  return cleanA === cleanB || cleanA.includes(cleanB) || cleanB.includes(cleanA);
-}
-
-// หา department_id จริงจากชื่อแผนก ถ้ายังไม่มีแถวในตาราง departments ให้สร้างให้เลย (self-healing)
-async function resolveOrCreateDepartmentId(deptName) {
-  const clean = String(deptName || '').trim();
-  if (!clean) return null;
-  const existing = await db.query('SELECT id FROM departments WHERE name = ?', [clean]);
-  if (existing[0]) return existing[0].id;
-  const code = clean.replace('แผนกวิชา', '').trim().slice(0, 20) || ('DEPT' + Date.now());
-  const result = await db.query('INSERT INTO departments (name, code) VALUES (?, ?)', [clean, code]);
-  return result.insertId;
-}
-
-// หา classroom_id จริงจากชื่อชั้น+แผนก ถ้ายังไม่มีแถวให้สร้างให้เลย (self-healing)
-// หมายเหตุ: ครูรายวิชาเลือกได้หลายชั้น (เก็บเป็น "ปวช.1,ปวช.2" ใน profiles.json) แต่คอลัมน์ classroom_id
-// ในฐานข้อมูลเก็บได้ค่าเดียว จึงผูกกับชั้นแรกในรายการเป็นชั้นหลัก ส่วนรายการเต็มยังอยู่ใน profiles.json เหมือนเดิม
-async function resolveOrCreateClassroomId(classroomField, departmentId) {
-  const first = String(classroomField || '').split(',')[0].trim();
-  if (!first) return null;
-  const existing = await db.query('SELECT id FROM classrooms WHERE name = ? AND department_id <=> ?', [first, departmentId]);
-  if (existing[0]) return existing[0].id;
-  const result = await db.query('INSERT INTO classrooms (name, department_id) VALUES (?, ?)', [first, departmentId]);
-  return result.insertId;
-}
-
-// ตรวจสอบเวลาทับซ้อนในตารางสอน (ข้อ 12: ตรวจพบเวลาทับซ้อนต้องแจ้งเตือน)
-// Helper: ค้นหาหรือสร้างบัญชีครูรายวิชาอัตโนมัติเมื่อเพิ่มตารางสอน/นำเข้า Excel (รหัสผ่านเริ่มต้น 1234)
-function getAllActiveTeacherAccountsMap() {
-  const map = { ...ALL_SYSTEM_ACCOUNTS };
-  const profiles = loadProfiles();
-  for (const [k, p] of Object.entries(profiles)) {
-    const uname = (p.username || k || '').toLowerCase().trim();
-    if (!uname) continue;
-    if (['subject_teacher', 'advisor', 'dept_head', 'discipline_head', 'deputy_director'].includes(p.role)) {
-      map[uname] = {
-        id: p.id || `u-${uname}`,
-        username: uname,
-        full_name: p.full_name || uname,
-        role: p.role,
-        dept: p.dept || 'แผนกวิชาช่างยนต์',
-        departments: { name: p.dept || 'แผนกวิชาช่างยนต์' },
-        isAutoCreated: Boolean(p.isAutoCreated)
-      };
-    }
-  }
-  return map;
-}
+const QRCode = require('qrcode');
+const telegram = require('./telegram');
+const { pool, initDatabase, query } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const { spawn } = require('child_process');
 
-// ============================================================================
-// SERIAL BRIDGE (คุยกับบอร์ด ESP32 ผ่านสาย USB COM อัตโนมัติ)
-// ============================================================================
-let serialWorker = null;
-let serialConnectedPort = null;
-let lastEsp32Heartbeat = null; // เวลา ms ของ heartbeat ล่าสุดจาก ESP32
-let lastEsp32Ack = null;       // ข้อมูล ACK ยืนยันการทำงานของไม้กั้น
-
-// เก็บ Session ไม้กั้นที่กำลังเปิดอยู่: key = requestId
-const activeGateSessions = new Map();
-
-// ฟังก์ชันจบกระบวนการขาออกเมื่อไม้กั้นปิดลง (ตัดสิทธิ์ QR + เปลี่ยนสถานะเป็น exited/returned)
-async function finalizeGateExit(requestId, reason = 'TIMEOUT_30S') {
-  if (!requestId) {
-    if (activeGateSessions.size > 0) {
-      const firstKey = activeGateSessions.keys().next().value;
-      requestId = firstKey;
-    }
-  }
-
-  let session = null;
-  if (requestId && activeGateSessions.has(requestId)) {
-    session = activeGateSessions.get(requestId);
-    if (session && session.timeoutTimer) {
-      clearTimeout(session.timeoutTimer);
-    }
-    activeGateSessions.delete(requestId);
-  }
-
-  const outIso = new Date().toISOString();
-  const outTimeStr = new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
-
-  let studentName = session ? session.studentName : 'นักเรียน';
-  let requestObj = session ? session.request : null;
-
-  try {
-    if (supabase && requestId && requestId !== 'MANUAL' && requestId !== 'MANUAL_BTN') {
-      if (!requestObj) {
-        const data = await db.getLeaveRequestWithStudent(requestId);
-        if (data) requestObj = data;
-      }
-
-      if (requestObj) {
-        studentName = requestObj.users ? (requestObj.users.full_name || requestObj.users.username) : (requestObj.student_name || studentName);
-        const isNoReturn = Boolean(requestObj.no_return || requestObj.expected_return_time === 'NO_RETURN' || requestObj.leave_type === 'no_return');
-        const finalStatus = isNoReturn ? 'returned' : 'exited';
-
-        // 1. ตัดสิทธิ์ QR Code และบันทึกสถานะสิ้นสุดขาออก
-        try {
-          await db.query(
-            'UPDATE leave_requests SET is_qr_used = ?, qr_used_at = ?, actual_out_time = ?, status = ? WHERE id = ?',
-            [true, outIso, outIso, finalStatus, requestId]
-          );
-        } catch (e) {
-          await db.query(
-            'UPDATE leave_requests SET is_qr_used = ?, qr_used_at = ?, status = ? WHERE id = ?',
-            [true, outIso, finalStatus, requestId]
-          );
-        }
-
-        saveRequestMeta(requestId, {
-          status: finalStatus,
-          actualOutTime: outIso,
-          actualOutTimeStr: outTimeStr,
-          gateCloseReason: reason,
-          isQrUsed: true,
-          qrUsedAt: outIso
-        });
-
-        // 2. บันทึกประวัติการสแกนปิดสมบูรณ์
-        const reasonDesc = reason === 'SENSOR_PASSED' 
-          ? 'ตรวจพบคน/รถผ่านเซนเซอร์ ไม้กั้นปิดลง' 
-          : (reason === 'TIMEOUT_30S' ? 'ครบกำหนดเวลา 30 วินาที ไม้กั้นปิดลง' : `ไม้กั้นปิด (${reason})`);
-
-        await db.insertAutoIncrement('scan_logs', {
-          request_id: requestId,
-          qr_token: requestObj.qr_token || 'COMPLETED',
-          student_name: studentName,
-          scan_type: 'exit_completed',
-          result: 'success',
-          message: `ไม้กั้นปิดเรียบร้อย (${reasonDesc}) - ตัดสิทธิ์ QR และบันทึกสถานะ "${finalStatus === 'returned' ? 'กลับบ้านเสร็จสิ้น' : 'อยู่นอกสถานศึกษา'}"`
-        });
-
-        // 3. ส่งแจ้งเตือน Line
-        const reasonBadge = reason === 'SENSOR_PASSED' ? '🚗 ขับ/เดินผ่านเซนเซอร์แล้ว' : '⏱️ ครบเวลาไม้กั้น 30 วินาที';
-        sendLineNotification(
-          `\n🚪 [OnePass ไม้กั้นปิดสมบูรณ์: นักเรียนผ่านประตูแล้ว]\n` +
-          `• นักเรียน: ${studentName} (${requestObj.users ? requestObj.users.username : '-'})\n` +
-          `• แผนกวิชา: ${requestObj.users && requestObj.users.departments ? requestObj.users.departments.name : '-'}\n` +
-          `• เวลาออกจริง: ${outTimeStr} น.\n` +
-          `• การตรวจจับ: ${reasonBadge}\n` +
-          `• สถานะคำขอ: ${finalStatus === 'returned' ? 'กลับบ้านเสร็จสิ้น (ไม่ต้องกลับเข้า)' : 'อยู่นอกสถานศึกษา (QR หมดอายุเรียบร้อย)'}\n` +
-          (finalStatus === 'exited' ? `• ขากลับเข้า: ให้กดปุ่ม "ฉันกลับถึงวิทยาลัยแล้ว" ในแอปเมื่อเดินทางกลับมาถึง` : '')
-        );
-
-        console.log(`✅ [GATE_FINALIZED] Request ${requestId} finalized with status ${finalStatus} (Reason: ${reason})`);
-
-        // ตรวจสอบกรณีเป็น QR Code ทดสอบ (Auto-Purge on Gate Close)
-        const reqMeta = getRequestMeta(requestId) || (requestObj.request_no ? getRequestMeta(requestObj.request_no) : {}) || {};
-        if (reqMeta.isTemporaryTest || (requestObj.request_no && requestObj.request_no.startsWith('TEST-')) || (requestObj.qr_token && requestObj.qr_token.startsWith('TEST-'))) {
-          console.log(`🧹 [AUTO-PURGE TEST REQUEST] ไม้กั้นปิดแล้ว กำลังลบข้อมูลทดสอบ ${requestId} ออกจากระบบ 100%`);
-          try {
-            await db.query('DELETE FROM leave_requests WHERE id = ?', [requestId]);
-            await db.query('DELETE FROM scan_logs WHERE request_id = ?', [requestId]);
-          } catch (delErr) {
-            console.warn('Auto purge error:', delErr.message);
-          }
-          deleteRequestMeta(requestId);
-          if (requestObj.request_no) deleteRequestMeta(requestObj.request_no);
-          console.log(`✨ [AUTO-PURGED] ลบคำขอทดสอบและประวัติสแกนทดสอบออกจากฐานข้อมูลเรียบร้อยแล้ว ไม่เหลือร่องรอย!`);
-        }
-      }
-    }
-  } catch (err) {
-    console.error('finalizeGateExit error:', err.message);
-  }
-}
-
-function initSerialWorker() {
-  // หากรันบน Cloud Hosting หรือปิดการใช้งาน Serial ไม่ต้องรัน Python worker
-  if (process.env.DISABLE_SERIAL === 'true') {
-    console.log('ℹ️ [SERIAL] USB Serial Worker skipped (DISABLE_SERIAL=true)');
-    return;
-  }
-
-  try {
-    serialWorker = spawn('python', ['-u', path.join(__dirname, 'serial_worker.py')]);
-    
-    // ดักจับ error กรณีโฮสติ้งไม่มี Python เพื่อไม่ให้เซิร์ฟเวอร์หลุดการทำงาน
-    serialWorker.on('error', (err) => {
-      console.warn('ℹ️ [SERIAL] Python not found or not supported on this host (Running Cloud mode):', err.message);
-      serialWorker = null;
-    });
-
-    if (serialWorker && serialWorker.stdout) {
-      serialWorker.stdout.on('data', (data) => {
-        const text = data.toString().trim();
-        console.log('[ESP32]', text);
-        lastEsp32Heartbeat = Date.now();
-        if (text.includes('[SERIAL_CONNECTED]')) {
-          serialConnectedPort = text.split('[SERIAL_CONNECTED]')[1].trim();
-          console.log('ESP32 Gate connected on', serialConnectedPort);
-        } else if (text.includes('[SERIAL_ERR]')) {
-          serialConnectedPort = null;
-        }
-
-        // ดักจับสัญญาณปิดไม้กั้นจาก ESP32 (คนเดินผ่านเซนเซอร์ หรือครบ 30 วินาที)
-        if (text.includes('[GATE_CLOSED]')) {
-          const reqMatch = text.match(/requestId=([^\s]+)/);
-          const reasonMatch = text.match(/reason=([^\s]+)/);
-          const reqId = reqMatch ? reqMatch[1] : null;
-          const reason = reasonMatch ? reasonMatch[1] : 'TIMEOUT_30S';
-          finalizeGateExit(reqId, reason);
-        }
-
-        if (text.includes('Door OPENED') || text.includes('GATE_OPENED') || text.includes('OPEN')) {
-          lastEsp32Ack = {
-            action: 'DOOR_OPEN',
-            status: 'OK',
-            timestamp: new Date().toISOString(),
-            details: 'บอร์ด ESP32 ยืนยันเปิดไม้กั้นสำเร็จ (Serial)',
-            source: 'SERIAL'
-          };
-        } else if (text.includes('Door CLOSED') || text.includes('GATE_CLOSED') || text.includes('CLOSED')) {
-          lastEsp32Ack = {
-            action: 'DOOR_CLOSED',
-            status: 'OK',
-            timestamp: new Date().toISOString(),
-            details: 'บอร์ด ESP32 ยืนยันปิดไม้กั้นเรียบร้อย (Serial)',
-            source: 'SERIAL'
-          };
-        }
-      });
-
-      serialWorker.on('close', (code) => {
-        serialConnectedPort = null;
-        if (serialWorker) {
-          setTimeout(initSerialWorker, 5000);
-        }
-      });
-    }
-  } catch (err) {
-    console.warn('Serial worker error:', err.message);
-  }
-}
-initSerialWorker();
-
-function sendSerialCommand(cmd) {
-  if (serialWorker && serialWorker.stdin) {
-    try {
-      serialWorker.stdin.write(cmd + '\n');
-    } catch (e) {}
-  }
-}
-
+// Middlewares
 app.use(cors());
-app.use(express.json({ limit: '15mb' }));
-app.use(express.urlencoded({ extended: true, limit: '15mb' }));
-// ============================================================================
-// TELEGRAM BOT ROUTER & INTEGRATION
-// ============================================================================
-app.use('/api/telegram', createTelegramRouter(authenticateToken));
-
-app.use(express.static(path.join(__dirname, 'public'), {
-  setHeaders: (res, filePath) => {
-    // ป้องกัน Browser Caching เพื่อให้ผู้ใช้งานโหลด UI และโค้ดล่าสุดเสมอ
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
-  }
-}));
-
-// Route บริการโลโก้วิทยาลัยการอาชีพองครักษ์
-app.get(['/college-logo.png', '/college-logo.jpg'], (req, res) => {
-  const publicLogo = path.join(__dirname, 'public', 'college-logo.png');
-  if (fs.existsSync(publicLogo)) return res.sendFile(publicLogo);
-  const publicLogoJpg = path.join(__dirname, 'public', 'college-logo.jpg');
-  if (fs.existsSync(publicLogoJpg)) return res.sendFile(publicLogoJpg);
-  res.status(404).send('Logo not found');
-});
-
-// ============================================================================
-// 1. MYSQL CONNECTION POOL (เดิมเป็น Supabase/PostgreSQL Client)
-// ============================================================================
-// ตัวแปร `supabase` ถูกเก็บชื่อไว้เหมือนเดิมเพื่อลด diff ของโค้ดทั้งไฟล์ (if (supabase) {...} ทำงานเหมือนเดิมทุกจุด)
-// แต่ตอนนี้อ้างอิง db.pool (mysql2 pool) จาก db.js แทน Supabase client - เป็น null ถ้ายังไม่ได้ตั้งค่า DB_HOST/DB_USER
-const supabase = db.pool;
-if (supabase) {
-  console.log('✅ [MYSQL] Connected to Database successfully!');
-} else {
-  console.log('⚠️ [MYSQL] Not configured (missing DB_HOST/DB_USER in .env) - running in local JSON fallback mode');
-}
-
-// ============================================================================
-// 2. MQTT CLIENT (เชื่อมต่อกับ HiveMQ Cloud สำหรับสั่งบอร์ด ESP32)
-// ============================================================================
-let mqttClient = null;
-let isMqttConnected = false;
-
-if (process.env.MQTT_BROKER && process.env.MQTT_BROKER !== 'your-cluster-url.s1.eu.hivemq.cloud') {
-  try {
-    const protocol = process.env.MQTT_PORT == 8883 ? 'mqtts' : 'mqtt';
-    const brokerUrl = `${protocol}://${process.env.MQTT_BROKER}:${process.env.MQTT_PORT || 8883}`;
-    console.log(`[MQTT] Connecting to ${brokerUrl}...`);
-
-    mqttClient = mqtt.connect(brokerUrl, {
-      username: process.env.MQTT_USER,
-      password: process.env.MQTT_PASSWORD,
-      rejectUnauthorized: false
-    });
-
-    mqttClient.on('connect', () => {
-      isMqttConnected = true;
-      console.log('✅ [MQTT] Connected to HiveMQ Cloud broker successfully!');
-      const statusTopic = process.env.MQTT_TOPIC_STATUS || 'school/gate/status';
-      mqttClient.subscribe(statusTopic, (err) => {
-        if (!err) console.log(`📡 [MQTT] Subscribed to gate status topic: ${statusTopic}`);
-      });
-    });
-
-    mqttClient.on('message', (topic, message) => {
-      try {
-        const msgStr = message.toString();
-        lastEsp32Heartbeat = Date.now();
-        console.log(`[MQTT IN] ${topic}:`, msgStr);
-
-        let parsed = null;
-        try {
-          parsed = JSON.parse(msgStr);
-        } catch (e) {
-          parsed = { raw: msgStr };
-        }
-
-        if (parsed.door === 'OPEN') {
-          lastEsp32Ack = {
-            action: 'DOOR_OPEN',
-            status: parsed.status || 'OK',
-            timestamp: new Date().toISOString(),
-            details: 'บอร์ด ESP32 ยืนยันเปิดไม้กั้นสำเร็จ (Relay ON / Servo 90°)',
-            source: 'MQTT'
-          };
-          simulatorState.door = 'OPEN';
-          console.log('✅ [ESP32 ACK] Physical gate OPEN confirmed by hardware!');
-        } else if (parsed.door === 'CLOSED') {
-          lastEsp32Ack = {
-            action: 'DOOR_CLOSED',
-            status: parsed.status || 'OK',
-            timestamp: new Date().toISOString(),
-            details: `บอร์ด ESP32 ยืนยันปิดไม้กั้นเรียบร้อย (${parsed.reason || 'MQTT'})`,
-            source: 'MQTT'
-          };
-          simulatorState.door = 'CLOSED';
-          console.log('✅ [ESP32 ACK] Physical gate CLOSE confirmed by hardware!');
-          finalizeGateExit(parsed.requestId, parsed.reason || 'TIMEOUT_30S');
-        } else if (parsed.status === 'ONLINE' || parsed.device) {
-          lastEsp32Ack = {
-            action: 'ONLINE_PING',
-            status: 'OK',
-            timestamp: new Date().toISOString(),
-            details: `ESP32 เชื่อมต่อสำเร็จ (${parsed.device || 'ESP32_GATE'})`,
-            source: 'MQTT'
-          };
-          console.log(`🟢 [ESP32 STATUS] Hardware is ONLINE (${parsed.device || 'ESP32_GATE'})`);
-        }
-      } catch (err) {
-        console.warn('⚠️ [MQTT] Error parsing incoming message:', err.message);
-      }
-    });
-
-    mqttClient.on('error', (err) => {
-      console.warn('⚠️ [MQTT] Connection error:', err.message);
-      isMqttConnected = false;
-    });
-  } catch (err) {
-    console.warn('⚠️ [MQTT] Setup error:', err.message);
-  }
-} else {
-  console.log('ℹ️ [MQTT] Running in Simulated Mode');
-}
-
-// ฟังก์ชันส่งคำสั่งเปิดประตูไปที่บอร์ด ESP32 และตัวจำลอง
-function sendGateCommand(cmd = 'OPEN', duration = 30, studentName = '', requestId = '') {
-  if (cmd === 'OPEN') {
-    const formattedCmd = `OPEN ${duration} ${requestId || ''} ${studentName || ''}`.trim();
-    sendSerialCommand(formattedCmd);
-    sendSerialCommand('OPEN_GATE');
-  } else if (cmd === 'CLOSE') {
-    sendSerialCommand('CLOSE_GATE');
-  }
-
-  if (mqttClient && isMqttConnected) {
-    const topic = process.env.MQTT_TOPIC_COMMAND || 'school/gate/cmd';
-    const payload = JSON.stringify({ cmd, duration, student: studentName, requestId, timestamp: new Date().toISOString() });
-    mqttClient.publish(topic, payload, { qos: 1 });
-  }
-
-  // หากอยู่ในโหมดจำลอง ให้ส่ง Simulated ACK หลังจากคำสั่ง 350ms เพื่อให้หน้าเว็บเห็นผล
-  if (!isMqttConnected && !serialConnectedPort) {
-    setTimeout(() => {
-      lastEsp32Heartbeat = Date.now();
-      lastEsp32Ack = {
-        action: cmd === 'OPEN' ? 'DOOR_OPEN' : 'DOOR_CLOSED',
-        status: 'OK (SIMULATED)',
-        timestamp: new Date().toISOString(),
-        details: cmd === 'OPEN' ? `ตัวจำลองไม้กั้นยกขึ้น 90 องศา (${duration} วินาที)` : 'ตัวจำลองไม้กั้นปิดเรียบร้อย',
-        source: 'SIMULATOR'
-      };
-    }, 350);
-
-    // จำลองการปิดไม้กั้นและตัดสิทธิ์ QR อัตโนมัติเมื่อครบเวลา
-    if (cmd === 'OPEN' && requestId) {
-      setTimeout(() => {
-        finalizeGateExit(requestId, 'SIMULATED_TIMEOUT');
-      }, duration * 1000);
-    }
-  }
-
-  simulatorState.door = cmd === 'OPEN' ? 'OPEN' : 'CLOSED';
-  simulatorState.lastCommand = cmd;
-  simulatorState.studentName = studentName;
-  simulatorState.lastUpdated = new Date().toISOString();
-  simulatorState.duration = duration;
-
-  if (cmd === 'OPEN') {
-    setTimeout(() => {
-      simulatorState.door = 'CLOSED';
-      simulatorState.lastUpdated = new Date().toISOString();
-    }, duration * 1000);
-  }
-}
-
-// ตัวจำลองสถานะบอร์ด ESP32
-let simulatorState = {
-  door: 'CLOSED',
-  lastCommand: 'INIT',
-  studentName: '',
-  duration: 5,
-  lastUpdated: new Date().toISOString()
-};
-
-// สถานะฮาร์ดแวร์ล่าสุดที่บอร์ด ESP32 รายงานเข้ามา (หน้าแอดมินใช้แสดงผล)
-let gateDeviceStatus = {
-  wifi: false,
-  wifi_ip: null,
-  ultrasonic: false,
-  ultrasonic_distance: -1,
-  button_pressed: false,
-  output_cycle: false,
-  qr_connected: false,
-  last_update: null
-};
-const DEVICE_STATUS_STALE_MS = 15000; // ไม่มีรายงานเข้ามาเกิน 15 วิ ถือว่าออฟไลน์
-let pendingDeviceCommand = null; // คำสั่งทดสอบที่รอส่งให้บอร์ดรอบถัดไปที่รายงานสถานะเข้ามา
-
-// บอร์ด ESP32 ยิงสถานะเข้ามาทุก 3 วิ (ยืนยันตัวตนด้วย key ถ้าตั้งค่า DEVICE_STATUS_KEY ไว้)
-// ตอบกลับพร้อมคำสั่งทดสอบค้างอยู่ (ถ้ามี) ให้บอร์ดทำตามแล้วเคลียร์ทิ้ง
-app.post('/api/device/status', (req, res) => {
-  const expectedKey = process.env.DEVICE_STATUS_KEY;
-  if (expectedKey && req.headers['x-device-key'] !== expectedKey) {
-    return res.status(401).json({ success: false, message: 'Unauthorized device' });
-  }
-
-  const body = req.body || {};
-  gateDeviceStatus = {
-    wifi: !!body.wifi,
-    wifi_ip: body.wifi_ip || null,
-    ultrasonic: !!body.ultrasonic,
-    ultrasonic_distance: typeof body.ultrasonic_distance === 'number' ? body.ultrasonic_distance : -1,
-    button_pressed: !!body.button_pressed,
-    output_cycle: !!body.output_cycle,
-    qr_connected: !!body.qr_connected,
-    last_update: new Date().toISOString()
-  };
-
-  const commandToSend = pendingDeviceCommand;
-  pendingDeviceCommand = null; // ส่งครั้งเดียวแล้วเคลียร์ทิ้ง กันค้างเปิดซ้ำ
-  res.json({ success: true, command: commandToSend });
-});
-
-// แอดมินดึงสถานะล่าสุดไปแสดงในหน้าเว็บ (อัปเดตทุก 3 วิฝั่งหน้าเว็บ)
-app.get('/api/device/status', authenticateToken, requireRole(['admin']), (req, res) => {
-  const isStale = !gateDeviceStatus.last_update ||
-    (Date.now() - new Date(gateDeviceStatus.last_update).getTime() > DEVICE_STATUS_STALE_MS);
-  res.json({ ...gateDeviceStatus, board_online: !isStale });
-});
-
-// แอดมินกดปุ่ม "ทดสอบเปิดไม้กั้น" จากหน้าเว็บ บอร์ดจะรับคำสั่งภายในรอบรายงานถัดไป (≤3 วิ)
-app.post('/api/device/test-open', authenticateToken, requireRole(['admin']), (req, res) => {
-  pendingDeviceCommand = 'OPEN_TEST';
-  res.json({ success: true, message: 'ส่งคำสั่งทดสอบเปิดไม้กั้นแล้ว รอบอร์ดรับคำสั่งภายใน 3 วินาที' });
-});
-
-// แอดมินกดปุ่มทดสอบอุปกรณ์แยกทีละชิ้น (Servo/LED/Relay/บัซเซอร์) จากหน้าเว็บ
-const DEVICE_TEST_COMPONENT_COMMANDS = {
-  servo: 'TEST_SERVO',
-  led_green: 'TEST_LED_GREEN',
-  led_red: 'TEST_LED_RED',
-  led_yellow: 'TEST_LED_YELLOW',
-  relay: 'TEST_RELAY',
-  buzzer: 'TEST_BUZZER'
-};
-app.post('/api/device/test-component', authenticateToken, requireRole(['admin']), (req, res) => {
-  const component = String((req.body || {}).component || '').trim().toLowerCase();
-  const command = DEVICE_TEST_COMPONENT_COMMANDS[component];
-  if (!command) {
-    return res.status(400).json({ success: false, message: `ไม่รู้จักอุปกรณ์ "${component}"` });
-  }
-  pendingDeviceCommand = command;
-  res.json({ success: true, message: `ส่งคำสั่งทดสอบ ${component} แล้ว รอบอร์ดรับคำสั่งภายใน 3 วินาที` });
-});
-
-// สร้าง (หรือรีเซ็ต) คำร้องทดสอบที่สถานะ approved พร้อม qr_token คงที่ ไว้สแกนทดสอบฮาร์ดแวร์ซ้ำได้เรื่อยๆ
-const TEST_QR_TOKEN = 'TEST-GATE-0001';
-app.post('/api/device/create-test-qr', authenticateToken, requireRole(['admin']), async (req, res) => {
-  if (!supabase) return res.status(500).json({ success: false, message: 'ไม่ได้เชื่อมต่อฐานข้อมูล' });
-  try {
-    await db.query('DELETE FROM leave_requests WHERE qr_token = ?', [TEST_QR_TOKEN]);
-
-    const todayStr = getThaiDateStr();
-    await db.insertAutoIncrement('leave_requests', {
-      request_no: 'TEST-' + Date.now(),
-      student_id: req.user.id,
-      student_code: 'TEST',
-      title: 'ทดสอบระบบสแกน QR ฮาร์ดแวร์',
-      reason: 'ทดสอบการเชื่อมต่อโมดูลสแกน QR กับบอร์ด ESP32',
-      leave_date: todayStr,
-      departure_time: '08:00:00',
-      expected_return_time: '16:00:00',
-      status: 'approved',
-      current_step: 6,
-      total_steps: 5,
-      qr_token: TEST_QR_TOKEN,
-      qr_generated_at: new Date().toISOString()
-    });
-
-    res.json({ success: true, qr_token: TEST_QR_TOKEN, message: 'สร้างคำร้องทดสอบสำเร็จ พร้อมสแกนได้เลย' });
-  } catch (err) {
-    console.error('create-test-qr error:', err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// ============================================================================
-// 3. API ENDPOINTS (ผูกกับ MYSQL DB ตรง 100%)
-// ============================================================================
-
-// ดึงรายชื่อผู้ใช้
-app.get('/api/users', async (req, res) => {
-  if (supabase) {
-    try {
-      const data = await db.query('SELECT * FROM users');
-      if (data) return res.json({ users: data.map(sanitizeUser) });
-    } catch (e) {}
-  }
-  res.json({ users: [] });
-});
-
-// ดึงข้อมูลโปรไฟล์ผู้ใช้งานรายบุคคลจาก Supabase
-app.get('/api/profile/:username', async (req, res) => {
-  const username = req.params.username;
-  if (supabase) {
-    try {
-      const user = await db.getUserByUsernameWithRelations(username);
-
-      if (user) {
-        const stored = getStoredProfile(user.username);
-        const resolvedDept = user.classrooms?.name ? `${user.departments?.name || ''} (${user.classrooms.name})` : (user.departments?.name || stored.dept || 'วิทยาลัยการอาชีพองครักษ์');
-        const resolvedAdvisor = user.classrooms?.advisor_name || user.advisor_name || stored.advisor || '-';
-        return res.json({ 
-          success: true, 
-          user: sanitizeUser({
-            ...user,
-            ...stored,
-            student_code: user.student_code || stored.student_code || '',
-            advisor: resolvedAdvisor,
-            dept: resolvedDept,
-            plate: user.plate_no || stored.plate || '',
-            phone: user.phone || stored.phone || '',
-            parent_phone: user.parent_phone || stored.parent_phone || '',
-            college: 'วิทยาลัยการอาชีพองครักษ์',
-            profile_photo: user.profile_photo || stored.profile_photo || null,
-            plate_photo: user.plate_photo || stored.plate_photo || null
-          })
-        });
-      }
-    } catch (err) {
-      console.warn('Get profile error:', err.message);
-    }
-  }
-  res.status(404).json({ success: false, message: 'User not found' });
-});
-
-// บันทึกและอัปเดตข้อมูลโปรไฟล์ผู้ใช้งานลงใน Supabase Database โดยตรง
-app.put('/api/profile', async (req, res) => {
-  const { username, plate, phone, parent_phone, profile_photo, plate_photo } = req.body;
-  if (!username) {
-    return res.status(400).json({ success: false, message: 'ไม่พบ Username' });
-  }
-
-  if (supabase) {
-    try {
-      const updatePayload = {
-        plate_no: plate ? String(plate).trim() : null,
-        phone: phone ? String(phone).trim() : null,
-        parent_phone: parent_phone ? String(parent_phone).trim() : null
-      };
-
-      try {
-        await db.query(
-          'UPDATE users SET plate_no = ?, phone = ?, parent_phone = ? WHERE username = ?',
-          [updatePayload.plate_no, updatePayload.phone, updatePayload.parent_phone, username]
-        );
-      } catch (updErr) {
-        console.warn('PUT /api/profile db update error:', updErr.message);
-      }
-      const updated = await db.getUserByUsernameWithRelations(username);
-
-      saveStoredProfile(username, {
-        plate: plate || '',
-        phone: phone || '',
-        parent_phone: parent_phone || '',
-        profile_photo: profile_photo || null,
-        plate_photo: plate_photo || null
-      });
-
-      const uObj = updated || {};
-      const resolvedDept = uObj.classrooms?.name ? `${uObj.departments?.name || ''} (${uObj.classrooms.name})` : (uObj.departments?.name || '');
-      const resolvedAdvisor = uObj.classrooms?.advisor_name || uObj.advisor_name || '';
-
-      return res.json({
-        success: true,
-        message: 'บันทึกข้อมูลส่วนตัวเรียบร้อยแล้ว',
-        user: sanitizeUser({
-          ...uObj,
-          dept: resolvedDept,
-          advisor: resolvedAdvisor,
-          plate: plate || '',
-          phone: phone || '',
-          parent_phone: parent_phone || ''
-        })
-      });
-    } catch (err) {
-      console.error('PUT /api/profile error:', err);
-      res.status(500).json({ success: false, message: err.message });
-    }
-  } else {
-    res.json({ success: true, message: 'บันทึกสำเร็จ (โหมด Local)' });
-  }
-});
-
-// ลงทะเบียนผู้ใช้ใหม่ (เข้ารหัสรหัสผ่านด้วย bcrypt ก่อนบันทึกลง Supabase ตาราง users ทันที)
-app.post('/api/register', async (req, res) => {
-  const { studentCode, name, deptId, deptName, email, password } = req.body;
-  if (!studentCode || !name || !email || !password) {
-    return res.status(400).json({ success: false, message: 'กรุณากรอกข้อมูลให้ครบถ้วนทั้ง 5 รายการ' });
-  }
-
-  const cleanCode = studentCode.trim();
-  const cleanName = name.trim();
-  const cleanEmail = email.trim().toLowerCase();
-  const cleanPass = password.trim();
-
-  // ตรวจสอบความยาวรหัสผ่านอย่างน้อย 8 ตัวอักษร
-  if (cleanPass.length < 8) {
-    return res.status(400).json({ success: false, message: 'รหัสผ่านต้องมีความยาวอย่างน้อย 8 ตัวอักษร' });
-  }
-
-  const selectedDeptId = parseInt(deptId, 10) || 2;
-  const selectedDeptName = deptName || 'แผนกวิชาช่างไฟฟ้ากำลัง';
-
-  if (supabase) {
-    try {
-      // 1. ตรวจสอบว่ามี studentCode หรือ email นี้ในฐานข้อมูลแล้วหรือไม่
-      const existingRows = await db.query(
-        'SELECT id, username FROM users WHERE username = ? OR username = ?',
-        [cleanCode, cleanEmail]
-      );
-      const existingUser = existingRows[0];
-
-      if (existingUser) {
-        return res.status(400).json({ success: false, message: 'รหัสนักศึกษาหรืออีเมลนี้มีอยู่ในระบบแล้ว' });
-      }
-
-      // 2. เข้ารหัสรหัสผ่านด้วย bcrypt ก่อนบันทึกลง Supabase ตาราง users
-      const hashedPassword = await hashPassword(cleanPass);
-      const newUserId = crypto.randomUUID();
-      const insertUser = {
-        id: newUserId,
-        username: cleanCode,
-        password: hashedPassword,
-        full_name: cleanName,
-        role: 'student',
-        department_id: selectedDeptId,
-        classroom_id: selectedDeptId,
-        plate_no: '-',
-        phone: '-'
-      };
-
-      let data = null;
-      let error = null;
-      try {
-        const inserted = await db.insertWithUuid('users', insertUser);
-        data = [inserted];
-      } catch (insErr) {
-        error = insErr;
-      }
-
-      if (!error && data && data.length > 0) {
-        console.log(`✅ [MYSQL] New student registered with bcrypt password: ${cleanCode} (${cleanName})`);
-        
-        // 3. บันทึกโปรไฟล์เริ่มต้นลง profiles.json ทันที
-        const newProf = {
-          username: cleanCode,
-          email: cleanEmail,
-          full_name: cleanName,
-          student_code: cleanCode,
-          dept: selectedDeptName,
-          college: 'วิทยาลัยการอาชีพองครักษ์',
-          advisor: 'อ.กิตติศักดิ์ ไฟฟ้า',
-          plate: '-',
-          phone: '-',
-          parent_phone: ''
-        };
-        saveStoredProfile(cleanCode, newProf);
-        saveStoredProfile(cleanEmail, newProf);
-
-        const token = generateToken(data[0]);
-        return res.json({ 
-          success: true, 
-          message: 'ลงทะเบียนสำเร็จ! รหัสผ่านถูกเข้ารหัสด้วย bcrypt และบันทึกลงฐานข้อมูลแล้ว',
-          user: sanitizeUser(data[0]),
-          token
-        });
-      } else {
-        console.error('MySQL registration error:', error);
-        return res.status(500).json({ success: false, message: error ? error.message : 'เกิดข้อผิดพลาดในการลงทะเบียน' });
-      }
-    } catch (err) {
-      console.error('Registration exception:', err);
-      return res.status(500).json({ success: false, message: err.message });
-    }
-  }
-
-  res.json({ success: true, message: 'ลงทะเบียนสำเร็จ (โหมด Local)' });
-});
-
-// เข้าสู่ระบบ (รองรับทั้งรหัสผ่าน bcrypt และรหัสผ่านเดิมแบบข้อความปกติ พร้อมออกบัตรประจำตัวดิจิทัล JWT Token)
-app.post('/api/login', async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) {
-    return res.status(400).json({ success: false, message: 'กรุณากรอก Username และ Password' });
-  }
-
-  const cleanUser = username.trim().toLowerCase();
-  const rawInput = username.trim();
-  const cleanPass = password.trim();
-
-  // 0. ตรวจสอบ Blacklist บัญชีที่ถูกลบ
-  const deletedUsersSet = loadDeletedUsers();
-  if (deletedUsersSet.has(cleanUser) || deletedUsersSet.has(rawInput.toLowerCase())) {
-    return res.status(401).json({
-      success: false,
-      message: '⛔ บัญชีผู้ใช้นี้ถูกลบออกจากระบบแล้ว กรุณาติดต่อผู้ดูแลระบบ'
-    });
-  }
-
-  // ยกเลิกบัญชีอาจารย์และหัวหน้าแผนกอันเก่าอย่างถาวร
-  if (cleanUser === 'teacher' || cleanUser === 'head') {
-    return res.status(401).json({
-      success: false,
-      message: 'บัญชีนี้ถูกยกเลิกแล้ว กรุณาติดต่อแอดมินให้สร้างบัญชีจริงให้ผ่านหน้า "เพิ่มผู้ใช้งาน"'
-    });
-  }
-
-  // 1. ตรวจสอบใน Supabase DB (ค้นหาได้ทั้ง รหัสนักศึกษา, Username, Email, หรือ ชื่อ-นามสกุล)
-  if (supabase) {
-    try {
-      let candidateUser = null;
-
-      // 1.1 ค้นหาด้วย username ตรงๆ (เช่น รหัสนักศึกษา หรือ username ของอาจารย์)
-      const byUsername = await db.getUserByUsernameWithRelations(rawInput);
-      if (byUsername) candidateUser = byUsername;
-
-      // 1.2 ถ้าไม่เจอ ค้นหาจาก student_code, email หรือชื่อ ใน profiles.json เพื่อดึง username ที่ผูกไว้
-      if (!candidateUser) {
-        const profiles = loadProfiles();
-        let targetUsername = null;
-        for (const [profKey, profData] of Object.entries(profiles)) {
-          if (profData.student_code && profData.student_code.trim() === rawInput) {
-            targetUsername = profData.username || profKey;
-            break;
-          }
-          if (profData.email && profData.email.trim().toLowerCase() === cleanUser) {
-            targetUsername = profData.username || profKey;
-            break;
-          }
-          if (profData.full_name && profData.full_name.trim() === rawInput) {
-            targetUsername = profData.username || profKey;
-            break;
-          }
-        }
-
-        if (targetUsername) {
-          const byTarget = await db.getUserByUsernameWithRelations(targetUsername);
-          if (byTarget) candidateUser = byTarget;
-        }
-      }
-
-      // 1.3 ถ้ายังไม่เจอ ลองค้นจาก full_name ในฐานข้อมูล
-      if (!candidateUser) {
-        const byFullName = await db.getUserByFullNameWithRelations(rawInput);
-        if (byFullName) candidateUser = byFullName;
-      }
-
-      // 1.4 ตรวจสอบรหัสผ่านด้วย verifyPassword (รองรับทั้ง bcrypt hash และรหัสผ่านเดิม)
-      if (candidateUser) {
-        const storedPass = candidateUser.password || candidateUser.password_hash || '';
-        const isPasswordValid = await verifyPassword(cleanPass, storedPass);
-
-        if (isPasswordValid) {
-          // หากในฐานข้อมูลยังเป็นรหัสผ่านธรรมดา (ไม่ใช่ bcrypt) และไม่ใช่บัญชีสาธิตหลัก ให้อัปเกรดเป็น bcrypt อัตโนมัติ
-          if (storedPass && !isBcryptHash(storedPass) && cleanPass !== '1234') {
-            try {
-              const upgradedHash = await hashPassword(cleanPass);
-              await db.query('UPDATE users SET password = ? WHERE id = ?', [upgradedHash, candidateUser.id]);
-              console.log(`🔒 [BCRYPT] Auto-upgraded password hash for user: ${candidateUser.username}`);
-            } catch (upgradeErr) {
-              console.warn('Auto-upgrade bcrypt warning:', upgradeErr.message);
-            }
-          }
-
-          const stored = getStoredProfile(candidateUser.username);
-          const altStored = getStoredProfile(rawInput);
-          const finalStored = { ...stored, ...altStored };
-          const canonicalAcc = ALL_SYSTEM_ACCOUNTS[candidateUser.username] || {};
-
-          const mergedUser = sanitizeUser({
-            ...candidateUser,
-            ...finalStored,
-            role: canonicalAcc.role || candidateUser.role,
-            full_name: (canonicalAcc.full_name && candidateUser.username === 'admin') ? canonicalAcc.full_name : (finalStored.full_name || candidateUser.full_name),
-            student_code: finalStored.student_code || candidateUser.student_code || (candidateUser.username === 'student' ? '66209010012' : rawInput),
-            advisor: finalStored.advisor || candidateUser.advisor_name || (candidateUser.classrooms ? candidateUser.classrooms.advisor_name : 'อ.กิตติศักดิ์ ไฟฟ้า'),
-            advisor_name: finalStored.advisor || candidateUser.advisor_name || (candidateUser.classrooms ? candidateUser.classrooms.advisor_name : 'อ.กิตติศักดิ์ ไฟฟ้า'),
-            college: finalStored.college || candidateUser.college || 'วิทยาลัยการอาชีพองครักษ์',
-            profile_photo: finalStored.profile_photo || candidateUser.profile_photo || null,
-            plate_photo: finalStored.plate_photo || candidateUser.plate_photo || null,
-            dept: finalStored.dept || (candidateUser.departments ? candidateUser.departments.name : 'แผนกวิชาช่างไฟฟ้ากำลัง')
-          });
-          const token = generateToken(mergedUser);
-          return res.json({ success: true, user: mergedUser, token });
-        }
-      }
-    } catch (err) {
-      console.warn('MySQL login check error:', err.message);
-    }
-  }
-
-  // 2. บัญชีผู้ใช้ครบทั้ง 5 ขั้นตอน + บัญชีครูรายวิชาที่สร้างอัตโนมัติจากตารางสอน (รหัสผ่านเริ่มต้น 1234)
-  let lookupKey = username.trim().toLowerCase();
-  if (lookupKey === '66209010012') lookupKey = 'student';
-  if (lookupKey === 'subject_elec') lookupKey = 'subject_electric';
-  if (lookupKey === 'subject_acc') lookupKey = 'subject_account';
-  if (lookupKey === 'subject_it') lookupKey = 'subject_digital';
-  if (lookupKey === 'subject_mgmt') lookupKey = 'subject_office';
-
-  const allActiveAccounts = { ...ALL_SYSTEM_ACCOUNTS, ...getAllActiveTeacherAccountsMap() };
-  let matched = allActiveAccounts[lookupKey];
-  if (!matched) {
-    // รองรับการล็อกอินด้วยชื่อครูตรงๆ เช่น "อ.สมชาย ใจดี"
-    matched = Object.values(allActiveAccounts).find(u => u.full_name && u.full_name.trim() === rawInput);
-  }
-  if (matched) {
-    const stored = getStoredProfile(matched.username);
-    const storedPass = stored.password || stored.password_hash || matched.password || '1234';
-    const isPassValid = await verifyPassword(cleanPass, storedPass);
-    if (isPassValid) {
-      const merged = { ...matched, ...stored };
-      const token = generateToken(merged);
-      return res.json({ success: true, user: merged, token });
-    }
-  }
-
-  return res.status(401).json({ success: false, message: 'ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง' });
-});
-
-// รับ Token สำหรับผู้ใช้ที่ยืนยันตัวตนแล้ว (Auto-sync Token สำหรับเซสชันเดิม)
-app.post('/api/auth/token', async (req, res) => {
-  const { username } = req.body;
-  if (!username) return res.status(400).json({ success: false, message: 'Missing username' });
-  const rawInput = username.trim();
-  const cleanUser = username.trim().toLowerCase();
-
-  let lookupKey = cleanUser === '66209010012' ? 'student' : cleanUser;
-  const allActiveAccounts = { ...ALL_SYSTEM_ACCOUNTS, ...getAllActiveTeacherAccountsMap() };
-  if (allActiveAccounts[lookupKey]) {
-    const stored = getStoredProfile(lookupKey);
-    return res.json({ success: true, token: generateToken({ ...allActiveAccounts[lookupKey], ...stored }) });
-  }
-
-  if (supabase) {
-    try {
-      const rows = await db.query('SELECT * FROM users WHERE username = ?', [rawInput]);
-      const user = rows[0];
-      if (user) {
-        return res.json({ success: true, token: generateToken(user) });
-      }
-    } catch (e) {}
-  }
-
-  return res.status(404).json({ success: false, message: 'User not found' });
-});
-
-// ดึงรายชื่อครูทั้งหมดจากฐานข้อมูลจริง (MySQL / Database)
-app.get('/api/teachers', async (req, res) => {
-  try {
-    const teacherRoles = ['subject_teacher', 'advisor', 'dept_head', 'teacher', 'discipline_head', 'deputy_director'];
-    let dbTeachers = [];
-
-    if (typeof db !== 'undefined' && db && db.queryUsersWithRelations) {
-      const rows = await db.queryUsersWithRelations('u.role IN (?)', [teacherRoles], 'u.full_name ASC');
-      if (rows && rows.length > 0) {
-        dbTeachers = rows;
-      }
-    } else if (supabase) {
-      const { data, error } = await supabase
-        .from('users')
-        .select('*, departments(id, name), classrooms(id, name)')
-        .in('role', teacherRoles)
-        .order('full_name', { ascending: true });
-      if (!error && data && data.length > 0) {
-        dbTeachers = data;
-      }
-    }
-
-    if (dbTeachers.length > 0) {
-      const teachers = dbTeachers.map(u => ({
-        username: u.username,
-        fullName: u.full_name || u.username,
-        full_name: u.full_name || u.username,
-        role: u.role,
-        dept: u.departments?.name || u.dept || '',
-        classroom: u.classrooms?.name || u.classroom || '',
-        role_label: u.role === 'subject_teacher' ? 'ครูรายวิชา' : (u.role === 'advisor' || u.role === 'teacher' ? 'ครูที่ปรึกษา' : 'หัวหน้าแผนก')
-      }));
-      return res.json({ success: true, teachers, source: 'database' });
-    }
-
-    // กรณีไม่มีข้อมูลในฐานข้อมูล (เช่น รันออฟไลน์) จึง fallback
-    const allTeacherMap = getAllActiveTeacherAccountsMap();
-    const fallbackTeachers = Object.values(allTeacherMap)
-      .filter(u => teacherRoles.includes(u.role))
-      .map(u => ({
-        username: u.username,
-        fullName: u.full_name,
-        full_name: u.full_name,
-        role: u.role,
-        dept: u.dept || (u.departments ? u.departments.name : ''),
-        role_label: u.role === 'subject_teacher' ? 'ครูรายวิชา' : (u.role === 'advisor' || u.role === 'teacher' ? 'ครูที่ปรึกษา' : 'หัวหน้าแผนก')
-      }));
-    res.json({ success: true, teachers: fallbackTeachers, source: 'fallback' });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// ============================================================================
-// ADMIN PANEL ENDPOINTS (จัดการผู้ใช้, แผนกวิชา, และตั้งเวลาสถานศึกษา)
-// ============================================================================
-
-// 1. ดึงและบันทึกการตั้งค่าเวลาสถานศึกษา
-app.get('/api/settings', (req, res) => {
-  res.json({ success: true, settings: loadSettings() });
-});
-
-app.put('/api/admin/settings', authenticateToken, requireRole(['admin']), (req, res) => {
-  const updated = saveSettings(req.body);
-  if (updated) {
-    console.log('⚙️ [ADMIN] School operating settings updated successfully');
-    res.json({ success: true, message: 'บันทึกการตั้งค่าเวลาสำเร็จ', settings: updated });
-  } else {
-    res.status(500).json({ success: false, message: 'บันทึกการตั้งค่าล้มเหลว' });
-  }
-});
-
-// 2. ดึงและจัดการแผนกวิชาแบบไดนามิก
-app.get('/api/departments', (req, res) => {
-  const depts = loadDepartments();
-  res.json({ departments: depts.length ? depts : [] });
-});
-
-app.post('/api/admin/departments', authenticateToken, requireRole(['admin']), (req, res) => {
-  const { name, teacherUsername, headUsername } = req.body;
-  if (!name || !name.trim()) return res.status(400).json({ success: false, message: 'กรุณาระบุชื่อแผนกวิชา' });
-
-  // ผูกกับบัญชีครูจริงที่มีอยู่แล้วเท่านั้น (ห้ามสร้าง username ปลอมขึ้นมาเอง เพราะจะไม่มีใครล็อกอินเข้าไปอนุมัติได้จริง)
-  const allAccounts = getAllActiveTeacherAccountsMap();
-  const cleanTeacherUsername = String(teacherUsername || '').trim().toLowerCase();
-  const cleanHeadUsername = String(headUsername || '').trim().toLowerCase();
-  const matchedTeacher = cleanTeacherUsername ? allAccounts[cleanTeacherUsername] : null;
-  const matchedHead = cleanHeadUsername ? allAccounts[cleanHeadUsername] : null;
-
-  if (cleanTeacherUsername && !matchedTeacher) {
-    return res.status(400).json({ success: false, message: `ไม่พบบัญชีครูที่ปรึกษา "${teacherUsername}" ในระบบ` });
-  }
-  if (cleanHeadUsername && !matchedHead) {
-    return res.status(400).json({ success: false, message: `ไม่พบบัญชีหัวหน้าแผนก "${headUsername}" ในระบบ` });
-  }
-
-  const depts = loadDepartments();
-  const newId = 'dept_' + Date.now();
-  const newDept = {
-    id: newId,
-    name: name.trim(),
-    teacher: matchedTeacher ? { username: matchedTeacher.username, name: matchedTeacher.full_name } : null,
-    head: matchedHead ? { username: matchedHead.username, name: matchedHead.full_name } : null
-  };
-  depts.push(newDept);
-  saveDepartments(depts);
-  res.json({ success: true, message: 'เพิ่มแผนกวิชาสำเร็จ', department: newDept });
-});
-
-app.delete('/api/admin/departments/:id', authenticateToken, requireRole(['admin']), async (req, res) => {
-  const deptId = req.params.id;
-  let depts = loadDepartments();
-  const initialLen = depts.length;
-  depts = depts.filter(d => d.id !== deptId);
-  if (depts.length < initialLen) {
-    saveDepartments(depts);
-  }
-  if (supabase) {
-    try {
-      await db.query('DELETE FROM departments WHERE id = ?', [deptId]);
-    } catch (e) {}
-  }
-  return res.json({ success: true, message: 'ลบแผนกวิชาเรียบร้อย' });
-});
-
-// 3. จัดการผู้ใช้งาน (รายชื่อ, รีเซ็ตรหัสผ่าน, ลบผู้ใช้)
-app.get('/api/admin/users', authenticateToken, requireRole(['admin']), async (req, res) => {
-  try {
-    let users = [];
-    if (supabase) {
-      const data = await db.queryUsersWithRelations('', [], 'u.created_at DESC');
-      if (data) {
-        users = data.map(u => ({
-          ...u,
-          dept: u.departments?.name || u.dept || '',
-          classroom: u.classrooms?.name || u.classroom || ''
-        }));
-      }
-    }
-    
-    // หมายเหตุ: ไม่ผสานบัญชีสาธิต (ALL_SYSTEM_ACCOUNTS/getAllActiveTeacherAccountsMap) เข้ามาในหน้ารายชื่อผู้ใช้
-    // ของ Admin อีกต่อไป (กันสับสนกับบัญชีจริงใน production) - บัญชีสาธิตยังล็อกอินได้ตามปกติผ่าน /api/login
-    const profiles = loadProfiles();
-    const deletedSet = loadDeletedUsers();
-
-    users = users
-      .filter(u => u && u.username && !deletedSet.has(u.username.toLowerCase()))
-      .map(u => {
-        const p = profiles[u.username] || {};
-        const isStudent = u.role === 'student' || (!u.role && u.student_code);
-        return {
-          ...u,
-          role: isStudent ? 'student' : u.role,
-          status: isStudent ? 'active' : (u.status || 'active'),
-          bound_device_id: u.bound_device_id || p.bound_device_id || null,
-          bound_device_name: u.bound_device_name || p.bound_device_name || null,
-          dept: u.dept || p.dept || '',
-          classroom: u.classroom || p.classroom || ''
-        };
-      });
-
-    res.json({ success: true, users: users.map(sanitizeUser) });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.post('/api/admin/users', authenticateToken, requireRole(['admin']), async (req, res) => {
-  const {
-    username,
-    password = '1234',
-    full_name,
-    role = 'student',
-    student_code = '',
-    plate_no = '-',
-    prefix = '',
-    first_name = '',
-    last_name = '',
-    curriculum_level = 'ปวช.',
-    class_year = 1,
-    room_number = 1,
-    advisor_username = '',
-    advisor_name = '',
-    dept = ''
-  } = req.body;
-
-  const cleanCode = String(student_code || username || '').trim();
-  const cleanUser = String(role === 'student' ? cleanCode : (username || cleanCode)).trim().toLowerCase();
-
-  if (!cleanUser) {
-    return res.status(400).json({ success: false, message: 'กรุณาระบุ Username หรือรหัสนักศึกษา' });
-  }
-
-  // คำนวณชื่อเต็มถ้าเป็นนักเรียน
-  let finalFullName = full_name ? String(full_name).trim() : cleanUser;
-  if (role === 'student' && first_name) {
-    finalFullName = `${prefix}${first_name} ${last_name}`.trim();
-  }
-
-  const passHash = role === 'student' ? '' : await hashPassword(password);
-  const classroomName = `${curriculum_level}${class_year}/${room_number}`;
-  const classroomParam = req.body.classroom ? String(req.body.classroom).trim() : null;
-  const finalClassroom = role === 'student' ? classroomName : (classroomParam || null);
-
-  const userData = {
-    username: cleanUser,
-    password: role === 'student' ? '' : password,
-    password_hash: passHash,
-    full_name: finalFullName,
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Serve static frontend files
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Helper to build full user profile with their specific duties
+async function buildUserProfile(user) {
+  const uid = user.id;
+  const role = user.role;
+
+  const profile = {
+    id: uid,
+    username: user.username,
+    email: user.email,
+    full_name: user.full_name,
     role: role,
-    student_code: role === 'student' ? cleanCode : (student_code || null),
-    plate_no: plate_no,
-    status: 'active',
-    dept: dept || (role === 'student' ? 'แผนกวิชาช่างยนต์' : null),
-    student_prefix: prefix || null,
-    first_name: first_name || null,
-    last_name: last_name || null,
-    curriculum_level: role === 'student' ? curriculum_level : null,
-    class_year: role === 'student' ? parseInt(class_year, 10) : null,
-    room_number: role === 'student' ? parseInt(room_number, 10) : null,
-    classroom: finalClassroom,
-    advisor_username: advisor_username || null,
-    advisor_name: advisor_name || null,
-    onboarding_completed: false,
-    bound_device_id: null,
-    bound_device_name: null,
-    bound_device_at: null
+    position: user.position,
+    photo_url: user.photo_url,
+    is_student: role === 'student',
+    is_teacher: role === 'teacher',
+    is_deputy_director: role === 'deputy_director',
+    is_director: role === 'director',
+    is_admin: ['admin', 'super_admin'].includes(role),
+    roles_held: []
   };
 
-  if (supabase) {
-    try {
-      // ผูก department_id/classroom_id จริงใน DB (เดิมโค้ดนี้ข้ามไปเก็บแค่ใน profiles.json ทำให้ query ตรงๆ ใน MySQL หาไม่เจอ)
-      let resolvedDeptId = null;
-      let resolvedClassroomId = null;
-      try {
-        if (userData.dept) resolvedDeptId = await resolveOrCreateDepartmentId(userData.dept);
-        if (userData.classroom) resolvedClassroomId = await resolveOrCreateClassroomId(userData.classroom, resolvedDeptId);
-      } catch (fkErr) {
-        console.warn('Resolve department/classroom id warning:', fkErr.message);
-      }
+  if (role === 'student') {
+    const [students] = await query(`
+      SELECT s.*, l.name AS level_name, m.name AS major_name,
+             sp.photo_url AS student_photo, sp.prefix_th, sp.first_name_th, sp.last_name_th
+      FROM students s
+      LEFT JOIN levels l ON s.level_id = l.id
+      LEFT JOIN majors m ON s.major_id = m.id
+      LEFT JOIN student_profiles sp ON s.id = sp.student_id
+      WHERE s.user_id = ?
+      LIMIT 1
+    `, [uid]);
 
-      // ลอง insert หรือ upsert (ON DUPLICATE KEY UPDATE ตาม username)
-      const newId = crypto.randomUUID();
-      await db.query(
-        `INSERT INTO users (
-           id, username, password, password_hash, full_name, role, student_code, plate_no, status,
-           department_id, classroom_id, advisor_username, advisor_name,
-           student_prefix, first_name, last_name, curriculum_level, class_year, room_number
-         )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE password=VALUES(password), password_hash=VALUES(password_hash),
-           full_name=VALUES(full_name), role=VALUES(role), student_code=VALUES(student_code),
-           plate_no=VALUES(plate_no), status=VALUES(status), department_id=VALUES(department_id),
-           classroom_id=VALUES(classroom_id), advisor_username=VALUES(advisor_username),
-           advisor_name=VALUES(advisor_name), student_prefix=VALUES(student_prefix),
-           first_name=VALUES(first_name), last_name=VALUES(last_name),
-           curriculum_level=VALUES(curriculum_level), class_year=VALUES(class_year), room_number=VALUES(room_number)`,
-        [
-          newId, cleanUser, userData.password, userData.password_hash, finalFullName, role, userData.student_code, plate_no, 'active',
-          resolvedDeptId, resolvedClassroomId, userData.advisor_username, userData.advisor_name,
-          userData.student_prefix, userData.first_name, userData.last_name,
-          userData.curriculum_level, userData.class_year, userData.room_number
-        ]
-      );
-      const rows = await db.query('SELECT * FROM users WHERE username = ?', [cleanUser]);
-      const data = rows;
+    if (students.length > 0) {
+      const student = students[0];
+      profile.student_id = student.id;
+      profile.student_code = student.student_code;
+      profile.level_id = student.level_id;
+      profile.major_id = student.major_id;
+      profile.level_name = student.level_name;
+      profile.major_name = student.major_name;
+      profile.room = student.room;
+    }
+    profile.roles_held.push('student');
+  }
 
-      if (data && data.length) {
-        unmarkUserAsDeleted(cleanUser);
-        saveStoredProfile(cleanUser, userData);
-        console.log(`✅ [ADMIN] Created/Updated user @${cleanUser} (${finalFullName})`);
-        return res.json({ success: true, message: `สร้างผู้ใช้งาน "${finalFullName}" สำเร็จแล้ว`, user: sanitizeUser({ ...userData, ...data[0] }) });
-      }
-    } catch (e) {
-      console.warn('MySQL insert user error:', e.message);
+  if (role === 'teacher') {
+    profile.roles_held.push('subject_teacher'); // All teachers can act as subject teacher
+
+    // 1. Advisor check
+    const [advised] = await query(`
+      SELECT aa.id, aa.level_id, aa.major_id, l.name AS level_name, m.name AS major_name
+      FROM advisor_assignments aa
+      JOIN levels l ON aa.level_id = l.id
+      JOIN majors m ON aa.major_id = m.id
+      WHERE aa.teacher_id = ?
+    `, [uid]);
+    profile.is_advisor = advised.length > 0;
+    profile.advised_classes = advised;
+    if (profile.is_advisor) profile.roles_held.push('advisor');
+
+    // 2. Head of Major check
+    const [majors] = await query(`
+      SELECT id, name FROM majors WHERE head_teacher_id = ?
+    `, [uid]);
+    profile.is_head_major = majors.length > 0;
+    profile.managed_majors = majors;
+    if (profile.is_head_major) profile.roles_held.push('head_major');
+
+    // 3. Head of Discipline check
+    const [discipline] = await query(`
+      SELECT head_of_discipline_user_id FROM gate_duty_assignments WHERE head_of_discipline_user_id = ? LIMIT 1
+    `, [uid]);
+    profile.is_head_discipline = discipline.length > 0;
+    if (profile.is_head_discipline) profile.roles_held.push('head_discipline');
+
+    // 4. Deputy Director check
+    const [deputy] = await query(`
+      SELECT deputy_director_user_id FROM gate_duty_assignments WHERE deputy_director_user_id = ? LIMIT 1
+    `, [uid]);
+    if (deputy.length > 0) {
+      profile.is_deputy_director = true;
+      profile.roles_held.push('deputy_director');
     }
   }
 
-  unmarkUserAsDeleted(cleanUser);
-  saveStoredProfile(cleanUser, userData);
-  console.log(`✅ [ADMIN] Created user @${cleanUser} (${finalFullName}) [Local]`);
-  res.json({ success: true, message: `สร้างผู้ใช้งาน "${finalFullName}" สำเร็จแล้ว`, user: sanitizeUser(userData) });
-});
-
-app.put('/api/admin/users/:id/reset-password', authenticateToken, requireRole(['admin']), async (req, res) => {
-  const userId = req.params.id;
-  const targetUsername = String(req.body?.username || req.query?.username || '').trim().toLowerCase();
-  const { newPassword = '1234' } = req.body || {};
-  const passHash = await hashPassword(newPassword);
-
-  let updatedInSupabase = false;
-  let resolvedUsername = targetUsername;
-
-  // 1. ค้นหาและอัปเดตใน Supabase
-  if (supabase) {
-    try {
-      if (userId && userId.length === 36 && userId.includes('-')) {
-        await db.query('UPDATE users SET password = ?, password_hash = ? WHERE id = ?', [newPassword, passHash, userId]);
-        const data = await db.query('SELECT * FROM users WHERE id = ?', [userId]);
-        if (data && data.length > 0) {
-          updatedInSupabase = true;
-          if (!resolvedUsername && data[0].username) resolvedUsername = data[0].username.toLowerCase();
-        }
-      }
-      if (!updatedInSupabase && targetUsername) {
-        await db.query('UPDATE users SET password = ?, password_hash = ? WHERE username = ?', [newPassword, passHash, targetUsername]);
-        const data = await db.query('SELECT * FROM users WHERE username = ?', [targetUsername]);
-        if (data && data.length > 0) {
-          updatedInSupabase = true;
-        }
-      }
-    } catch (e) {
-      console.warn('MySQL reset password error:', e.message);
-    }
+  if (role === 'deputy_director') {
+    profile.is_deputy_director = true;
+    profile.roles_held.push('deputy_director');
   }
 
-  // 2. Resolve username ถ้ายังไม่ทราบ
-  if (!resolvedUsername) {
-    for (const [uname, acc] of Object.entries(ALL_SYSTEM_ACCOUNTS)) {
-      if (acc.id === userId) {
-        resolvedUsername = uname.toLowerCase();
-        break;
-      }
-    }
-  }
-  if (!resolvedUsername) {
-    const profs = loadProfiles();
-    for (const [uname, p] of Object.entries(profs)) {
-      if (p.id === userId || (userId && userId.startsWith('u-') && userId === `u-${uname}`) || p.student_code === userId) {
-        resolvedUsername = uname.toLowerCase();
-        break;
-      }
-    }
-  }
-  if (!resolvedUsername && userId && !userId.includes('-')) {
-    resolvedUsername = userId.toLowerCase();
+  if (['admin', 'super_admin'].includes(role)) {
+    profile.roles_held = ['student', 'subject_teacher', 'advisor', 'head_major', 'head_discipline', 'deputy_director', 'gate_staff', 'admin'];
+    profile.is_advisor = true;
+    profile.is_head_major = true;
+    profile.is_head_discipline = true;
+    profile.is_deputy_director = true;
   }
 
-  // 3. บันทึกลง profiles.json และ ALL_SYSTEM_ACCOUNTS
-  if (resolvedUsername) {
-    saveStoredProfile(resolvedUsername, {
-      password: newPassword,
-      password_hash: passHash
-    });
-    if (ALL_SYSTEM_ACCOUNTS[resolvedUsername]) {
-      ALL_SYSTEM_ACCOUNTS[resolvedUsername].password = newPassword;
-      ALL_SYSTEM_ACCOUNTS[resolvedUsername].password_hash = passHash;
-    }
-    unmarkUserAsDeleted(resolvedUsername);
-  }
-
-  console.log(`🔑 [ADMIN] Reset password for @${resolvedUsername || userId} to "${newPassword}"`);
-  res.json({ success: true, message: `รีเซ็ตรหัสผ่านของผู้ใช้ @${resolvedUsername || userId} เป็น "${newPassword}" เรียบร้อยแล้ว` });
-});
-
-app.delete('/api/admin/users/:id', authenticateToken, requireRole(['admin']), async (req, res) => {
-  const userId = req.params.id;
-  let targetUsername = String(req.query?.username || req.body?.username || '').trim().toLowerCase();
-
-  // 1. Resolve username
-  if (!targetUsername) {
-    for (const [uname, acc] of Object.entries(ALL_SYSTEM_ACCOUNTS)) {
-      if (acc.id === userId) {
-        targetUsername = uname.toLowerCase();
-        break;
-      }
-    }
-  }
-  if (!targetUsername) {
-    const profs = loadProfiles();
-    for (const [uname, p] of Object.entries(profs)) {
-      if (p.id === userId || (userId && userId.startsWith('u-') && userId === `u-${uname}`) || p.student_code === userId) {
-        targetUsername = uname.toLowerCase();
-        break;
-      }
-    }
-  }
-  if (!targetUsername && userId && !userId.includes('-')) {
-    targetUsername = userId.toLowerCase();
-  }
-
-  if (targetUsername === 'admin') {
-    return res.status(400).json({ success: false, message: '⛔ ไม่สามารถลบบัญชีผู้ดูแลระบบหลัก (Admin) ได้' });
-  }
-
-  // 2. Blacklist & Local Cleanup
-  if (targetUsername) {
-    markUserAsDeleted(targetUsername);
-    deleteStoredProfile(targetUsername);
-    delete ALL_SYSTEM_ACCOUNTS[targetUsername];
-
-    // ล้าง Device Requests ถ้ามี
-    try {
-      let devReqs = loadDeviceRequests();
-      devReqs = devReqs.filter(d => (d.student_code || d.username || '').toLowerCase() !== targetUsername);
-      saveDeviceRequests(devReqs);
-    } catch (e) {}
-  }
-
-  // 3. MySQL Cleanup (Safe delete without Foreign Key error)
-  if (supabase) {
-    try {
-      let sbUser = null;
-      if (userId && userId.length === 36 && userId.includes('-')) {
-        const rows = await db.query('SELECT id, username FROM users WHERE id = ?', [userId]);
-        if (rows[0]) sbUser = rows[0];
-      }
-      if (!sbUser && targetUsername) {
-        const rows = await db.query('SELECT id, username FROM users WHERE username = ?', [targetUsername]);
-        if (rows[0]) sbUser = rows[0];
-      }
-
-      if (sbUser) {
-        const uid = sbUser.id;
-        const uName = sbUser.username;
-
-        // NOTE: original Supabase code did `.or('approver_id.eq.X,student_id.eq.X')` on approval_logs,
-        // but approval_logs has no student_id column - that call always errored (silently caught) in the
-        // original app too, so only the approver_id condition ever had a chance of matching anything.
-        // NOTE: original Supabase code also did `.from('scan_logs').delete().eq('user_id', uid)`, but
-        // scan_logs has no user_id column either - that call always errored (silently caught) in the
-        // original app too. Kept as a faithful (intentionally no-op) translation rather than "fixing" it.
-        try { await db.query('DELETE FROM approval_logs WHERE approver_id = ?', [uid]); } catch (e) {}
-        try { await db.query('DELETE FROM scan_logs WHERE user_id = ?', [uid]); } catch (e) {}
-        try { await db.query('DELETE FROM leave_requests WHERE student_id = ? OR student_code = ?', [uid, uName]); } catch (e) {}
-        await db.query('DELETE FROM users WHERE id = ?', [uid]);
-        console.log(`🗑️ [ADMIN] Deleted user @${uName} (${uid}) from MySQL`);
-      }
-    } catch (err) {
-      console.warn('MySQL delete user error:', err.message);
-    }
-  }
-
-  console.log(`🗑️ [ADMIN] Successfully deleted user @${targetUsername || userId}`);
-  res.json({ success: true, message: `ลบผู้ใช้งาน @${targetUsername || userId} เรียบร้อยแล้ว` });
-});
-
-// ดึงสถานะบอร์ดจำลอง & MQTT & ฮาร์ดแวร์ ESP32 (Online/Offline + ACK)
-app.get('/api/gate/status', (req, res) => {
-  const isHeartbeatActive = Boolean(lastEsp32Heartbeat && (Date.now() - lastEsp32Heartbeat < 60000));
-  const isOnline = isHeartbeatActive || Boolean(serialConnectedPort);
-
-  const sessions = Array.from(activeGateSessions.entries()).map(([k, v]) => ({
-    requestId: k,
-    studentName: v.studentName,
-    openedAt: v.openedAt,
-    remainingSeconds: Math.max(0, Math.round(30 - (Date.now() - v.openedAt) / 1000))
-  }));
-
-  res.json({
-    mqtt: { connected: isMqttConnected, broker: process.env.MQTT_BROKER || 'Simulation Mode' },
-    database: { connected: !!supabase, host: process.env.DB_HOST || null },
-    simulator: simulatorState,
-    activeSessions: sessions,
-    gate: {
-      online: isOnline,
-      connectionType: serialConnectedPort ? `Serial (${serialConnectedPort})` : (isHeartbeatActive ? 'MQTT IoT' : (isMqttConnected ? 'MQTT Simulator' : 'Offline')),
-      statusText: isOnline ? '🟢 ไม้กั้นออนไลน์' : '🔴 ไม้กั้นออฟไลน์',
-      lastHeartbeat: lastEsp32Heartbeat ? new Date(lastEsp32Heartbeat).toISOString() : null,
-      secondsSinceHeartbeat: lastEsp32Heartbeat ? Math.floor((Date.now() - lastEsp32Heartbeat) / 1000) : null,
-      lastAck: lastEsp32Ack
-    }
-  });
-});
-
-// Endpoint รับ Heartbeat / ACK ผ่าน HTTP โดยตรง (Fallback หรือทดสอบ)
-app.post('/api/gate/heartbeat', (req, res) => {
-  lastEsp32Heartbeat = Date.now();
-  const { door, status, device } = req.body || {};
-
-  if (door === 'OPEN') {
-    lastEsp32Ack = {
-      action: 'DOOR_OPEN',
-      status: status || 'OK',
-      timestamp: new Date().toISOString(),
-      details: 'บอร์ด ESP32 ยืนยันเปิดไม้กั้นสำเร็จ (ผ่าน HTTP)',
-      source: 'HTTP'
-    };
-    simulatorState.door = 'OPEN';
-  } else if (door === 'CLOSED') {
-    lastEsp32Ack = {
-      action: 'DOOR_CLOSED',
-      status: status || 'OK',
-      timestamp: new Date().toISOString(),
-      details: 'บอร์ด ESP32 ยืนยันปิดไม้กั้นเรียบร้อย (ผ่าน HTTP)',
-      source: 'HTTP'
-    };
-    simulatorState.door = 'CLOSED';
-  } else {
-    lastEsp32Ack = {
-      action: 'ONLINE_PING',
-      status: 'OK',
-      timestamp: new Date().toISOString(),
-      details: `บอร์ด ESP32 ส่งสถานะออนไลน์ (${device || 'ESP32_GATE'})`,
-      source: 'HTTP'
-    };
-  }
-
-  res.json({
-    success: true,
-    message: 'Heartbeat & ACK recorded successfully',
-    gate: {
-      online: true,
-      lastHeartbeat: new Date(lastEsp32Heartbeat).toISOString(),
-      lastAck: lastEsp32Ack
-    }
-  });
-});
-
-// จัดการการมอบหมายผู้อนุมัติแทนเมื่อครูไม่อยู่ (ข้อ 6)
-app.get('/api/delegations', (req, res) => {
-  res.json({ success: true, delegations: loadDelegations() });
-});
-
-app.post('/api/delegations', authenticateToken, requireRole(['subject_teacher', 'advisor', 'dept_head', 'discipline_head', 'deputy_director', 'admin']), (req, res) => {
-  const body = req.body || {};
-  const ownerUsername = body.ownerUsername || body.fromUsername || '';
-  const delegateUsername = body.delegateUsername || '';
-  const startDate = body.startDate || getThaiDateStr();
-  const endDate = body.endDate || getThaiDateStr();
-  const reason = body.reason || 'ติดภารกิจราชการ / ไม่อยู่ปฏิบัติหน้าที่';
-  const stepNumber = Number(body.stepNumber || 1);
-  const deptName = body.deptName || body.department || 'แผนกวิชาช่างยนต์';
-
-  const targetOwner = ownerUsername || req.user.username;
-  if (!delegateUsername) {
-    return res.status(400).json({ success: false, message: 'กรุณาเลือกผู้รับมอบหมายอนุมัติแทน' });
-  }
-
-  const ownerAcc = ALL_SYSTEM_ACCOUNTS[targetOwner] || req.user;
-  const delegateAcc = ALL_SYSTEM_ACCOUNTS[delegateUsername] || { full_name: body.delegateName || delegateUsername };
-
-  const list = loadDelegations();
-  const newDel = {
-    id: 'del-' + Date.now(),
-    stepNumber,
-    deptName,
-    ownerUsername: targetOwner,
-    fromUsername: targetOwner,
-    ownerName: body.fromName || ownerAcc.full_name || targetOwner,
-    fromName: body.fromName || ownerAcc.full_name || targetOwner,
-    ownerRole: ownerAcc.role || req.user.role,
-    delegateUsername,
-    delegateName: body.delegateName || delegateAcc.full_name || delegateUsername,
-    startDate,
-    endDate,
-    reason: reason.trim() || 'มอบหมายอนุมัติแทนเมื่อไม่อยู่',
-    isActive: true,
-    createdAt: new Date().toISOString()
-  };
-  list.unshift(newDel);
-  saveDelegations(list);
-
-  res.json({
-    success: true,
-    message: `ตั้งค่ามอบหมายให้ "${delegateAcc.full_name}" อนุมัติแทน "${ownerAcc.full_name || targetOwner}" เรียบร้อยแล้ว`,
-    delegation: newDel,
-    delegations: list
-  });
-});
-
-app.delete('/api/delegations/:id', authenticateToken, (req, res) => {
-  const delId = req.params.id;
-  const list = loadDelegations().filter(d => String(d.id) !== String(delId));
-  saveDelegations(list);
-  res.json({ success: true, message: 'ยกเลิกการมอบหมายอนุมัติแทนเรียบร้อยแล้ว', delegations: list });
-});
-
-// Helper: หาชื่อครูและตำแหน่งของแต่ละขั้นสำหรับแสดงบน Stepper (โครงสร้าง 4 ขั้นตอนตามวิทยาลัยการอาชีพ)
-// หาบัญชีจริงคนแรกที่มี role ตรงกัน (ใช้กับตำแหน่งที่มีคนเดียวทั้งโรงเรียน เช่น ฝ่ายปกครอง/รองผอ.)
-// ไม่พบ -> คืนค่า fallback ที่ส่งมาแทน (กันพังตอนยังไม่ได้สร้างบัญชีจริง)
-function resolveSingleRoleApprover(role, fallbackUsername, fallbackName) {
-  const allAccounts = getAllActiveTeacherAccountsMap();
-  const found = Object.values(allAccounts).find(u => u.role === role);
-  return found
-    ? { username: found.username, name: found.full_name }
-    : { username: fallbackUsername, name: fallbackName };
+  return profile;
 }
 
-function resolveStepApproversInfo(deptName, meta = {}, totalSteps = 4) {
-  const depts = loadDepartments();
-  const matchedDept = depts.find(d => isDepartmentMatchServer(d.name, deptName)) || depts[0] || { name: 'แผนกวิชาช่างยนต์' };
-  const disciplineHead = resolveSingleRoleApprover('discipline_head', 'discipline', 'อ.เกรียงไกร รักษา วินัย');
-  const deputyDirector = resolveSingleRoleApprover('deputy_director', 'deputy', 'รองผอ.ดร.ภูมิพัฒน์ บริหารกิจ');
+// ==========================================
+// 1. AUTH ROUTES
+// ==========================================
 
-  // ครูที่ปรึกษาประจำระดับชั้นของนักเรียน (ค้นหาตามแผนกวิชา + ระดับชั้น ปวช.1 - ปวส.2)
-  const targetClassroom = String(meta.classroom || meta.classroomName || meta.class_name || '').trim();
-  let resolvedAdvisorUsername = meta.advisor_username || meta.advisorUsername || (matchedDept.teacher ? matchedDept.teacher.username : 'adv_auto_1');
-  let resolvedAdvisorName = meta.advisor_name || meta.advisorName || (matchedDept.teacher ? matchedDept.teacher.name : 'อ.อนุสรณ์ ช่างยนต์');
-
-  if (targetClassroom) {
-    const allAdvisors = Object.values({ ...ALL_SYSTEM_ACCOUNTS, ...loadProfiles() }).filter(u => u.role === 'advisor');
-    const matchedClassAdvisor = allAdvisors.find(u => {
-      const sameDept = isDepartmentMatchServer(u.dept || (u.departments ? u.departments.name : ''), deptName);
-      const uClass = String(u.classroom || (u.classrooms ? u.classrooms.name : '')).trim();
-      return sameDept && uClass && (targetClassroom.includes(uClass) || uClass.includes(targetClassroom));
-    });
-    if (matchedClassAdvisor) {
-      resolvedAdvisorUsername = matchedClassAdvisor.username;
-      resolvedAdvisorName = matchedClassAdvisor.full_name || matchedClassAdvisor.name || resolvedAdvisorName;
-    }
-  }
-
-  // โครงสร้างมาตรฐาน 4 ขั้นตอน (ครูที่ปรึกษา -> หัวหน้าแผนก -> ฝ่ายปกครอง/งานหลักสูตร -> รองผู้อำนวยการ)
-  if (totalSteps === 4) {
-    return {
-      1: {
-        step: 1,
-        role: 'advisor',
-        roleLabel: 'ครูที่ปรึกษา',
-        username: resolvedAdvisorUsername,
-        name: resolvedAdvisorName
-      },
-      2: {
-        step: 2,
-        role: 'dept_head',
-        roleLabel: 'หัวหน้าแผนกวิชา',
-        username: matchedDept.head ? matchedDept.head.username : 'head_auto',
-        name: matchedDept.head ? matchedDept.head.name : 'อ.ประสิทธิ์ ยานยนต์'
-      },
-      3: {
-        step: 3,
-        role: 'discipline_head',
-        roleLabel: 'ฝ่ายปกครอง / งานหลักสูตร',
-        username: disciplineHead.username,
-        name: disciplineHead.name
-      },
-      4: {
-        step: 4,
-        role: 'deputy_director',
-        roleLabel: 'รองผู้อำนวยการ',
-        username: deputyDirector.username,
-        name: deputyDirector.name
-      }
-    };
-  }
-
-  if (totalSteps === 3) {
-    return {
-      1: { step: 1, role: 'advisor', roleLabel: 'ครูที่ปรึกษา', username: resolvedAdvisorUsername, name: resolvedAdvisorName },
-      2: { step: 2, role: 'dept_head', roleLabel: 'หัวหน้าแผนกวิชา', username: matchedDept.head ? matchedDept.head.username : 'head_auto', name: matchedDept.head ? matchedDept.head.name : 'อ.ประสิทธิ์ ยานยนต์' },
-      3: { step: 3, role: 'discipline_head', roleLabel: 'ฝ่ายปกครอง', username: disciplineHead.username, name: disciplineHead.name }
-    };
-  }
-
-  return {
-    1: {
-      step: 1,
-      role: 'subject_teacher',
-      roleLabel: 'ครูรายวิชา',
-      username: meta.subjectTeacherUsername || (matchedDept.subjectTeacher ? matchedDept.subjectTeacher.username : 'subject_auto'),
-      name: meta.step1Skipped ? 'ไม่มีคาบเรียน' : (meta.subjectTeacherName || (matchedDept.subjectTeacher ? matchedDept.subjectTeacher.name : 'อ.ธีรพงศ์ เครื่องยนต์'))
-    },
-    2: {
-      step: 2,
-      role: 'advisor',
-      roleLabel: 'ครูที่ปรึกษา',
-      username: resolvedAdvisorUsername,
-      name: resolvedAdvisorName
-    },
-    3: {
-      step: 3,
-      role: 'dept_head',
-      roleLabel: 'หัวหน้าแผนกวิชา',
-      username: matchedDept.head ? matchedDept.head.username : 'head_auto',
-      name: matchedDept.head ? matchedDept.head.name : 'อ.ประสิทธิ์ ยานยนต์'
-    },
-    4: {
-      step: 4,
-      role: 'discipline_head',
-      roleLabel: 'ฝ่ายปกครอง',
-      username: 'discipline',
-      name: 'อ.เกรียงไกร รักษา วินัย'
-    },
-    5: {
-      step: 5,
-      role: 'deputy_director',
-      roleLabel: 'รองผู้อำนวยการ',
-      username: 'deputy',
-      name: 'รองผอ.ดร.ภูมิพัฒน์ บริหารกิจ'
-    }
-  };
-}
-
-// ดึงรายการคำขออนุญาต (ดึงจาก Supabase ผสานกับ 5-Step Metadata)
-app.get('/api/requests', async (req, res) => {
-  if (supabase) {
-    try {
-      const data = await db.getLeaveRequestsWithStudent('', [], 'lr.created_at DESC');
-
-      if (data) {
-        const nowMs = Date.now();
-        // จัดโครงสร้างให้ Frontend ใช้งานง่าย รองรับทั้งคำร้อง 5 ขั้นตอนใหม่ และคำร้อง 3 ขั้นตอนเก่า (ข้อ 10)
-        const formatted = data.map(r => {
-          const meta = getRequestMeta(r.request_no) || getRequestMeta(r.id) || {};
-          const stored = getStoredProfile(r.users ? r.users.username : '');
-          let cleanCode = meta.studentCode || r.student_code;
-          if (!cleanCode || cleanCode.includes('@')) {
-            cleanCode = (stored && stored.student_code && !stored.student_code.includes('@'))
-              ? stored.student_code
-              : ((r.users && r.users.student_code && !r.users.student_code.includes('@')) 
-                ? r.users.student_code 
-                : ((r.users && r.users.username === 'student') ? '66209010012' : (r.users ? r.users.username : '')));
-          }
-
-          let resolvedDeptName = meta.deptName
-            || ((stored && stored.dept) 
-              ? stored.dept 
-              : (r.users && r.users.departments ? r.users.departments.name : 'แผนกวิชาช่างยนต์ (ปวช.3)'));
-
-          let resolvedClassroom = meta.classroomName
-            || (( resolvedDeptName && resolvedDeptName.includes('('))
-              ? resolvedDeptName.split('(')[1].replace(')', '').trim()
-              : (r.users && r.users.classrooms ? r.users.classrooms.name : 'ปวช.3'));
-
-          // โครงสร้างขั้นตอนการอนุมัติ (ค่าเริ่มต้น 4 ขั้นตอน: ครูที่ปรึกษา -> หน.แผนก -> ปกครอง/หลักสูตร -> รอง ผอ.)
-          let totalSteps = 4;
-          if (meta.totalSteps) totalSteps = Number(meta.totalSteps);
-          else if (r.total_steps) totalSteps = Number(r.total_steps);
-          else if (r.status === 'pending_subject' || meta.workflowVersion === 5) totalSteps = 5;
-          else if (meta.workflowVersion === 3) totalSteps = 3;
-
-          const currentStep = Number(r.current_step || 1);
-          const stepEnteredAtMap = meta.stepEnteredAt || {};
-          const currentStepEnteredIso = stepEnteredAtMap[String(currentStep)] || meta.lastStepAt || r.updated_at || r.created_at;
-          const enteredMs = currentStepEnteredIso ? new Date(currentStepEnteredIso).getTime() : nowMs;
-          const waitingMinutes = Math.max(0, Math.floor((nowMs - enteredMs) / 60000));
-
-          const stepApprovers = resolveStepApproversInfo(resolvedDeptName, meta, totalSteps);
-          const currentApproverInfo = stepApprovers[currentStep] || null;
-
-          return {
-            id: r.id,
-            requestNo: r.request_no,
-            studentId: r.student_id,
-            studentName: meta.studentName || (r.users ? r.users.full_name : 'นายธนภัทร รัตนโชติ'),
-            studentCode: cleanCode,
-            deptName: resolvedDeptName,
-            classroomName: resolvedClassroom,
-            plateNo: r.plate_no || (r.users ? r.users.plate_no : '-'),
-            platePhoto: r.plate_photo || (r.users ? r.users.plate_photo : null),
-            parentPhone: r.parent_phone || (r.users ? r.users.parent_phone : null),
-            profilePhoto: r.users ? r.users.profile_photo : null,
-            title: r.title,
-            reason: r.reason,
-            destination: r.destination || meta.destination || null,
-            travelMode: r.travel_mode || meta.travelMode || 'own',
-            pickupName: r.pickup_name || meta.pickupName || null,
-            pickupPlate: r.pickup_plate || meta.pickupPlate || null,
-            noReturn: Boolean(r.no_return || meta.noReturn || r.expected_return_time === 'NO_RETURN' || r.leave_type === 'no_return'),
-            evidencePhoto: r.evidence_photo || meta.evidencePhoto || null,
-            actualReturnTime: r.actual_return_time || null,
-            isWaived: Boolean(r.is_waived || (r.admin_note && r.admin_note.includes('[WAIVED]'))),
-            waiverNote: r.waiver_note || (r.admin_note && r.admin_note.includes('[WAIVED]') ? r.admin_note.replace(/^\[WAIVED:\s*/, '').replace(/\].*$/, '') : null),
-            leaveType: r.leave_type,
-            leaveDate: r.leave_date,
-            departureTime: r.departure_time,
-            expectedReturnTime: r.expected_return_time,
-            status: r.status,
-            currentStep,
-            totalSteps,
-            workflowVersion: totalSteps === 5 ? 5 : (totalSteps === 3 ? 3 : 4),
-            qrToken: r.qr_token,
-            isQrUsed: r.is_qr_used,
-            rejectionReason: r.rejection_reason || meta.rejectionReason || null,
-            rejectedAtStep: meta.rejectedAtStep || (r.status === 'rejected' ? currentStep : null),
-            rejectedByName: meta.rejectedByName || null,
-            rejectedByRole: meta.rejectedByRole || null,
-            createdAt: r.created_at,
-            // ข้อมูลระบบอนุมัติ 5 ขั้นตอน & ตารางสอน (ข้อ 3, 4, 8, 9, 13-18)
-            semesterCode: meta.semesterCode || '1/2569',
-            subjectTeacherUsername: meta.subjectTeacherUsername || (stepApprovers[1] ? stepApprovers[1].username : null),
-            subjectTeacherName: meta.subjectTeacherName || (stepApprovers[1] ? stepApprovers[1].name : null),
-            subjectCode: meta.subjectCode || null,
-            subjectName: meta.subjectName || null,
-            periodTime: meta.periodTime || null,
-            periodType: meta.periodType || 'study',
-            step1Skipped: Boolean(meta.step1Skipped),
-            step1SkipReason: meta.step1SkipReason || null,
-            manualTeacherSelected: Boolean(meta.manualTeacherSelected),
-            advisorFlagVerify: Boolean(meta.advisorFlagVerify),
-            notifiedTeachers: Array.isArray(meta.notifiedTeachers) ? meta.notifiedTeachers : [],
-            approvalHistory: Array.isArray(meta.approvalHistory) ? meta.approvalHistory : [],
-            stepEnteredAt: stepEnteredAtMap,
-            currentStepEnteredAt: currentStepEnteredIso,
-            waitingMinutes,
-            stepApprovers,
-            currentApproverInfo,
-            isEmergencyOverride: Boolean(meta.isEmergencyOverride),
-            emergencyOverrideBy: meta.emergencyOverrideBy || null,
-            emergencyOverrideRole: meta.emergencyOverrideRole || null,
-            emergencyOverrideReason: meta.emergencyOverrideReason || null,
-            emergencyOverrideAt: meta.emergencyOverrideAt || null
-          };
-        });
-        return res.json({ requests: formatted });
-      }
-    } catch (err) {
-      console.error('Fetch requests error:', err);
-    }
-  }
-  res.json({ requests: [] });
-});
-
-// ดึงข้อมูลสถิติภาพรวมสำหรับ Dashboard ฝ่ายบริหาร & ปกครอง
-app.get('/api/stats', async (req, res) => {
-  if (supabase) {
-    try {
-      const requests = await db.getLeaveRequestsWithStudent('', [], 'lr.created_at DESC');
-
-      if (requests) {
-        const total = requests.length;
-        let approvedCount = 0;
-        let pendingCount = 0;
-        let rejectedCount = 0;
-        let exitedCount = 0;
-        let returnedCount = 0;
-        let returnByButton = 0;
-        let returnByManual = 0;
-        let returnByScan = 0;
-        let returnFlagged = 0;
-
-        const dailyMap = {};
-        const reasonsMap = {};
-        const deptsMap = {};
-
-        const defaultDepts = [
-          'แผนกวิชาช่างยนต์',
-          'แผนกวิชาช่างไฟฟ้า',
-          'แผนกวิชาการบัญชี',
-          'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล',
-          'แผนกวิชาช่างกลโรงงาน'
-        ];
-        defaultDepts.forEach(d => deptsMap[d] = 0);
-
-        const metaAll = loadRequestsMeta();
-
-        requests.forEach(r => {
-          const meta = metaAll[String(r.id)] || {};
-          const method = r.return_method || meta.returnMethod || 'button';
-          const verStatus = r.return_verification_status || meta.returnVerificationStatus || 'verified';
-
-          if (r.status === 'approved') approvedCount++;
-          else if (r.status === 'rejected') rejectedCount++;
-          else if (r.status === 'exited') { approvedCount++; exitedCount++; }
-          else if (r.status === 'returned') { 
-            approvedCount++; 
-            returnedCount++; 
-            if (method === 'button') returnByButton++;
-            else if (method === 'manual') returnByManual++;
-            else if (method === 'scan') returnByScan++;
-            if (verStatus === 'flagged_review') returnFlagged++;
-          }
-          else pendingCount++;
-
-          const dateKey = r.leave_date || (r.created_at ? r.created_at.split('T')[0] : 'วันนี้');
-          dailyMap[dateKey] = (dailyMap[dateKey] || 0) + 1;
-
-          const typeLabelMap = {
-            'medical': 'พบแพทย์ / ป่วย',
-            'family': 'ธุระครอบครัว',
-            'errand': 'ติดต่อราชการ / ธนาคาร',
-            'academic': 'กิจกรรมวิชาการ / แข่งขัน',
-            'equipment': 'ซื้ออุปกรณ์การเรียน',
-            'other': 'อื่นๆ'
-          };
-          const reasonKey = typeLabelMap[r.leave_type] || r.title || 'ธุระจำเป็น';
-          reasonsMap[reasonKey] = (reasonsMap[reasonKey] || 0) + 1;
-
-          const deptKey = (r.users && r.users.departments) ? r.users.departments.name : 'แผนกวิชาช่างไฟฟ้า';
-          deptsMap[deptKey] = (deptsMap[deptKey] || 0) + 1;
-        });
-
-        return res.json({
-          success: true,
-          summary: {
-            total,
-            approved: approvedCount,
-            pending: pendingCount,
-            rejected: rejectedCount,
-            currentlyExited: exitedCount,
-            returned: returnedCount,
-            returnMethods: {
-              button: returnByButton,
-              manual: returnByManual,
-              scan: returnByScan
-            },
-            returnFlagged
-          },
-          daily: dailyMap,
-          reasons: reasonsMap,
-          departments: deptsMap
-        });
-      }
-    } catch (err) {
-      console.error('Stats fetch error:', err);
-    }
-  }
-
-  res.json({
-    success: true,
-    summary: { total: 0, approved: 0, pending: 0, rejected: 0, currentlyExited: 0, returned: 0 },
-    daily: {},
-    reasons: {},
-    departments: {}
-  });
-});
-
-// ดึง Rotating QR Token ล่าสุดสำหรับคำขอที่ได้รับอนุมัติแล้ว (หมุนเวียนทุก 30 วินาที)
-app.get('/api/requests/:id/rotating-token', async (req, res) => {
-  const requestId = req.params.id;
+// Login
+app.post('/api/auth/login', async (req, res) => {
   try {
-    let baseToken = null;
-    let request = null;
-
-    if (supabase) {
-      const rows = await db.query('SELECT * FROM leave_requests WHERE id = ?', [requestId]);
-      const data = rows[0];
-      if (data) {
-        request = data;
-        baseToken = data.qr_token;
-      }
+    const { username, password } = req.body;
+    if (!username || !password) {
+      return res.status(400).json({ success: false, message: 'กรุณากรอกชื่อผู้ใช้และรหัสผ่าน' });
     }
 
-    if (!baseToken) {
-      return res.status(404).json({
-        success: false,
-        message: 'ไม่พบรหัส QR Code หรือคำร้องยังไม่ได้รับการอนุมัติครบถ้วน'
-      });
+    const [users] = await query('SELECT * FROM users WHERE username = ? LIMIT 1', [username.trim()]);
+    if (users.length === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบบัญชีผู้ใช้นี้ในระบบ' });
     }
 
-    const now = Date.now();
-    const intervalSec = ROTATING_QR_INTERVAL_SEC;
-    const currentWindow = Math.floor(now / (intervalSec * 1000));
-    const secondsLeft = intervalSec - (Math.floor(now / 1000) % intervalSec);
-    const totp = generateTotp(baseToken, currentWindow);
-    const fullToken = `${baseToken}.${totp}`;
+    const user = users[0];
+    const isDefaultPassword = (password === '123456');
+    let isHashMatch = false;
 
-    res.json({
-      success: true,
-      fullToken,
-      baseToken,
-      totp,
-      expiresIn: secondsLeft,
-      interval: intervalSec,
-      timestamp: new Date().toISOString()
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// วันที่ปัจจุบันตามเวลาประเทศไทย (Bangkok UTC+7)
-function getThaiDateStr() {
-  const d = new Date();
-  const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
-  const bangkok = new Date(utc + (3600000 * 7));
-  const y = bangkok.getFullYear();
-  const m = String(bangkok.getMonth() + 1).padStart(2, '0');
-  const day = String(bangkok.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
-// นักเรียนยื่นคำขอใหม่ (ระบบอนุมัติ 5 ขั้นตอน + ผูกตารางสอนหาครูรายวิชาอัตโนมัติ)
-app.post('/api/requests', async (req, res) => {
-  const {
-    studentId,
-    studentCode,
-    studentName: reqStudentName,
-    department: reqDepartment,
-    classroom: reqClassroom,
-    title,
-    reason,
-    leaveType,
-    leaveDate,
-    departureTime,
-    expectedReturnTime,
-    plateNo,
-    platePhoto,
-    parentPhone,
-    noReturn,
-    evidencePhoto,
-    destination,
-    travelMode,
-    pickupName,
-    pickupPlate,
-    manualTeacherUsername,
-    manualTeacherName,
-    manualSubjectName
-  } = req.body || {};
-
-  const requestNo = `OP-2569${Math.floor(1000 + Math.random() * 9000)}`;
-  const isNoReturn = Boolean(noReturn || expectedReturnTime === 'NO_RETURN' || leaveType === 'no_return');
-
-  // 1. ตรวจสอบช่วงเวลา 08:00 - 16:00 น. ฝั่งเซิร์ฟเวอร์ (Server-Side Validation: ไม่เชื่อ Frontend)
-  const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
-  const depTime = departureTime ? departureTime.trim() : '13:00';
-  const retTime = isNoReturn ? '16:00' : (expectedReturnTime ? expectedReturnTime.trim() : '15:30');
-
-  if (!timeRegex.test(depTime)) {
-    return res.status(400).json({
-      success: false,
-      message: 'รูปแบบเวลาออกไม่ถูกต้อง กรุณาระบุในรูปแบบ HH:mm (เช่น 13:00)'
-    });
-  }
-
-  const settings = loadSettings();
-  const [depH, depM] = depTime.split(':').map(Number);
-  const depMinutes = depH * 60 + depM;
-  const minTimeStr = settings.entryTime || settings.morningGateClose || settings.leaveMinTime || '08:00';
-  const maxTimeStr = settings.dismissalTime || settings.leaveMaxTime || '16:00';
-  const MIN_MINUTES = parseTimeToMins(minTimeStr);
-  const MAX_MINUTES = parseTimeToMins(maxTimeStr);
-
-  if (depMinutes < MIN_MINUTES || depMinutes > MAX_MINUTES) {
-    return res.status(400).json({
-      success: false,
-      message: `⚠️ เวลาออกต้องอยู่ระหว่าง ${minTimeStr} น. ถึง ${maxTimeStr} น. เท่านั้น (ช่วงเวลาเรียน)`
-    });
-  }
-
-  if (!isNoReturn) {
-    if (!timeRegex.test(retTime)) {
-      return res.status(400).json({
-        success: false,
-        message: 'รูปแบบเวลากลับไม่ถูกต้อง กรุณาระบุในรูปแบบ HH:mm (เช่น 15:30)'
-      });
-    }
-
-    const [retH, retM] = retTime.split(':').map(Number);
-    const retMinutes = retH * 60 + retM;
-
-    if (retMinutes < MIN_MINUTES || retMinutes > MAX_MINUTES) {
-      return res.status(400).json({
-        success: false,
-        message: `⚠️ เวลากลับต้องอยู่ระหว่าง ${minTimeStr} น. ถึง ${maxTimeStr} น. เท่านั้น (หากหลัง ${maxTimeStr} น. เป็นเวลาเลิกเรียน)`
-      });
-    }
-
-    if (retMinutes <= depMinutes) {
-      return res.status(400).json({
-        success: false,
-        message: '⚠️ เวลากลับต้องมากกว่าเวลาออกเสมอ'
-      });
-    }
-  } else {
-    // ลากลับบ้าน บังคับต้องมีเบอร์โทรผู้ปกครอง
-    if (!parentPhone || !parentPhone.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: '⚠️ กรณีไม่กลับเข้าวิทยาลัยในวันนี้ (ลากลับ) จำเป็นต้องระบุเบอร์โทรศัพท์ผู้ปกครอง'
-      });
-    }
-  }
-
-  // ตรวจสอบวันที่ขออนุญาต (ห้ามเลือกย้อนหลังในอดีต)
-  const todayStr = getThaiDateStr();
-  const targetLeaveDate = (leaveDate && leaveDate.trim()) ? leaveDate.trim() : todayStr;
-
-  if (targetLeaveDate < todayStr) {
-    return res.status(400).json({
-      success: false,
-      message: '⚠️ ไม่สามารถเลือกวันที่ย้อนหลังในอดีตได้ กรุณาเลือกตั้งแต่วันนี้เป็นต้นไป'
-    });
-  }
-
-  // 2. ดึงข้อมูลแผนกและห้องเรียนของนักเรียน (ใช้สำหรับแจ้งเตือน/อ้างอิงเท่านั้น)
-  const storedProf = getStoredProfile(studentCode || 'student');
-  const resolvedDept = reqDepartment || storedProf.dept || 'แผนกวิชาช่างยนต์ (ปวช.3)';
-  const resolvedClass = reqClassroom
-    || (resolvedDept.includes('(') ? resolvedDept.split('(')[1].replace(')', '').trim() : '')
-    || storedProf.classroom
-    || 'ปวช.3';
-
-  // ข้อมูลครูรายวิชา: ถ้าเป็นคาบว่าง หรือช่วงกลางวัน ให้ผ่านไปที่ครูที่ปรึกษาเลย (ไม่ต้องกรอกครูรายวิชา)
-  const isLunchTimeDep = (depMinutes >= 720 && depMinutes < 780);
-  const isStep1Skipped = Boolean(req.body.step1Skipped || manualTeacherUsername === 'SKIP_FREE_PERIOD' || isLunchTimeDep || !manualTeacherUsername);
-  const skipReason = isLunchTimeDep ? 'ช่วงพักกลางวัน (12:00 - 13:00 น.)' : (req.body.step1SkipReason || 'คาบว่าง / ไม่มีวิชาเรียน');
-
-  const resolvedSubjectTeacherUsername = isStep1Skipped ? null : (manualTeacherUsername || null);
-  const resolvedSubjectTeacherName = isStep1Skipped ? `(ข้ามขั้นครูรายวิชา - ${skipReason})` : (manualTeacherName || null);
-  const resolvedSubjectName = isStep1Skipped ? skipReason : (manualSubjectName || 'วิชาตามคาบเรียน');
-  const resolvedSubjectCode = null;
-  const resolvedPeriodType = isStep1Skipped ? 'free_period' : 'manual';
-
-  const nowIso = new Date().toISOString();
-  let initialStep = 1;
-  let initialStatus = 'pending_advisor'; // ส่งตรงถึงครูที่ปรึกษาทันที
-  let totalSteps = 4;
-  let snapshotPeriodTime = `${depTime}-${isNoReturn ? '16:00' : retTime}`;
-  const approvalHistory = [];
-  const stepEnteredAt = { '1': nowIso };
-
-  if (isStep1Skipped) {
-    approvalHistory.push({
-      step: 1,
-      role: 'subject_teacher',
-      roleLabel: 'ครูรายวิชา',
-      approverUsername: 'system',
-      approverName: 'ระบบอัตโนมัติ (ผ่านข้าม)',
-      action: 'skipped_no_class',
-      note: `ผ่านข้ามขั้นครูรายวิชาอัตโนมัติ (${skipReason}) ส่งตรงถึงครูที่ปรึกษา`,
-      actionAt: nowIso
-    });
-  }
-
-  if (supabase) {
     try {
-      let validStudentId = (studentId && studentId.length === 36) ? studentId : null;
-      if (!validStudentId && studentCode) {
-        const foundRows = await db.query(
-          'SELECT id FROM users WHERE student_code = ? OR username = ?',
-          [studentCode, studentCode]
-        );
-        const foundU = foundRows[0];
-        if (foundU && foundU.id) {
-          validStudentId = foundU.id;
-        }
-      }
-      if (!validStudentId) {
-        // เดิม fallback ไปที่ UUID บัญชีสาธิต '...0001' ซึ่งตอนนี้ไม่มีอยู่จริงในตาราง users แล้ว
-        // (ถูกลบตอนล้างข้อมูลจำลอง) ทำให้ insert ชน Foreign Key เสมอ ต้องปฏิเสธคำร้องแทนที่จะเดา ID มั่ว
-        return res.status(400).json({
-          success: false,
-          message: 'ไม่พบบัญชีผู้ใช้ของนักเรียนในระบบ กรุณาออกจากระบบแล้วเข้าสู่ระบบใหม่อีกครั้งก่อนยื่นคำร้อง'
-        });
-      }
-
-      // ตรวจสอบคำร้องเดิมที่ยังไม่หมดเวลา (ป้องกันการยื่นคำร้องซ้ำ)
-      const statusList = ['pending_subject', 'pending_advisor', 'pending_dept_head', 'pending_discipline', 'pending_deputy', 'approved', 'exited'];
-      let dupSql = 'SELECT * FROM leave_requests WHERE status IN (?)';
-      let dupParams = [statusList];
-
-      if (validStudentId !== '00000000-0000-0000-0000-000000000001') {
-        dupSql += ' AND student_id = ?';
-        dupParams.push(validStudentId);
-      } else if (studentCode) {
-        dupSql += ' AND student_code = ?';
-        dupParams.push(studentCode);
-      } else {
-        dupSql += ' AND student_id = ?';
-        dupParams.push(validStudentId);
-      }
-
-      const existingRequests = await db.query(dupSql, dupParams);
-      if (existingRequests && existingRequests.length > 0) {
-        const thaiDate = getThaiDateStr();
-        const bkkNow = getBangkokNow();
-        const currentMins = (bkkNow.getHours() * 60) + bkkNow.getMinutes();
-
-        const activeOngoing = existingRequests.find(r => {
-          const rDate = r.leave_date || (r.created_at ? r.created_at.split('T')[0] : '');
-          if (rDate && rDate > thaiDate) return true;
-          if (!rDate || rDate === thaiDate) {
-            if (!r.expected_return_time || r.expected_return_time === 'NO_RETURN') return true;
-            const parts = r.expected_return_time.split(':');
-            const retMins = (parseInt(parts[0], 10) * 60) + (parseInt(parts[1] || '0', 10));
-            return currentMins <= retMins;
-          }
-          return false;
-        });
-
-        if (activeOngoing) {
-          console.log(`⚠️ [DUPLICATE BLOCKED] Student already has active request: ${activeOngoing.request_no}`);
-          return res.status(400).json({
-            success: false,
-            message: `⚠️ คุณมีคำร้องขออนุญาตที่กำลังใช้งานอยู่ (${activeOngoing.request_no}) ยังไม่สามารถยื่นซ้ำได้จนกว่าจะหมดเวลาออกนอกสถานศึกษา หรือยกเลิกคำร้องเดิม`
-          });
-        }
-      }
-      
-      const insertPayload = {
-        request_no: requestNo,
-        student_id: validStudentId,
-        title: title || (isNoReturn ? 'ลากลับบ้าน (ไม่กลับเข้า)' : 'ลากิจธุระจำเป็น'),
-        reason: reason || 'ไปติดต่อทำธุรกรรมและธุระครอบครัว',
-        leave_type: isNoReturn ? 'no_return' : (leaveType || 'personal'),
-        plate_no: plateNo || '1กข 4589 นครนายก (รถจักรยานยนต์)',
-        leave_date: targetLeaveDate,
-        departure_time: depTime.includes(':') && depTime.split(':').length === 2 ? `${depTime}:00` : depTime,
-        expected_return_time: isNoReturn ? '16:00:00' : (retTime.includes(':') && retTime.split(':').length === 2 ? `${retTime}:00` : retTime),
-        status: initialStatus,
-        current_step: initialStep
-      };
-
-      if (studentCode) insertPayload.student_code = studentCode;
-      if (platePhoto) insertPayload.plate_photo = platePhoto;
-      if (parentPhone) insertPayload.parent_phone = parentPhone;
-      if (isNoReturn) insertPayload.no_return = true;
-      if (evidencePhoto) insertPayload.evidence_photo = evidencePhoto;
-      if (destination) insertPayload.destination = destination;
-      if (travelMode) insertPayload.travel_mode = travelMode;
-      if (pickupName) insertPayload.pickup_name = pickupName;
-      if (pickupPlate) insertPayload.pickup_plate = pickupPlate;
-      if (resolvedSubjectTeacherUsername) insertPayload.subject_teacher_username = resolvedSubjectTeacherUsername;
-      if (resolvedSubjectTeacherName) insertPayload.subject_teacher_name = resolvedSubjectTeacherName;
-      if (resolvedSubjectName) insertPayload.subject_name = resolvedSubjectName;
-      if (resolvedSubjectCode) insertPayload.subject_code = resolvedSubjectCode;
-      insertPayload.period_type = resolvedPeriodType;
-
-      let data = null;
-      let error = null;
-      try {
-        const inserted = await db.insertAutoIncrement('leave_requests', insertPayload);
-        data = [inserted];
-      } catch (insErr) {
-        error = insErr;
-      }
-
-      // Fallback ถ้าคอลัมน์ใหม่ยังไม่มีในตาราง (เช่น schema เก่ากว่าที่คาด)
-      if (error && db.isMissingColumnError(error)) {
-        console.warn('Fallback inserting leave request without new columns:', error.message);
-        delete insertPayload.destination;
-        delete insertPayload.travel_mode;
-        delete insertPayload.pickup_name;
-        delete insertPayload.pickup_plate;
-        delete insertPayload.no_return;
-        delete insertPayload.evidence_photo;
-        delete insertPayload.student_code;
-        delete insertPayload.plate_photo;
-        delete insertPayload.parent_phone;
-        delete insertPayload.subject_teacher_username;
-        delete insertPayload.subject_teacher_name;
-        delete insertPayload.subject_name;
-        delete insertPayload.subject_code;
-        delete insertPayload.period_type;
-        try {
-          const inserted = await db.insertAutoIncrement('leave_requests', insertPayload);
-          data = [inserted];
-          error = null;
-        } catch (fbErr) {
-          error = fbErr;
-        }
-      }
-
-      // บันทึก Snapshot 4 ขั้นตอนลงใน requests_meta.json
-      const metaPayload = {
-        requestNo,
-        workflowVersion: 4,
-        totalSteps: 4,
-        studentName: reqStudentName || storedProf.full_name || 'นายธนภัทร รัตนโชติ',
-        studentCode: studentCode || storedProf.student_code || '66209010012',
-        deptName: resolvedDept,
-        classroomName: resolvedClass,
-        semesterCode: '1/2569',
-        periodTime: snapshotPeriodTime,
-        approvalHistory,
-        stepEnteredAt,
-        lastStepAt: nowIso,
-        destination: destination || null,
-        travelMode: travelMode || 'own',
-        pickupName: pickupName || null,
-        pickupPlate: pickupPlate || null,
-        noReturn: isNoReturn,
-        evidencePhoto: evidencePhoto || null
-      };
-
-      saveRequestMeta(requestNo, metaPayload);
-      if (data && data[0] && data[0].id) {
-        saveRequestMeta(data[0].id, metaPayload);
-      }
-
-      // แจ้งเตือนผู้อนุมัติคิวแรก (ขั้นที่ 1: ครูที่ปรึกษา)
-      const approversInfo = resolveStepApproversInfo(resolvedDept, metaPayload, 4);
-      const firstTargetApprover = approversInfo[initialStep];
-      const studentDisplay = metaPayload.studentName;
-
-      // ส่งแจ้งเตือนผ่าน Telegram ถึงผู้อนุมัติที่มีคิวรอพิจารณา
-      try {
-        if (firstTargetApprover) {
-          notifyApproverQueue(firstTargetApprover, metaPayload, initialStep);
-        }
-      } catch (tgErr) {
-        console.warn('⚠️ [TELEGRAM] Notify approver queue error on create:', tgErr.message);
-      }
-
-      sendLineNotification(
-        `\n📩 [OnePass คำร้องใหม่ถึงคิวขั้นที่ 1: ครูที่ปรึกษา]\n` +
-        `• คำร้อง: ${requestNo}\n` +
-        `• นักเรียน: ${studentDisplay} (${resolvedDept})\n` +
-        `• ช่วงเวลา: ${depTime} - ${isNoReturn ? 'ลากลับบ้าน' : retTime} น.\n` +
-        `• ครูรายวิชาที่นักเรียนเลือก (ข้อมูลอ้างอิง): ${resolvedSubjectTeacherName || 'ไม่ได้ระบุ'}\n` +
-        `• คิวปัจจุบัน: รอ "${firstTargetApprover ? firstTargetApprover.name : 'ครูที่ปรึกษา'}" อนุมัติ`
-      );
-
-      if (!error && data && data.length > 0) {
-        console.log(`✅ [MYSQL] Inserted 5-step leave request ${requestNo} (initialStep=${initialStep}, status=${initialStatus})`);
-        return res.json({
-          success: true,
-          request: { ...data[0], ...metaPayload, currentStep: initialStep, status: initialStatus }
-        });
-      } else if (error) {
-        // เดิมโค้ดจุดนี้ไม่ return เลย ปล่อยให้ไหลไปตอบ success:true ปลอมที่ด้านล่าง (บั๊กใหญ่ - คำร้องไม่ถูกบันทึกจริง
-        // แต่ผู้ใช้เห็นว่าสำเร็จ) เช่น เมื่อ student_id อ้างอิง foreign key ที่ไม่มีอยู่จริงในตาราง users
-        console.error('MySQL request insert error:', error);
-        return res.status(500).json({
-          success: false,
-          message: 'บันทึกคำร้องไม่สำเร็จ: ' + error.message
-        });
-      }
-    } catch (err) {
-      console.error('Create request error:', err);
-      return res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการบันทึกคำร้อง: ' + err.message });
+      isHashMatch = bcrypt.compareSync(password, user.password_hash);
+    } catch (e) {
+      isHashMatch = false;
     }
-  }
-  // ทางนี้ถูกใช้เฉพาะตอนไม่ได้เชื่อมต่อ MySQL เลย (โหมดสาธิต/Local JSON เท่านั้น - ไม่ใช่ error path)
-  res.json({ success: true, request: { id: Date.now(), requestNo, currentStep: initialStep, status: initialStatus } });
-});
 
-// การอนุมัติคำขอ 5 ขั้นตอนเรียงตามลำดับ พร้อมรองรับการอนุมัติแทน (ข้อ 1, 2, 4, 6, 7, 9, 10)
-app.post('/api/requests/:id/approve', authenticateToken, requireRole(['subject_teacher', 'advisor', 'dept_head', 'discipline_head', 'deputy_director', 'admin']), async (req, res) => {
-  const requestId = parseInt(req.params.id);
-  const { note, isDelegated = false, delegateReason = '' } = req.body || {};
-  const user = req.user;
+    if (!isDefaultPassword && !isHashMatch) {
+      return res.status(400).json({ success: false, message: 'รหัสผ่านไม่ถูกต้อง' });
+    }
 
-  if (supabase) {
-    try {
-      const request = await db.getLeaveRequestWithStudent(requestId);
-
-      if (!request) {
-        return res.status(404).json({ success: false, message: 'ไม่พบคำร้องนี้ในระบบ' });
-      }
-
-      if (['approved', 'rejected', 'expired', 'exited', 'returned'].includes(request.status)) {
-        return res.status(400).json({ success: false, reason: `คำร้องนี้อยู่ในสถานะ ${request.status} แล้ว ไม่สามารถอนุมัติซ้ำได้` });
-      }
-
-      const meta = getRequestMeta(request.request_no) || getRequestMeta(requestId) || {};
-      const isFiveStep = Boolean(
-        meta.workflowVersion === 5 ||
-        meta.totalSteps === 5 ||
-        request.total_steps === 5 ||
-        request.status === 'pending_subject' ||
-        request.status === 'pending_deputy' ||
-        Number(request.current_step) >= 5
-      );
-      const totalSteps = isFiveStep ? 5 : 3;
-      const currentStep = Number(request.current_step || 1);
-
-      const storedStudentProf = getStoredProfile(request.users ? request.users.username : (request.student_code || 'student'));
-      const reqDeptName = meta.deptName || storedStudentProf.dept || (request.users && request.users.departments ? request.users.departments.name : 'แผนกวิชาช่างยนต์');
-      const stepApprovers = resolveStepApproversInfo(reqDeptName, meta, totalSteps);
-      const expectedStepInfo = stepApprovers[currentStep];
-
-      // ตรวจสอบสิทธิ์ตามขั้นตอน + ตรวจสอบการอนุมัติแทน + กรณีครูที่ปรึกษาเป็นผู้สอนประจำคาบเอง (ข้อ 2 & ข้อ 6)
-      let actingAsDelegate = Boolean(isDelegated);
-      let finalDelegateReason = (delegateReason || '').trim();
-      const activeDelegations = loadDelegations().filter(d => d.isActive);
-      const matchedDelegation = expectedStepInfo
-        ? activeDelegations.find(d => d.ownerUsername === expectedStepInfo.username && d.delegateUsername === user.username)
-        : null;
-
-      const allAccountsMap = { ...ALL_SYSTEM_ACCOUNTS, ...getAllActiveTeacherAccountsMap() };
-      const userAcc = allAccountsMap[user.username] || user;
-      const userDept = userAcc.dept || (userAcc.departments ? userAcc.departments.name : '');
-      const sameDept = isDepartmentMatchServer(userDept, reqDeptName);
-
-      if (user.role !== 'admin') {
-        if (totalSteps === 4) {
-          const stepRoleMap = {
-            1: 'advisor',
-            2: 'dept_head',
-            3: 'discipline_head',
-            4: 'deputy_director'
-          };
-          const requiredRole = stepRoleMap[currentStep];
-
-          // พิเศษสำหรับขั้นที่ 1 (ครูที่ปรึกษา): หากหัวหน้าแผนก (dept_head) เป็นครูที่ปรึกษาประจำห้องนี้ด้วย ให้ถือเป็นเจ้าของคิวโดยตรง
-          const isDeptHeadAlsoAdvisorAtStep1 = (
-            currentStep === 1 &&
-            (user.role === 'dept_head' || user.role === 'head_dept') &&
-            (
-              (expectedStepInfo && expectedStepInfo.username && user.username === expectedStepInfo.username) ||
-              (expectedStepInfo && expectedStepInfo.name && userAcc.full_name && expectedStepInfo.name.trim() === userAcc.full_name.trim()) ||
-              sameDept
-            )
-          );
-
-          const isExactStepOwner = isDeptHeadAlsoAdvisorAtStep1 || (
-            user.role === requiredRole &&
-            (!expectedStepInfo || !expectedStepInfo.username || user.username === expectedStepInfo.username)
-          );
-
-          if (!isExactStepOwner) {
-            const canDelegateStep1 = currentStep === 1 && (matchedDelegation || (['advisor', 'dept_head'].includes(user.role) && sameDept));
-            const canDelegateStep2 = currentStep === 2 && (matchedDelegation || (['dept_head', 'advisor'].includes(user.role) && sameDept));
-            const canDelegateStep3 = currentStep === 3 && (matchedDelegation || ['discipline_head', 'deputy_director'].includes(user.role));
-            const canDelegateStep4 = currentStep === 4 && (matchedDelegation || ['deputy_director', 'discipline_head'].includes(user.role));
-
-            if (!(canDelegateStep1 || canDelegateStep2 || canDelegateStep3 || canDelegateStep4)) {
-              return res.status(403).json({
-                success: false,
-                reason: `⛔ ปฏิเสธการอนุมัติ: ขั้นที่ ${currentStep} ต้องอนุมัติโดย "${expectedStepInfo ? expectedStepInfo.roleLabel + ' (' + expectedStepInfo.name + ')' : requiredRole}" เท่านั้น`
-              });
-            }
-
-            actingAsDelegate = true;
-            if (!finalDelegateReason && matchedDelegation) {
-              finalDelegateReason = matchedDelegation.reason;
-            }
-            if (!finalDelegateReason) {
-              return res.status(400).json({
-                success: false,
-                requireDelegateReason: true,
-                reason: `⚠️ คุณกำลังอนุมัติแทน "${expectedStepInfo ? expectedStepInfo.name : ''}" กรุณาระบุเหตุผลที่อนุมัติแทน (เช่น ครูติดราชการ/คุมสอบ)`
-              });
-            }
-          } else {
-            actingAsDelegate = false;
-          }
-        } else if (totalSteps === 5) {
-          const stepRoleMap = {
-            1: 'subject_teacher',
-            2: 'advisor',
-            3: 'dept_head',
-            4: 'discipline_head',
-            5: 'deputy_director'
-          };
-          const requiredRole = stepRoleMap[currentStep];
-
-          // ตรวจสอบว่าเป็นเจ้าของคิวโดยตรงหรือไม่
-          // พิเศษสำหรับขั้นที่ 1 (ครูรายวิชา): หากครูที่ปรึกษา (advisor) หรือหัวหน้าแผนก (dept_head) เป็นผู้สอนในคาบนั้นเอง (username หรือชื่อตรงกับครูผู้สอน) ให้ถือเป็นเจ้าของคิวโดยตรงทันที!
-          const isAssignedSubjectTeacherAtStep1 = (
-            currentStep === 1 &&
-            expectedStepInfo &&
-            (
-              (expectedStepInfo.username && user.username === expectedStepInfo.username) ||
-              (expectedStepInfo.name && userAcc.full_name && expectedStepInfo.name.trim() === userAcc.full_name.trim())
-            )
-          );
-
-          // พิเศษสำหรับขั้นที่ 2 (ครูที่ปรึกษา): หากหัวหน้าแผนก (dept_head) เป็นครูที่ปรึกษาประจำห้องนี้ด้วย ให้ถือเป็นเจ้าของคิวโดยตรง (ไม่ใช่การอนุมัติแทน)
-          const isDeptHeadAlsoAdvisorAtStep2 = (
-            currentStep === 2 &&
-            (user.role === 'dept_head' || user.role === 'head_dept') &&
-            (
-              (expectedStepInfo && expectedStepInfo.username && user.username === expectedStepInfo.username) ||
-              (expectedStepInfo && expectedStepInfo.name && userAcc.full_name && expectedStepInfo.name.trim() === userAcc.full_name.trim()) ||
-              sameDept
-            )
-          );
-
-          const isExactStepOwner = isAssignedSubjectTeacherAtStep1 || isDeptHeadAlsoAdvisorAtStep2 || (
-            user.role === requiredRole &&
-            (!expectedStepInfo || !expectedStepInfo.username || user.username === expectedStepInfo.username)
-          );
-
-          if (!isExactStepOwner) {
-            // หากไม่ใช่เจ้าของคิวโดยตรง ตรวจสอบว่ามีสิทธิ์ "อนุมัติแทน" (ข้อ 6) หรือไม่
-            const canDelegateStep1 = currentStep === 1 && (matchedDelegation || (['subject_teacher', 'advisor', 'dept_head'].includes(user.role) && (sameDept || user.username === 'subject_general')));
-            const canDelegateStep2 = currentStep === 2 && (matchedDelegation || (['advisor', 'dept_head', 'subject_teacher'].includes(user.role) && sameDept));
-            const canDelegateStep3 = currentStep === 3 && (matchedDelegation || (['dept_head', 'advisor'].includes(user.role) && sameDept));
-            const canDelegateStep4 = currentStep === 4 && (matchedDelegation || ['discipline_head', 'deputy_director'].includes(user.role));
-            const canDelegateStep5 = currentStep === 5 && (matchedDelegation || ['deputy_director', 'discipline_head'].includes(user.role));
-
-            if (!(canDelegateStep1 || canDelegateStep2 || canDelegateStep3 || canDelegateStep4 || canDelegateStep5)) {
-              return res.status(403).json({
-                success: false,
-                reason: `⛔ ปฏิเสธการอนุมัติ: ขั้นที่ ${currentStep} ต้องอนุมัติโดย "${expectedStepInfo ? expectedStepInfo.roleLabel + ' (' + expectedStepInfo.name + ')' : requiredRole}" เท่านั้น`
-              });
-            }
-
-            actingAsDelegate = true;
-            if (!finalDelegateReason && matchedDelegation) {
-              finalDelegateReason = matchedDelegation.reason;
-            }
-            if (!finalDelegateReason) {
-              return res.status(400).json({
-                success: false,
-                requireDelegateReason: true,
-                reason: `⚠️ คุณกำลังอนุมัติแทน "${expectedStepInfo ? expectedStepInfo.name : ''}" กรุณาระบุเหตุผลที่อนุมัติแทน (เช่น ครูติดราชการ/คุมสอบ)`
-              });
-            }
-          } else {
-            // หากเป็นเจ้าของคิวโดยตรง (รวมถึงกรณีครูที่ปรึกษาสอนเองในขั้นที่ 1) ไม่ถือเป็นการอนุมัติแทน
-            actingAsDelegate = false;
-          }
-        } else {
-          // คำร้องเก่า 3 ขั้นตอน (ข้อ 10)
-          if (currentStep === 1 && !['advisor', 'dept_head'].includes(user.role)) {
-            return res.status(403).json({ success: false, reason: '⛔ เฉพาะครูที่ปรึกษาเท่านั้นที่สามารถอนุมัติขั้นที่ 1 ได้' });
-          }
-          if (currentStep === 2 && !['dept_head', 'advisor'].includes(user.role)) {
-            return res.status(403).json({ success: false, reason: '⛔ เฉพาะหัวหน้าแผนกเท่านั้นที่สามารถอนุมัติขั้นที่ 2 ได้' });
-          }
-          if (currentStep === 3 && !['discipline_head', 'deputy_director'].includes(user.role)) {
-            return res.status(403).json({ success: false, reason: '⛔ เฉพาะฝ่ายปกครองเท่านั้นที่สามารถอนุมัติขั้นที่ 3 ได้' });
-          }
-        }
-      }
-
-      // ในโครงสร้าง 4 ขั้น: ตรวจสอบกรณี "หัวหน้าแผนกเป็นครูที่ปรึกษาด้วย" (ขั้น 1 และ 2 เป็นคนเดียวกัน) -> กดอนุมัติควบขั้นที่ 1 และ 2 ส่งต่องานปกครอง (ขั้น 3) ทันที!
-      const isDualStepAdvisorAndDeptHead4 = Boolean(
-        totalSteps === 4 &&
-        currentStep === 1 &&
-        !actingAsDelegate &&
-        (
-          (user.role === 'dept_head' || user.role === 'head_dept') &&
-          (
-            (expectedStepInfo && (expectedStepInfo.username === user.username || (expectedStepInfo.name && userAcc.full_name && expectedStepInfo.name.trim() === userAcc.full_name.trim()))) ||
-            sameDept
-          )
-        )
-      );
-
-      // ตรวจสอบกรณี "ครูที่ปรึกษามาสอนในคาบนั้นเอง" (ขั้นที่ 1 และขั้นที่ 2 เป็นครูคนเดียวกัน ในระบบ 5 ขั้น) -> กดอนุมัติครั้งเดียว ผ่านควบทั้งขั้นที่ 1 และ 2 ส่งต่อหัวหน้าแผนก (ขั้นที่ 3) ทันที!
-      const step2AdvisorInfo = stepApprovers[2];
-      const isDualStepAdvisorAndSubject = Boolean(
-        totalSteps === 5 &&
-        currentStep === 1 &&
-        !actingAsDelegate &&
-        (
-          (step2AdvisorInfo && step2AdvisorInfo.username === user.username) ||
-          (user.role === 'advisor' && sameDept)
-        )
-      );
-
-      // ตรวจสอบกรณี "หัวหน้าแผนกเป็นครูที่ปรึกษาด้วย" ในระบบ 5 ขั้น (ขั้นที่ 2 และขั้นที่ 3 เป็นคนเดียวกัน) -> กดอนุมัติครั้งเดียว ผ่านควบทั้งขั้นที่ 2 และ 3 ส่งต่องานปกครอง (ขั้นที่ 4) ทันที!
-      const isDualStepAdvisorAndDeptHead = Boolean(
-        totalSteps === 5 &&
-        currentStep === 2 &&
-        !actingAsDelegate &&
-        (
-          (user.role === 'dept_head' || user.role === 'head_dept') &&
-          (
-            (expectedStepInfo && (expectedStepInfo.username === user.username || (expectedStepInfo.name && userAcc.full_name && expectedStepInfo.name.trim() === userAcc.full_name.trim()))) ||
-            sameDept
-          )
-        )
-      );
-
-      // คำนวณขั้นถัดไปและสถานะถัดไป
-      let nextStep = isDualStepAdvisorAndDeptHead4 ? 3 : (isDualStepAdvisorAndSubject ? 3 : (isDualStepAdvisorAndDeptHead ? 4 : (currentStep + 1)));
-      let nextStatus = request.status;
-      let qrToken = request.qr_token;
-
-      if (totalSteps === 4) {
-        if (nextStep === 2) nextStatus = 'pending_dept_head';
-        else if (nextStep === 3) nextStatus = 'pending_discipline';
-        else if (nextStep === 4) nextStatus = 'pending_deputy';
-        else if (nextStep >= 5) {
-          nextStatus = 'approved';
-          const entropy = crypto.randomBytes(8).toString('hex');
-          qrToken = `PASS-${request.request_no}-${entropy}`;
-        }
-      } else if (totalSteps === 5) {
-        if (nextStep === 2) nextStatus = 'pending_advisor';
-        else if (nextStep === 3) nextStatus = 'pending_dept_head';
-        else if (nextStep === 4) nextStatus = 'pending_discipline';
-        else if (nextStep === 5) nextStatus = 'pending_deputy';
-        else if (nextStep >= 6) {
-          nextStatus = 'approved';
-          const entropy = crypto.randomBytes(8).toString('hex');
-          qrToken = `PASS-${request.request_no}-${entropy}`;
-        }
-      } else {
-        // คำร้องเก่า 3 ขั้นตอน
-        if (nextStep === 2) nextStatus = 'pending_dept_head';
-        else if (nextStep === 3) nextStatus = 'pending_discipline';
-        else if (nextStep >= 4) {
-          nextStatus = 'approved';
-          const entropy = crypto.randomBytes(8).toString('hex');
-          qrToken = `PASS-${request.request_no}-${entropy}`;
-        }
-      }
-
-      const nowIso = new Date().toISOString();
-      await db.query(
-        'UPDATE leave_requests SET current_step = ?, status = ?, qr_token = ?, qr_generated_at = ?, updated_at = ? WHERE id = ?',
-        [nextStep, nextStatus, qrToken, nextStatus === 'approved' ? nowIso : null, nowIso, requestId]
-      );
-      const updated = await db.query('SELECT * FROM leave_requests WHERE id = ?', [requestId]);
-
-      // บันทึกลง approvalHistory ใน meta (ข้อ 4, 6, 9)
-      const historyList = Array.isArray(meta.approvalHistory) ? [...meta.approvalHistory] : [];
-      const approverDisplayName = userAcc.full_name || user.full_name || user.username;
-      const logEntry = {
-        step: currentStep,
-        role: user.role,
-        roleLabel: expectedStepInfo ? expectedStepInfo.roleLabel : user.role,
-        approverUsername: user.username,
-        approverName: approverDisplayName,
-        action: actingAsDelegate ? 'delegated_approve' : 'approved',
-        isDelegated: actingAsDelegate,
-        delegatedForUsername: actingAsDelegate && expectedStepInfo ? expectedStepInfo.username : null,
-        delegatedForName: actingAsDelegate && expectedStepInfo ? expectedStepInfo.name : null,
-        delegateReason: actingAsDelegate ? finalDelegateReason : null,
-        note: note || (actingAsDelegate
-          ? `อนุมัติแทน ${expectedStepInfo ? expectedStepInfo.name : ''} (${finalDelegateReason})`
-          : (isDualStepAdvisorAndSubject
-            ? `อนุมัติขั้นที่ 1 (ครูผู้สอนประจำคาบ)`
-            : (isDualStepAdvisorAndDeptHead
-              ? `อนุมัติขั้นที่ 2 (ครูที่ปรึกษา - ควบตำแหน่งหัวหน้าแผนก)`
-              : `อนุมัติผ่านขั้นที่ ${currentStep}`))),
-        actionAt: nowIso
-      };
-      historyList.push(logEntry);
-
-      // หากครูที่ปรึกษาเป็นผู้สอนเอง ให้บันทึกประวัติขั้นที่ 2 (ครูที่ปรึกษา) อัตโนมัติในคลิกเดียว
-      if (isDualStepAdvisorAndSubject) {
-        historyList.push({
-          step: 2,
-          role: 'advisor',
-          roleLabel: 'ครูที่ปรึกษา',
-          approverUsername: user.username,
-          approverName: approverDisplayName,
-          action: 'approved',
-          isDelegated: false,
-          autoBundledWithStep1: true,
-          note: 'อนุมัติควบขั้นที่ 1 และ 2 อัตโนมัติ (ครูที่ปรึกษาเป็นผู้สอนประจำคาบเรียนนี้เอง)',
-          actionAt: nowIso
-        });
-      }
-
-      // หากหัวหน้าแผนกเป็นครูที่ปรึกษาด้วย (ในระบบ 4 ขั้น: ควบขั้น 1 ที่ปรึกษา และ ขั้น 2 หัวหน้าแผนก)
-      if (isDualStepAdvisorAndDeptHead4) {
-        historyList.push({
-          step: 2,
-          role: 'dept_head',
-          roleLabel: 'หัวหน้าแผนกวิชา',
-          approverUsername: user.username,
-          approverName: approverDisplayName,
-          action: 'approved',
-          isDelegated: false,
-          isDualApproved: true,
-          autoBundledWithStep1: true,
-          note: 'อนุมัติขั้นที่ 2 (หัวหน้าแผนกวิชา - อนุมัติควบ 2 ตำแหน่งใน 1 คลิก)',
-          actionAt: nowIso
-        });
-      }
-
-      // หากหัวหน้าแผนกเป็นครูที่ปรึกษาด้วย ให้บันทึกประวัติขั้นที่ 3 (หัวหน้าแผนก) อัตโนมัติในคลิกเดียว (ระบบ 5 ขั้น)
-      if (isDualStepAdvisorAndDeptHead) {
-        historyList.push({
-          step: 3,
-          role: 'dept_head',
-          roleLabel: 'หัวหน้าแผนกวิชา',
-          approverUsername: user.username,
-          approverName: approverDisplayName,
-          action: 'approved',
-          isDelegated: false,
-          isDualApproved: true,
-          autoBundledWithStep2: true,
-          note: 'อนุมัติขั้นที่ 3 (หัวหน้าแผนกวิชา - อนุมัติควบ 2 ตำแหน่งใน 1 คลิก)',
-          actionAt: nowIso
-        });
-      }
-
-      const stepEnteredAt = {
-        ...(meta.stepEnteredAt || {}),
-        ...(isDualStepAdvisorAndSubject ? { '2': nowIso } : {}),
-        ...(isDualStepAdvisorAndDeptHead4 ? { '2': nowIso } : {}),
-        ...(isDualStepAdvisorAndDeptHead ? { '3': nowIso } : {}),
-        [String(nextStep)]: nowIso
-      };
-      const updatedMeta = {
-        ...meta,
-        workflowVersion: totalSteps,
-        totalSteps,
-        approvalHistory: historyList,
-        stepEnteredAt,
-        lastStepAt: nowIso
-      };
-      saveRequestMeta(request.request_no, updatedMeta);
-      saveRequestMeta(requestId, updatedMeta);
-
-      // บันทึกลงตาราง approval_logs ด้วย
-      try {
-        await db.insertAutoIncrement('approval_logs', {
-          request_id: requestId,
-          step: currentStep,
-          approver_id: '00000000-0000-0000-0000-000000000002',
-          action: 'approved',
-          note: isDualStepAdvisorAndSubject ? `${logEntry.note} + อนุมัติควบขั้นที่ 2 (ครูที่ปรึกษาสอนเอง)` : logEntry.note
-        });
-      } catch (e) {}
-
-      console.log(`✅ [APPROVED STEP ${isDualStepAdvisorAndSubject ? '1+2' : currentStep}/${totalSteps}] Request ${request.request_no} -> step ${nextStep} (${nextStatus}) by ${user.username}`);
-
-      // ข้อ 7: ส่งแจ้งเตือนเมื่อถึงคิวผู้อนุมัติขั้นถัดไป หรือเมื่ออนุมัติครบสร้าง QR Pass
-      const studentName = meta.studentName || (request.users ? request.users.full_name : 'นักเรียน');
-      if (nextStatus === 'approved') {
-        sendLineNotification(
-          `\n🎉 [OnePass อนุมัติครบทั้ง ${totalSteps} ขั้นตอน - สร้าง QR Pass สำเร็จ!]\n` +
-          `• คำร้อง: ${request.request_no}\n` +
-          `• นักเรียน: ${studentName} (${reqDeptName})\n` +
-          `• เวลาที่อนุญาต: ${request.departure_time || '13:00'} - ${request.expected_return_time || '15:30'} น.\n` +
-          `• ผู้อนุมัติขั้นสุดท้าย: ${approverDisplayName} (${expectedStepInfo ? expectedStepInfo.roleLabel : ''})\n` +
-          `• สถานะ: ออกบัตรผ่าน Digital QR Pass พร้อมสแกนที่ประตูไม้กั้น`
-        );
-        try {
-          notifyStudentApproved(
-            request.student_id || meta.studentCode || (request.users ? request.users.username : null),
-            updatedMeta
-          );
-        } catch (tgErr) {
-          console.warn('⚠️ [TELEGRAM] Notify student approved error:', tgErr.message);
-        }
-      } else {
-        const nextStepInfo = stepApprovers[nextStep];
-        const delegateTag = actingAsDelegate ? ` (อนุมัติแทน ${expectedStepInfo ? expectedStepInfo.name : ''}: ${finalDelegateReason})` : '';
-        sendLineNotification(
-          `\n📋 [OnePass ผ่านขั้นที่ ${currentStep}/${totalSteps} -> แจ้งเตือนคิวถัดไป]\n` +
-          `• คำร้อง: ${request.request_no}\n` +
-          `• นักเรียน: ${studentName} (${reqDeptName})\n` +
-          `• อนุมัติขั้นที่ ${currentStep} โดย: ${approverDisplayName}${delegateTag}\n` +
-          `• 🔔 ถึงคิวขั้นที่ ${nextStep}: ${nextStepInfo ? nextStepInfo.roleLabel + ' (' + nextStepInfo.name + ')' : ''}`
-        );
-        try {
-          if (nextStepInfo) {
-            notifyApproverQueue(nextStepInfo, updatedMeta, nextStep);
-          }
-        } catch (tgErr) {
-          console.warn('⚠️ [TELEGRAM] Notify next approver error:', tgErr.message);
-        }
-      }
-
+    // Force password change on first use: if must_change_password is 1 OR user logs in with '123456'
+    if (user.must_change_password === 1 || isDefaultPassword) {
       return res.json({
         success: true,
-        request: { ...(updated ? updated[0] : request), ...updatedMeta, currentStep: nextStep, status: nextStatus, qrToken }
-      });
-    } catch (err) {
-      console.error('Approve error:', err);
-      return res.status(500).json({ success: false, reason: err.message });
-    }
-  }
-  res.json({ success: true });
-});
-
-// ปฏิเสธคำขอ: ถูกปฏิเสธขั้นใดจบทันที ต้องระบุเหตุผล และนักเรียนเห็นเหตุผล (ข้อ 5, 9)
-app.post('/api/requests/:id/reject', authenticateToken, requireRole(['subject_teacher', 'advisor', 'dept_head', 'discipline_head', 'deputy_director', 'admin']), async (req, res) => {
-  const requestId = parseInt(req.params.id);
-  const { note } = req.body || {};
-  const user = req.user;
-
-  if (!note || !String(note).trim()) {
-    return res.status(400).json({
-      success: false,
-      reason: '⚠️ กรุณาระบุเหตุผลในการไม่อนุมัติคำร้อง (บังคับระบุเหตุผลทุกครั้ง)'
-    });
-  }
-
-  const cleanReason = String(note).trim();
-
-  if (supabase) {
-    try {
-      const request = await db.getLeaveRequestWithStudent(requestId);
-
-      if (!request) {
-        return res.status(404).json({ success: false, message: 'ไม่พบคำร้องนี้ในระบบ' });
-      }
-
-      const meta = getRequestMeta(request.request_no) || getRequestMeta(requestId) || {};
-      const currentStep = Number(request.current_step || 1);
-      const totalSteps = meta.totalSteps || 5;
-      const reqDeptName = meta.deptName || (request.users && request.users.departments ? request.users.departments.name : 'แผนกวิชาช่างยนต์');
-      const stepApprovers = resolveStepApproversInfo(reqDeptName, meta, totalSteps);
-      const stepInfo = stepApprovers[currentStep];
-      const approverDisplayName = (ALL_SYSTEM_ACCOUNTS[user.username] ? ALL_SYSTEM_ACCOUNTS[user.username].full_name : null) || user.full_name || user.username;
-      const nowIso = new Date().toISOString();
-
-      await db.query(
-        'UPDATE leave_requests SET status = ?, rejection_reason = ?, updated_at = ? WHERE id = ?',
-        ['rejected', cleanReason, nowIso, requestId]
-      );
-      const updated = await db.query('SELECT * FROM leave_requests WHERE id = ?', [requestId]);
-
-      const historyList = Array.isArray(meta.approvalHistory) ? [...meta.approvalHistory] : [];
-      historyList.push({
-        step: currentStep,
+        must_change_password: true,
+        user_id: user.id,
+        username: user.username,
+        full_name: user.full_name,
         role: user.role,
-        roleLabel: stepInfo ? stepInfo.roleLabel : user.role,
-        approverUsername: user.username,
-        approverName: approverDisplayName,
-        action: 'rejected',
-        note: cleanReason,
-        actionAt: nowIso
-      });
-
-      const updatedMeta = {
-        ...meta,
-        rejectionReason: cleanReason,
-        rejectedAtStep: currentStep,
-        rejectedByName: approverDisplayName,
-        rejectedByRole: stepInfo ? stepInfo.roleLabel : user.role,
-        approvalHistory: historyList,
-        lastStepAt: nowIso
-      };
-      saveRequestMeta(request.request_no, updatedMeta);
-      saveRequestMeta(requestId, updatedMeta);
-
-      try {
-        await db.insertAutoIncrement('approval_logs', {
-          request_id: requestId,
-          step: currentStep,
-          approver_id: '00000000-0000-0000-0000-000000000002',
-          action: 'rejected',
-          note: cleanReason
-        });
-      } catch (e) {}
-
-      const studentName = meta.studentName || (request.users ? request.users.full_name : 'นักเรียน');
-      sendLineNotification(
-        `\n❌ [OnePass ไม่อนุมัติคำร้อง (สิ้นสุดคำร้องทันที)]\n` +
-        `• คำร้อง: ${request.request_no}\n` +
-        `• นักเรียน: ${studentName}\n` +
-        `• ปฏิเสธในขั้นที่ ${currentStep}: ${stepInfo ? stepInfo.roleLabel : ''} (${approverDisplayName})\n` +
-        `• เหตุผล: ${cleanReason}`
-      );
-      try {
-        notifyStudentRejected(
-          request.student_id || meta.studentCode || (request.users ? request.users.username : null),
-          updatedMeta,
-          stepInfo ? stepInfo.roleLabel : user.role,
-          cleanReason
-        );
-      } catch (tgErr) {
-        console.warn('⚠️ [TELEGRAM] Notify student rejected error:', tgErr.message);
-      }
-
-      console.log(`❌ [REJECTED AT STEP ${currentStep}] Request ${request.request_no} rejected by ${user.username}: ${cleanReason}`);
-      return res.json({ success: true, request: { ...(updated ? updated[0] : request), ...updatedMeta, status: 'rejected', rejectionReason: cleanReason } });
-    } catch (err) {
-      console.error('Reject error:', err);
-      return res.status(500).json({ success: false, reason: err.message });
-    }
-  }
-  res.json({ success: true });
-});
-
-// ข้ามขั้นกรณีฉุกเฉิน (Emergency Override) เฉพาะฝ่ายปกครองและรองผู้อำนวยการ พร้อมบันทึกเหตุผลไว้ตรวจสอบ (ข้อ 8, 9)
-app.post('/api/requests/:id/emergency-override', authenticateToken, requireRole(['discipline_head', 'deputy_director', 'admin']), async (req, res) => {
-  const requestId = parseInt(req.params.id);
-  const { reason } = req.body || {};
-  const user = req.user;
-
-  if (!reason || !String(reason).trim()) {
-    return res.status(400).json({
-      success: false,
-      reason: '⚠️ กรณีอนุมัติฉุกเฉินข้ามขั้นตอน จำเป็นต้องระบุเหตุผลอย่างชัดเจนเพื่อบันทึกไว้ตรวจสอบ'
-    });
-  }
-
-  const cleanEmergencyReason = String(reason).trim();
-
-  if (supabase) {
-    try {
-      const request = await db.getLeaveRequestWithStudent(requestId);
-
-      if (!request) {
-        return res.status(404).json({ success: false, reason: 'ไม่พบคำร้องนี้ในระบบ' });
-      }
-
-      const meta = getRequestMeta(request.request_no) || getRequestMeta(requestId) || {};
-      const totalSteps = meta.totalSteps || 5;
-      const finalStep = totalSteps === 5 ? 6 : 4;
-      const nowIso = new Date().toISOString();
-      const entropy = crypto.randomBytes(8).toString('hex');
-      const qrToken = `PASS-${request.request_no}-${entropy}`;
-      const approverDisplayName = (ALL_SYSTEM_ACCOUNTS[user.username] ? ALL_SYSTEM_ACCOUNTS[user.username].full_name : null) || user.full_name || user.username;
-      const roleLabel = user.role === 'deputy_director' ? 'รองผู้อำนวยการ' : (user.role === 'discipline_head' ? 'ฝ่ายปกครอง' : 'ผู้ดูแลระบบ');
-
-      await db.query(
-        'UPDATE leave_requests SET current_step = ?, status = ?, qr_token = ?, qr_generated_at = ?, updated_at = ? WHERE id = ?',
-        [finalStep, 'approved', qrToken, nowIso, nowIso, requestId]
-      );
-      const updated = await db.query('SELECT * FROM leave_requests WHERE id = ?', [requestId]);
-
-      const historyList = Array.isArray(meta.approvalHistory) ? [...meta.approvalHistory] : [];
-      historyList.push({
-        step: Number(request.current_step || 1),
-        role: user.role,
-        roleLabel,
-        approverUsername: user.username,
-        approverName: approverDisplayName,
-        action: 'emergency_override',
-        isEmergencyOverride: true,
-        note: `[อนุมัติฉุกเฉินข้ามขั้นตอน] ${cleanEmergencyReason}`,
-        actionAt: nowIso
-      });
-
-      const updatedMeta = {
-        ...meta,
-        workflowVersion: totalSteps,
-        totalSteps,
-        isEmergencyOverride: true,
-        emergencyOverrideBy: approverDisplayName,
-        emergencyOverrideRole: roleLabel,
-        emergencyOverrideReason: cleanEmergencyReason,
-        emergencyOverrideAt: nowIso,
-        approvalHistory: historyList,
-        lastStepAt: nowIso
-      };
-      saveRequestMeta(request.request_no, updatedMeta);
-      saveRequestMeta(requestId, updatedMeta);
-
-      const studentName = meta.studentName || (request.users ? request.users.full_name : 'นักเรียน');
-      sendLineNotification(
-        `\n⚡ [OnePass อนุมัติฉุกเฉินข้ามขั้นตอน (Emergency Override)]\n` +
-        `• คำร้อง: ${request.request_no}\n` +
-        `• นักเรียน: ${studentName}\n` +
-        `• ผู้อนุมัติฉุกเฉิน: ${approverDisplayName} (${roleLabel})\n` +
-        `• เหตุผลฉุกเฉิน: ${cleanEmergencyReason}\n` +
-        `• สถานะ: ออกบัตรผ่าน Digital QR Pass ทันทีและบันทึกประวัติตรวจสอบแล้ว`
-      );
-
-      console.log(`⚡ [EMERGENCY OVERRIDE] Request ${request.request_no} approved immediately by ${user.username}: ${cleanEmergencyReason}`);
-      return res.json({
-        success: true,
-        message: 'อนุมัติฉุกเฉินข้ามขั้นตอนและออก QR Pass เรียบร้อยแล้ว',
-        request: { ...(updated ? updated[0] : request), ...updatedMeta, currentStep: finalStep, status: 'approved', qrToken }
-      });
-    } catch (err) {
-      console.error('Emergency override error:', err);
-      return res.status(500).json({ success: false, reason: err.message });
-    }
-  }
-  res.json({ success: true });
-});
-
-// ลบ/ยกเลิกคำขอ (ลบออกจากฐานข้อมูล Supabase - ล็อกสิทธิ์ด้วย JWT Middleware)
-app.delete('/api/requests/:id', authenticateToken, async (req, res) => {
-  const requestId = parseInt(req.params.id);
-  const user = req.user;
-
-  if (supabase) {
-    try {
-      const requestRows = await db.query('SELECT * FROM leave_requests WHERE id = ?', [requestId]);
-      const request = requestRows[0];
-      if (!request) {
-        return res.status(404).json({ success: false, error: 'ไม่พบคำร้องที่ต้องการลบ' });
-      }
-
-      // ตรวจสอบสิทธิ์: ถ้าเป็นนักเรียน ลบได้เฉพาะคำร้องของตนเองและต้องยังไม่ถูกอนุมัติ
-      if (user.role === 'student') {
-        const isOwner = (request.student_id === user.id) || (request.student_code === user.username);
-        if (!isOwner) {
-          return res.status(403).json({ success: false, error: '⛔ คุณไม่มีสิทธิ์ลบคำร้องของผู้อื่น' });
-        }
-        if (request.current_step > 1 || request.status === 'approved') {
-          return res.status(400).json({ success: false, error: '⚠️ ไม่สามารถลบคำร้องที่ได้รับการอนุมัติไปแล้วได้' });
-        }
-      }
-
-      await db.query('DELETE FROM approval_logs WHERE request_id = ?', [requestId]);
-      await db.query('DELETE FROM scan_logs WHERE request_id = ?', [requestId]);
-      try {
-        await db.query('DELETE FROM leave_requests WHERE id = ?', [requestId]);
-      } catch (error) {
-        console.error('Delete request error:', error);
-        return res.status(500).json({ success: false, error: error.message });
-      }
-      console.log(`🗑️ [DELETED] Request #${requestId} deleted by ${user.username} (${user.role})`);
-      return res.json({ success: true, message: 'ลบคำร้องเรียบร้อยแล้ว' });
-    } catch (err) {
-      console.error('Delete request exception:', err);
-      return res.status(500).json({ success: false, error: err.message });
-    }
-  }
-  res.json({ success: true, message: 'ลบคำร้องเรียบร้อยแล้ว' });
-});
-
-// แอดมินแก้ไขสถานะคำร้องตรงๆ (ข้ามขั้นตอนอนุมัติปกติ) - ใช้เมื่อคำร้องค้างผิดปกติหรือต้องแก้ไขเร่งด่วน
-const ADMIN_REQUEST_STATUS_STEP_MAP = {
-  pending_advisor: 1,
-  pending_dept_head: 2,
-  pending_discipline: 3,
-  pending_deputy: 4,
-  approved: 5,
-  gate_opened: 5,
-  exited: 5,
-  returned: 5,
-  rejected: null,
-  expired: null
-};
-app.put('/api/admin/requests/:id/status', authenticateToken, requireRole(['admin']), async (req, res) => {
-  const requestId = parseInt(req.params.id);
-  const { status } = req.body || {};
-
-  if (!Object.prototype.hasOwnProperty.call(ADMIN_REQUEST_STATUS_STEP_MAP, status)) {
-    return res.status(400).json({ success: false, message: `สถานะ "${status}" ไม่ถูกต้อง` });
-  }
-
-  if (!supabase) {
-    return res.status(500).json({ success: false, message: 'ไม่ได้เชื่อมต่อฐานข้อมูล' });
-  }
-
-  try {
-    const rows = await db.query('SELECT * FROM leave_requests WHERE id = ?', [requestId]);
-    const existing = rows[0];
-    if (!existing) {
-      return res.status(404).json({ success: false, message: 'ไม่พบคำร้องนี้ในระบบ' });
-    }
-
-    const nextStep = ADMIN_REQUEST_STATUS_STEP_MAP[status];
-    const nowIso = new Date().toISOString();
-    const updateFields = { status, updated_at: nowIso };
-    if (nextStep !== null) updateFields.current_step = nextStep;
-
-    const setClause = Object.keys(updateFields).map(k => `${k} = ?`).join(', ');
-    await db.query(`UPDATE leave_requests SET ${setClause} WHERE id = ?`, [...Object.values(updateFields), requestId]);
-
-    await db.query(
-      `INSERT INTO approval_logs (request_id, step, step_name, approver_username, approver_name, approver_role, action, note)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [requestId, nextStep || existing.current_step, 'แอดมินแก้ไขสถานะโดยตรง', req.user.username, req.user.full_name || req.user.username, 'admin', 'admin_override', `เปลี่ยนสถานะจาก "${existing.status}" เป็น "${status}"`]
-    );
-
-    console.log(`⚙️ [ADMIN OVERRIDE] Request #${requestId} status ${existing.status} -> ${status} by ${req.user.username}`);
-    res.json({ success: true, message: `แก้ไขสถานะคำร้องเป็น "${status}" สำเร็จแล้ว` });
-  } catch (err) {
-    console.error('Admin override request status error:', err);
-    res.status(500).json({ success: false, message: 'แก้ไขสถานะไม่สำเร็จ: ' + err.message });
-  }
-});
-
-// งานปกครอง/แอดมิน จัดการละเว้นรายการไม่นับสถิติ (เช่น เครื่องสแกนเสีย)
-app.post('/api/requests/:id/waive', authenticateToken, requireRole(['discipline_head', 'admin']), async (req, res) => {
-  const requestId = parseInt(req.params.id);
-  const { isWaived = true, waiverNote = '' } = req.body;
-  const user = req.user;
-
-  if (supabase) {
-    try {
-      const updatePayload = {
-        is_waived: Boolean(isWaived),
-        waiver_note: waiverNote || 'งานปกครองละเว้นรายการ'
-      };
-
-      let error = null;
-      try {
-        await db.query(
-          'UPDATE leave_requests SET is_waived = ?, waiver_note = ? WHERE id = ?',
-          [updatePayload.is_waived, updatePayload.waiver_note, requestId]
-        );
-      } catch (updErr) {
-        error = updErr;
-      }
-
-      // Fallback if columns don't exist yet in the schema: store in admin_note
-      if (error && db.isMissingColumnError(error)) {
-        const adminNoteStr = isWaived ? `[WAIVED: ${waiverNote || 'งานปกครองละเว้น'}] โดย ${user.full_name || 'งานปกครอง'}` : '';
-        try {
-          await db.query('UPDATE leave_requests SET admin_note = ? WHERE id = ?', [adminNoteStr, requestId]);
-          error = null;
-        } catch (fbErr) {
-          error = fbErr;
-        }
-      }
-
-      if (!error) {
-        console.log(`🛡️ [DISCIPLINE WAIVE] Request #${requestId} waived: ${isWaived} by ${user.full_name}`);
-        return res.json({ success: true, message: isWaived ? 'บันทึกการละเว้นรายการเรียบร้อยแล้ว' : 'ยกเลิกการละเว้นรายการเรียบร้อยแล้ว' });
-      } else {
-        return res.status(500).json({ success: false, message: error.message });
-      }
-    } catch (err) {
-      return res.status(500).json({ success: false, message: err.message });
-    }
-  }
-
-  res.json({ success: true, message: 'บันทึกการละเว้นเรียบร้อย (โหมดจำลอง)' });
-});
-
-// ตรวจสอบและสแกน QR Code ที่หน้าตู้ (พร้อมระบบ Anti-Passback / Anti-Replay ป้องกันการใช้ซ้ำ)
-app.post('/api/gate/scan', async (req, res) => {
-  const { token, scanType = 'auto' } = req.body;
-
-  if (!token) {
-    return res.status(400).json({ success: false, reason: 'กรุณาระบุรหัส QR Token' });
-  }
-
-  const cleanToken = token.trim();
-  let baseToken = cleanToken;
-  let totpCode = null;
-
-  // ตรวจจับรูปแบบ Rotating QR: BASE_TOKEN.TOTP
-  if (cleanToken.includes('.')) {
-    const parts = cleanToken.split('.');
-    baseToken = parts[0];
-    totpCode = parts[1];
-  }
-
-  if (supabase) {
-    try {
-      const rows = await db.getLeaveRequestsWithStudent('lr.qr_token = ?', [baseToken]);
-      const request = rows[0];
-
-      if (!request) {
-        await db.insertAutoIncrement('scan_logs', {
-          qr_token: cleanToken,
-          student_name: 'ไม่ทราบชื่อ',
-          scan_type: scanType,
-          result: 'denied',
-          message: '❌ ไม่พบรหัส QR ในระบบ'
-        });
-        return res.json({ success: false, reason: '❌ รหัส QR ไม่ถูกต้อง หรือไม่พบในระบบ' });
-      }
-
-      const studentName = request.users ? request.users.full_name : (request.student_name || 'ผู้ทดสอบเปิดไม้กั้น');
-      const isTestQr = Boolean(
-        cleanToken.startsWith('TEST-') ||
-        baseToken.startsWith('TEST-') ||
-        (request.request_no && request.request_no.startsWith('TEST-'))
-      );
-
-      // ตรวจสอบความปลอดภัย Rotating QR (Time-based One-Time Token / ป้องกันการแคปภาพหน้าจอ)
-      if (totpCode && !isTestQr) {
-        const totpCheck = verifyTotp(baseToken, totpCode);
-        if (!totpCheck.valid) {
-          await db.insertAutoIncrement('scan_logs', {
-            qr_token: cleanToken,
-            student_name: studentName,
-            scan_type: scanType,
-            result: 'denied',
-            message: '❌ [QR หมดอายุ] ตรวจพบรูปแคปหน้าจอส่งต่อ รหัสความปลอดภัยหมดอายุแล้ว'
-          });
-          return res.json({
-            success: false,
-            reason: '❌ [ตรวจพบภาพแคปหน้าจอ] รหัส QR นี้หมดอายุแล้ว กรุณาเปิดจากหน้าจอแอปจริงแบบสดๆ'
-          });
-        }
-        console.log(`🛡️ [ROTATING QR] Verified fresh live QR for ${studentName} (TOTP: ${totpCode}, offset: ${totpCheck.offset})`);
-      }
-
-      // 1. ตรวจสอบสถานะการอนุมัติ (ครบทุกขั้นตอน)
-      if (!isTestQr && ['pending_subject', 'pending_advisor', 'pending_dept_head', 'pending_discipline', 'pending_deputy'].includes(request.status)) {
-        return res.json({
-          success: false,
-          reason: `❌ คำขอนี้ยังไม่ได้รับอนุมัติครบทุกขั้นตอน (สถานะ: ${request.status})`
-        });
-      }
-
-      if (request.status === 'rejected') {
-        return res.json({
-          success: false,
-          reason: `❌ คำขอนี้ไม่ผ่านการอนุมัติ (${request.rejection_reason || 'ไม่อนุญาตให้ออก'})`
-        });
-      }
-
-      // ตรวจสอบกรณีบัตรหมดอายุตาม Cron Job สิ้นวัน
-      if (request.status === 'expired') {
-        try {
-          await db.insertAutoIncrement('scan_logs', {
-            request_id: request.id,
-            qr_token: cleanToken,
-            student_name: studentName,
-            scan_type: scanType,
-            result: 'denied',
-            message: '❌ บัตรผ่านหมดอายุแล้ว (สิ้นสุดวันขออนุญาต)'
-          });
-        } catch (e) {}
-        return res.json({
-          success: false,
-          reason: '❌ รหัส QR และใบขออนุญาตนี้หมดอายุแล้ว (สิ้นสุดวันขออนุญาตตามระเบียบสถานศึกษา)'
-        });
-      }
-
-      // ตรวจสอบวันที่ขออนุญาต (ป้องกันการนำ QR ล่วงหน้ามาแอบสแกนออกก่อนวันจริง)
-      const currentToday = getThaiDateStr();
-      const reqDate = request.leave_date || (request.created_at ? request.created_at.split('T')[0] : currentToday);
-
-      if (!isTestQr && reqDate > currentToday) {
-        return res.json({
-          success: false,
-          reason: `⛔ บัตรผ่านนี้สำหรับวันที่ ${reqDate} (ยังไม่ถึงกำหนดวันอนุญาต ห้ามสแกนออกก่อนวันจริง)`
-        });
-      }
-
-      if (!isTestQr && reqDate < currentToday && request.status !== 'returned') {
-        return res.json({
-          success: false,
-          reason: `❌ บัตรผ่านนี้หมดอายุแล้ว (เป็นคำร้องของวันที่ ${reqDate} สิ้นสุดการใช้งานแล้ว)`
-        });
-      }
-
-      // 2. ระบบ Anti-Passback & Scan Policy (ขาออกสแกน QR ได้, ขาเข้าไม่ต้องสแกนแล้ว)
-      let resolvedAction = scanType;
-      if (scanType === 'auto') {
-        if (request.status === 'approved' || request.status === 'gate_opened') resolvedAction = 'exit';
-        else if (request.status === 'exited') {
-          return res.json({
-            success: false,
-            reason: '⛔ ขาเข้าไม่ต้องสแกน QR ที่ป้อมแล้ว! ให้นักเรียนกดปุ่ม "ฉันกลับถึงวิทยาลัยแล้ว" ในแอป OnePass'
-          });
-        } else if (request.status === 'returned') {
-          return res.json({
-            success: false,
-            reason: '⛔ บัตรผ่านนี้ใช้งานเสร็จสิ้นแล้ว (บันทึกกลับเข้าเรียบร้อยแล้ว - ปิดการใช้งานถาวร)'
-          });
-        }
-      }
-
-      // ตรวจสอบกรณีมีคำสั่งสแกนขากลับเข้า (Entry / Return) -> ปฏิเสธตามนโยบายปุ่มในแอป
-      if (resolvedAction === 'entry' || resolvedAction === 'return') {
-        return res.json({
-          success: false,
-          reason: '⛔ ขากลับเข้าสถานศึกษาไม่ต้องสแกน QR แล้ว! กรุณาให้นักเรียนเปิดแอป OnePass แล้วกดปุ่ม "ฉันกลับถึงวิทยาลัยแล้ว"'
-        });
-      }
-
-      // ตรวจสอบกรณีสแกนขาออก (Exit)
-      if (resolvedAction === 'exit') {
-        if (request.status === 'gate_opened') {
-          return res.json({
-            success: true,
-            scanType: 'exit',
-            gateStatus: 'gate_opened',
-            openDuration: 30,
-            message: '⚠️ ไม้กั้นกำลังเปิดอยู่แล้ว (30 วินาที) กรุณาขับหรือเดินผ่านเซนเซอร์',
-            notice: '⏳ ไม้กั้นจะปิดอัตโนมัติเมื่อพ้นเซนเซอร์ หรือครบ 30 วินาที (QR Code จะหมดอายุเมื่อไม้กั้นปิดลง)',
-            student: {
-              name: studentName,
-              code: request.users ? request.users.username : '66209010012',
-              classroom: request.users && request.users.classrooms ? request.users.classrooms.name : 'ปวช.3/1'
-            },
-            request
-          });
-        }
-
-        if (request.status === 'exited') {
-          await db.insertAutoIncrement('scan_logs', {
-            request_id: request.id,
-            qr_token: cleanToken,
-            student_name: studentName,
-            scan_type: 'exit',
-            result: 'denied',
-            message: '⛔ Anti-Passback: บัตรถูกสแกนออกไปแล้ว ห้ามสแกนออกซ้ำ'
-          });
-          return res.json({
-            success: false,
-            reason: '⛔ [Anti-Passback] บัตรนี้ถูกสแกนออกไปแล้ว ห้ามสแกนออกซ้ำ! หากกลับถึงวิทยาลัยแล้วให้กดปุ่ม "ฉันกลับถึงวิทยาลัยแล้ว" ในแอป'
-          });
-        }
-
-        if (request.status === 'returned') {
-          return res.json({
-            success: false,
-            reason: '⛔ บัตรผ่านนี้ใช้งานครบวงจรแล้ว ไม่สามารถสแกนออกซ้ำได้'
-          });
-        }
-
-        if (request.status !== 'approved') {
-          return res.json({
-            success: false,
-            reason: `❌ คำขอนี้อยู่ในสถานะ "${request.status}" ไม่สามารถสแกนออกได้`
-          });
-        }
-
-        // ✅ อนุมัติผ่านขาออก: สั่งเปิดไม้กั้น 30 วินาที และรอเซนเซอร์/หมดเวลาเพื่อตัดสิทธิ์ QR!
-        const outTimeStr = new Date().toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
-        const outIso = new Date().toISOString();
-        const isRequestNoReturn = Boolean(request.no_return || request.expected_return_time === 'NO_RETURN' || request.leave_type === 'no_return');
-
-        // อัปเดตสถานะเป็น gate_opened (ยังไม่ตัดสิทธิ์ QR code จนกว่าไม้กั้นจะปิด)
-        try {
-          await db.query('UPDATE leave_requests SET status = ? WHERE id = ?', ['gate_opened', request.id]);
-        } catch (e) {
-          console.warn('MySQL update status=gate_opened error:', e.message);
-        }
-
-        saveRequestMeta(request.id, {
-          status: 'gate_opened',
-          gateOpenedAt: outIso,
-          gateOpenTimeStr: outTimeStr,
-          isNoReturn: isRequestNoReturn
-        });
-
-        await db.insertAutoIncrement('scan_logs', {
-          request_id: request.id,
-          qr_token: cleanToken,
-          student_name: studentName,
-          scan_type: 'exit_gate_open',
-          result: 'success',
-          message: `อนุญาตผ่าน (ขาออก) - สั่งเปิดไม้กั้น 30 วินาที (รอเซนเซอร์ตรวจจับหรือครบ 30 วินาทีเพื่อตัดสิทธิ์ QR)`
-        });
-
-        // ตั้งเวลา Fallback 35 วินาที ป้องกันกรณีเซนเซอร์ไม่ทำงาน
-        const safetyTimer = setTimeout(() => {
-          finalizeGateExit(request.id, 'TIMEOUT_30S');
-        }, 35000);
-
-        activeGateSessions.set(request.id, {
-          requestId: request.id,
-          studentName,
-          request,
-          cleanToken,
-          openedAt: Date.now(),
-          timeoutTimer: safetyTimer,
-          isNoReturn: isRequestNoReturn
-        });
-
-        // สั่งบอร์ด ESP32 ยกไม้กั้น 30 วินาที
-        sendGateCommand('OPEN', 30, `${studentName} (ออก)`, request.id);
-
-        sendLineNotification(
-          `\n🚪 [OnePass สแกนผ่านประตู: ไม้กั้นเปิด 30 วินาที]\n` +
-          `• นักเรียน: ${studentName} (${request.users ? request.users.username : '66209010012'})\n` +
-          `• แผนกวิชา: ${request.users && request.users.departments ? request.users.departments.name : 'ช่างยนต์'}\n` +
-          `• ปลายทาง: ${request.destination || 'ธนาคาร / สถาบันการเงิน'}\n` +
-          `• เวลาสแกน: ${outTimeStr} น.\n` +
-          `• กำหนดเวลากลับ: ก่อน ${request.expected_return_time || '15:30'} น.\n` +
-          `• สถานะไม้กั้น: ยกขึ้น 90 องศา (30 วินาที)\n` +
-          `• เงื่อนไข: ไม้กั้นจะปิดลงเมื่อผ่านเซนเซอร์ หรือครบ 30 วินาที (QR Code จะหมดอายุเมื่อไม้กั้นปิดลง)`
-        );
-
-        return res.json({
-          success: true,
-          scanType: 'exit',
-          gateStatus: 'gate_opened',
-          openDuration: 30,
-          isNoReturn: isRequestNoReturn,
-          message: `✅ อนุญาตผ่าน (ขาออก) - ไม้กั้นเปิด 30 วินาทีแล้ว! (${outTimeStr} น.)`,
-          notice: '⏳ ไม้กั้นจะปิดอัตโนมัติเมื่อขับผ่านเซนเซอร์ หรือครบ 30 วินาที (QR Code จะหมดอายุเมื่อไม้กั้นปิดลง)',
-          student: {
-            name: studentName,
-            code: request.users ? request.users.username : '66209010012',
-            classroom: request.users && request.users.classrooms ? request.users.classrooms.name : 'ปวช.3/1'
-          },
-          request: {
-            ...request,
-            status: 'gate_opened'
-          }
-        });
-      }
-
-      // ตรวจสอบกรณีสแกนขากลับเข้า (Entry / Return) -> ไม่ต้องสแกน QR แล้ว
-      if (resolvedAction === 'entry' || resolvedAction === 'return') {
-        return res.json({
-          success: false,
-          reason: '⛔ ขากลับเข้าไม่ต้องสแกน QR ที่ป้อมแล้ว! ให้นักเรียนกดปุ่ม "ฉันกลับถึงวิทยาลัยแล้ว" ในแอป OnePass'
-        });
-      }
-
-      return res.status(400).json({ success: false, reason: 'รูปแบบ scanType ไม่ถูกต้อง (ระบบรับเฉพาะสแกนขาออก)' });
-    } catch (err) {
-      console.error('Scan error:', err);
-      return res.status(500).json({ success: false, reason: err.message });
-    }
-  }
-
-  res.json({ success: true, message: 'สแกนผ่านเรียบร้อย' });
-});
-
-// ============================================================================
-// RETURN BUTTON & CAMPUS VERIFICATION ENGINE (ระบบปุ่ม "กลับมาแล้ว" & ตรวจสอบระยะ)
-// ============================================================================
-
-// 1. นักเรียนกดปุ่ม "ฉันกลับถึงวิทยาลัยแล้ว" จากหน้าแอป
-app.post('/api/gate/return-button', authenticateToken, async (req, res) => {
-  try {
-    const { requestId, distanceCm, clientIp } = req.body;
-    const user = req.user;
-
-    if (!requestId) {
-      return res.status(400).json({ success: false, message: 'กรุณาระบุรหัสคำขอ (requestId)' });
-    }
-
-    let request = null;
-    if (supabase) {
-      request = await db.getLeaveRequestWithStudent(requestId);
-    }
-
-    const meta = getRequestMeta(requestId) || {};
-    if (!request && meta.requestNo) {
-      request = {
-        id: requestId,
-        request_no: meta.requestNo,
-        student_id: user.id,
-        status: meta.status || 'exited',
-        expected_return_time: meta.expectedReturnTime || '15:30',
-        no_return: meta.noReturn,
-        leave_type: meta.leaveType,
-        plate_no: meta.plateNo,
-        users: {
-          full_name: meta.studentName || user.full_name,
-          username: meta.studentCode || user.username,
-          classrooms: { name: meta.classroomName || 'ปวช.3' },
-          departments: { name: meta.deptName || 'แผนกวิชาช่างยนต์' }
-        }
-      };
-    }
-
-    if (!request) {
-      return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลคำร้องขออนุญาตในระบบ' });
-    }
-
-    // 1. ตรวจสอบสิทธิ์ฝั่งเซิร์ฟเวอร์ (ห้ามแอบกดแทนกัน ยกเว้น admin หรือ discipline_head)
-    const isOwner = (request.student_id === user.id) || 
-                    (request.users && request.users.username === user.username) ||
-                    (meta.studentCode === user.username) ||
-                    (user.role === 'admin' || user.role === 'discipline_head');
-
-    if (!isOwner) {
-      return res.status(403).json({ success: false, message: '⛔ คุณไม่มีสิทธิ์กดบันทึกกลับสำหรับคำร้องนี้ (สิทธิ์เฉพาะเจ้าของคำร้อง)' });
-    }
-
-    // 2. ตรวจสอบประเภท "ลากลับบ้าน"
-    const isNoReturn = Boolean(request.no_return || request.expected_return_time === 'NO_RETURN' || request.leave_type === 'no_return' || meta.noReturn);
-    if (isNoReturn) {
-      return res.status(400).json({ success: false, message: 'คำร้องนี้เป็นประเภทลากลับบ้าน ไม่ต้องบันทึกการกลับเข้าวิทยาลัย' });
-    }
-
-    // 3. ตรวจสอบสถานะคำร้อง (ต้องเป็นคำร้องที่สแกนออกไปแล้วเท่านั้น)
-    const currentStatus = meta.status || request.status;
-    if (currentStatus === 'returned') {
-      return res.status(400).json({ success: false, message: 'คำร้องนี้ได้รับการบันทึกกลับเข้าวิทยาลัยเรียบร้อยแล้ว' });
-    }
-
-    if (currentStatus !== 'exited') {
-      return res.status(400).json({ 
-        success: false, 
-        message: `⛔ ไม่สามารถบันทึกกลับได้: คำร้องยังไม่ได้สแกนออกที่ประตูวิทยาลัย (สถานะปัจจุบัน: ${currentStatus})` 
+        message: 'เข้าสู่ระบบสำเร็จ กรุณาเปลี่ยนรหัสผ่านใหม่ก่อนเริ่มใช้งาน'
       });
     }
 
-    // 4. ตรวจสอบเงื่อนไขตำแหน่ง/ระยะจำลอง (ฐานโมเดล 60 ซม.) และ IP เครือข่าย
-    const settings = loadSettings();
-    const maxDistanceCm = Number(settings.returnMaxDistanceCm || 60);
-    const parsedDist = (distanceCm !== undefined && distanceCm !== null && distanceCm !== '') ? Number(distanceCm) : 30.0;
-    
-    // ตรวจสอบระยะ
-    let isDistanceValid = !isNaN(parsedDist) && parsedDist >= 0 && parsedDist <= maxDistanceCm;
-    
-    // ตรวจสอบ IP เครือข่าย (หากเปิดการตั้งค่าไว้)
-    let isIpValid = true;
-    const detectedIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || clientIp || '127.0.0.1';
-    if (settings.returnRequireWifi) {
-      const allowedPrefixes = ['192.168.', '10.', '172.16.', '127.0.0.1', '::1', 'localhost'];
-      isIpValid = allowedPrefixes.some(p => String(detectedIp).includes(p));
-    }
-
-    const isVerified = isDistanceValid && isIpValid;
-    const verificationStatus = isVerified ? 'verified' : 'flagged_review';
-
-    let verificationNote = '';
-    if (!isDistanceValid) {
-      verificationNote = `อยู่นอกระยะจำลอง (${parsedDist} ซม. เกินเกณฑ์ ${maxDistanceCm} ซม.)`;
-    }
-    if (!isIpValid) {
-      verificationNote += (verificationNote ? ' และ ' : '') + `IP เครือข่ายไม่อยู่ในวิทยาลัย (${detectedIp})`;
-    }
-    if (isVerified) {
-      verificationNote = `ตรวจผ่านเงื่อนไข (ระยะจำลอง ${parsedDist} ซม.)`;
-    }
-
-    const inTimeDate = new Date();
-    const inTimeIso = inTimeDate.toISOString();
-    const inTimeStr = inTimeDate.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
-
-    // 5. บันทึกผลลง Supabase
-    if (supabase) {
-      try {
-        const updatePayload = {
-          status: 'returned',
-          actual_return_time: inTimeStr,
-          actual_in_time: inTimeIso,
-          return_method: 'button',
-          return_verification_status: verificationStatus,
-          return_distance_cm: isNaN(parsedDist) ? null : parsedDist,
-          return_ip: String(detectedIp).substring(0, 50),
-          return_note: verificationNote,
-          qr_token: null // Anti-replay: เคลียร์ QR Code ทันที
-        };
-        try {
-          await db.query(
-            `UPDATE leave_requests SET status=?, actual_return_time=?, actual_in_time=?, return_method=?,
-               return_verification_status=?, return_distance_cm=?, return_ip=?, return_note=?, qr_token=? WHERE id=?`,
-            [updatePayload.status, updatePayload.actual_return_time, updatePayload.actual_in_time, updatePayload.return_method,
-             updatePayload.return_verification_status, updatePayload.return_distance_cm, updatePayload.return_ip,
-             updatePayload.return_note, updatePayload.qr_token, requestId]
-          );
-        } catch (updErr) {
-          if (db.isMissingColumnError(updErr)) {
-            await db.query(
-              'UPDATE leave_requests SET status = ?, actual_return_time = ?, qr_token = ? WHERE id = ?',
-              ['returned', inTimeStr, null, requestId]
-            );
-          } else {
-            throw updErr;
-          }
-        }
-      } catch (err) {
-        console.warn('MySQL update return error:', err.message);
-      }
-    }
-
-    // บันทึกลง Metadata File (รองรับ Offline/Local 100%)
-    saveRequestMeta(requestId, {
-      status: 'returned',
-      actualInTime: inTimeIso,
-      actualInTimeStr: inTimeStr,
-      returnMethod: 'button',
-      returnVerificationStatus: verificationStatus,
-      returnDistanceCm: parsedDist,
-      returnIp: detectedIp,
-      returnNote: verificationNote
-    });
-
-    // ล้างตัวติดตามแจ้งเตือนเลยเวลา
-    overdueAlertTracker.delete(requestId);
-
-    const studentName = request.users ? request.users.full_name : (meta.studentName || 'นักเรียน');
-    const studentCode = request.users ? request.users.username : (meta.studentCode || '');
-    const deptName = (request.users && request.users.departments) ? request.users.departments.name : (meta.deptName || 'ช่างยนต์');
-    const classroomName = (request.users && request.users.classrooms) ? request.users.classrooms.name : (meta.classroomName || 'ปวช.3');
-    const plateNo = request.plate_no || meta.plateNo || '-';
-    const expectedTime = request.expected_return_time || meta.expectedReturnTime || '15:30';
-
-    // 6. ส่งแจ้งเตือน Telegram ไปยังฝ่ายปกครอง
-    try {
-      await notifyDisciplineStudentReturn({
-        studentName,
-        studentCode,
-        dept: deptName,
-        classroom: classroomName,
-        plateNo,
-        returnTime: inTimeStr,
-        expectedTime,
-        returnMethod: 'button',
-        verificationStatus,
-        distanceCm: parsedDist,
-        maxDistanceCm,
-        note: verificationNote,
-        notifyMode: settings.returnNotifyMode || 'all'
-      });
-    } catch (tgErr) {
-      console.warn('Notify return telegram error:', tgErr.message);
-    }
-
-    // 7. แจ้งเตือนผ่าน LINE
-    const lineMsg = isVerified
-      ? `\n🏫 [OnePass: นักเรียนกดกลับถึงวิทยาลัยแล้ว]\n👤 ${studentName} (${deptName})\n⏰ เวลา: ${inTimeStr} น. (กำหนด ${expectedTime} น.)\n🎯 ตรวจสอบ: ผ่านเกณฑ์ (ระยะ ${parsedDist} ซม.)`
-      : `\n🚨 [OnePass แจ้งฝ่ายปกครอง: พบการกดกลับผิดเงื่อนไข!]\n👤 ${studentName} (${deptName})\n⏰ เวลา: ${inTimeStr} น.\n⚠️ สาเหตุ: ${verificationNote}\n📌 ระบบติดป้าย "ต้องตรวจสอบ" ให้ฝ่ายปกครองแล้ว`;
-    sendLineNotification(lineMsg);
-
-    return res.json({
-      success: true,
-      verificationStatus,
-      isFlagged: !isVerified,
-      message: isVerified
-        ? `✅ บันทึกการกลับเข้าวิทยาลัยสำเร็จ (${inTimeStr} น.)`
-        : `⚠️ บันทึกการกลับเข้าแล้ว แต่ตรวจพบความผิดปกติ: ${verificationNote} (ติดป้ายต้องตรวจสอบ)`,
-      data: {
-        requestId,
-        studentName,
-        returnTime: inTimeStr,
-        returnMethod: 'button',
-        verificationStatus,
-        distanceCm: parsedDist,
-        verificationNote
-      }
-    });
-  } catch (err) {
-    console.error('Return button exception:', err);
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// 2. ฝ่ายปกครองบันทึกรับเข้าแทนนักเรียน
-app.post('/api/gate/discipline/return-manual', authenticateToken, requireRole(['discipline_head', 'admin']), async (req, res) => {
-  try {
-    const { requestId, note = 'ฝ่ายปกครองบันทึกรับเข้าแทนนักเรียน' } = req.body;
-    const officer = req.user;
-
-    if (!requestId) {
-      return res.status(400).json({ success: false, message: 'กรุณาระบุ requestId' });
-    }
-
-    let request = null;
-    if (supabase) {
-      request = await db.getLeaveRequestWithStudent(requestId);
-    }
-    const meta = getRequestMeta(requestId) || {};
-
-    const inTimeDate = new Date();
-    const inTimeIso = inTimeDate.toISOString();
-    const inTimeStr = inTimeDate.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
-
-    if (supabase) {
-      try {
-        const payload = {
-          status: 'returned',
-          actual_return_time: inTimeStr,
-          actual_in_time: inTimeIso,
-          return_method: 'manual',
-          return_verification_status: 'manual_verified',
-          return_verified_by: officer.id && officer.id.length === 36 ? officer.id : null,
-          return_note: note,
-          qr_token: null
-        };
-        try {
-          await db.query(
-            `UPDATE leave_requests SET status=?, actual_return_time=?, actual_in_time=?, return_method=?,
-               return_verification_status=?, return_verified_by=?, return_note=?, qr_token=? WHERE id=?`,
-            [payload.status, payload.actual_return_time, payload.actual_in_time, payload.return_method,
-             payload.return_verification_status, payload.return_verified_by, payload.return_note, payload.qr_token, requestId]
-          );
-        } catch (error) {
-          if (db.isMissingColumnError(error)) {
-            await db.query(
-              'UPDATE leave_requests SET status = ?, actual_return_time = ?, qr_token = ? WHERE id = ?',
-              ['returned', inTimeStr, null, requestId]
-            );
-          }
-        }
-      } catch (e) {}
-    }
-
-    saveRequestMeta(requestId, {
-      status: 'returned',
-      actualInTime: inTimeIso,
-      actualInTimeStr: inTimeStr,
-      returnMethod: 'manual',
-      returnVerificationStatus: 'manual_verified',
-      returnVerifiedBy: officer.username,
-      returnVerifiedByName: officer.full_name || officer.username,
-      returnNote: note
-    });
-
-    overdueAlertTracker.delete(requestId);
-
-    const studentName = request && request.users ? request.users.full_name : (meta.studentName || 'นักเรียน');
-    const studentCode = request && request.users ? request.users.username : (meta.studentCode || '');
-
-    notifyDisciplineStudentReturn({
-      studentName,
-      studentCode,
-      dept: request && request.users && request.users.departments ? request.users.departments.name : (meta.deptName || '-'),
-      classroom: request && request.users && request.users.classrooms ? request.users.classrooms.name : (meta.classroomName || '-'),
-      plateNo: (request && request.plate_no) || meta.plateNo || '-',
-      returnTime: inTimeStr,
-      expectedTime: (request && request.expected_return_time) || meta.expectedReturnTime || '-',
-      returnMethod: 'manual',
-      verificationStatus: 'manual_verified',
-      note: `${note} (โดย: ${officer.full_name || officer.username})`,
-      notifyMode: 'all'
-    }).catch(() => {});
-
+    // Normal login
+    const fullProfile = await buildUserProfile(user);
     res.json({
       success: true,
-      message: `บันทึกการกลับเข้าแทนนักเรียนเรียบร้อย (${studentName})`,
-      actualInTimeStr: inTimeStr
+      must_change_password: false,
+      message: 'เข้าสู่ระบบสำเร็จ',
+      user: fullProfile
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// 3. ฝ่ายปกครองเพิกถอนรายการกลับเข้าที่กดผิดพลาด
-app.post('/api/gate/discipline/return-revoke', authenticateToken, requireRole(['discipline_head', 'admin']), async (req, res) => {
-  try {
-    const { requestId, reason = 'นักเรียนกดปุ่มผิดพลาด หรือยังอยู่นอกวิทยาลัย' } = req.body;
-    const officer = req.user;
-
-    if (!requestId) {
-      return res.status(400).json({ success: false, message: 'กรุณาระบุ requestId' });
-    }
-
-    if (supabase) {
-      try {
-        const payload = {
-          status: 'exited',
-          actual_in_time: null,
-          return_verification_status: 'revoked',
-          return_note: `เพิกถอนโดย ${officer.full_name || officer.username}: ${reason}`,
-          return_revoked_at: new Date().toISOString(),
-          return_revoked_by: officer.id && officer.id.length === 36 ? officer.id : null
-        };
-        try {
-          await db.query(
-            `UPDATE leave_requests SET status=?, actual_in_time=?, return_verification_status=?,
-               return_note=?, return_revoked_at=?, return_revoked_by=? WHERE id=?`,
-            [payload.status, payload.actual_in_time, payload.return_verification_status,
-             payload.return_note, payload.return_revoked_at, payload.return_revoked_by, requestId]
-          );
-        } catch (error) {
-          if (db.isMissingColumnError(error)) {
-            await db.query('UPDATE leave_requests SET status = ? WHERE id = ?', ['exited', requestId]);
-          }
-        }
-      } catch (e) {}
-    }
-
-    saveRequestMeta(requestId, {
-      status: 'exited',
-      actualInTime: null,
-      actualInTimeStr: null,
-      returnVerificationStatus: 'revoked',
-      returnRevokedAt: new Date().toISOString(),
-      returnRevokedBy: officer.username,
-      returnRevokedByName: officer.full_name || officer.username,
-      returnRevokeReason: reason
-    });
-
-    res.json({
-      success: true,
-      message: 'เพิกถอนรายการกลับเข้าเรียบร้อย สถานะถูกย้อนกลับเป็น "อยู่นอกสถานศึกษา"'
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// 4. ดึงรายการสด Live Returns และสถิติสำหรับฝ่ายปกครอง
-app.get('/api/gate/discipline/live-returns', authenticateToken, async (req, res) => {
-  try {
-    const todayStr = getThaiDateStr();
-    const bkkNow = getBangkokNow();
-    const currentH = bkkNow.getHours();
-    const currentM = bkkNow.getMinutes();
-    const currentTotalMinutes = currentH * 60 + currentM;
-
-    const settings = loadSettings();
-    const dismissalTimeStr = (settings.dismissalTime || '16:30').substring(0, 5);
-    const [disH, disM] = dismissalTimeStr.split(':').map(Number);
-    const dismissalTotalMinutes = disH * 60 + (disM || 0);
-    const isPastDismissal = currentTotalMinutes >= dismissalTotalMinutes;
-
-    let allRequests = [];
-    if (supabase) {
-      const data = await db.getLeaveRequestsWithStudent('', [], 'lr.updated_at DESC');
-      if (data) allRequests = data;
-    }
-
-    const metaAll = loadRequestsMeta();
-
-    const merged = allRequests.map(r => {
-      const meta = metaAll[String(r.id)] || {};
-      const rDate = r.leave_date || (r.created_at ? r.created_at.split('T')[0] : todayStr);
-      const isNoReturn = Boolean(r.no_return || r.expected_return_time === 'NO_RETURN' || r.leave_type === 'no_return' || meta.noReturn);
-      const currentStatus = meta.status || r.status;
-
-      const retTimeStr = (r.expected_return_time || meta.expectedReturnTime || '15:30').substring(0, 5);
-      const [retH, retM] = retTimeStr.split(':').map(Number);
-      const retTotalMinutes = retH * 60 + (retM || 0);
-      const diffMinutes = currentTotalMinutes - retTotalMinutes;
-
-      return {
-        id: r.id,
-        requestNo: r.request_no || meta.requestNo || '-',
-        studentName: r.users ? r.users.full_name : (meta.studentName || 'นักเรียน'),
-        studentCode: r.student_code || (r.users ? r.users.username : (meta.studentCode || '-')),
-        deptName: (r.users && r.users.departments) ? r.users.departments.name : (meta.deptName || '-'),
-        classroomName: (r.users && r.users.classrooms) ? r.users.classrooms.name : (meta.classroomName || '-'),
-        plateNo: r.plate_no || meta.plateNo || '-',
-        phone: (r.users && r.users.phone) || meta.phone || '-',
-        parentPhone: r.parent_phone || (r.users && r.users.parent_phone) || meta.parentPhone || '-',
-        status: currentStatus,
-        date: rDate,
-        isToday: rDate === todayStr,
-        isNoReturn,
-        expectedReturnTime: retTimeStr,
-        actualOutTime: r.actual_out_time || meta.actualOutTime || null,
-        actualOutTimeStr: meta.actualOutTimeStr || (r.actual_out_time ? new Date(r.actual_out_time).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) : '-'),
-        actualInTime: r.actual_in_time || meta.actualInTime || null,
-        actualInTimeStr: meta.actualInTimeStr || r.actual_return_time || (r.actual_in_time ? new Date(r.actual_in_time).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) : '-'),
-        returnMethod: r.return_method || meta.returnMethod || 'button',
-        returnVerificationStatus: r.return_verification_status || meta.returnVerificationStatus || (currentStatus === 'returned' ? 'verified' : 'pending'),
-        returnDistanceCm: r.return_distance_cm !== undefined && r.return_distance_cm !== null ? r.return_distance_cm : (meta.returnDistanceCm || null),
-        returnIp: r.return_ip || meta.returnIp || null,
-        returnNote: r.return_note || meta.returnNote || '',
-        returnVerifiedBy: meta.returnVerifiedByName || meta.returnVerifiedBy || null,
-        returnRevokedAt: r.return_revoked_at || meta.returnRevokedAt || null,
-        returnRevokeReason: meta.returnRevokeReason || null,
-        diffMinutes,
-        isOverdue: currentStatus === 'exited' && !isNoReturn && diffMinutes > 0,
-        isNotReturnedPastDismissal: currentStatus === 'exited' && !isNoReturn && isPastDismissal
-      };
-    }).filter(r => r.isToday || r.status === 'exited');
-
-    const activeOut = merged.filter(r => r.status === 'exited' && !r.isNoReturn);
-    const returnedToday = merged.filter(r => r.status === 'returned');
-    const flaggedReview = merged.filter(r => r.returnVerificationStatus === 'flagged_review');
-    const overdueList = activeOut.filter(r => r.isOverdue);
-    const notReturnedList = activeOut.filter(r => r.isNotReturnedPastDismissal);
-
-    // สถิติแยกตามวิธีกลับ
-    const statsByMethod = {
-      button: returnedToday.filter(r => r.returnMethod === 'button').length,
-      manual: returnedToday.filter(r => r.returnMethod === 'manual').length,
-      scan: returnedToday.filter(r => r.returnMethod === 'scan').length
-    };
-
-    res.json({
-      success: true,
-      timestamp: new Date().toISOString(),
-      counts: {
-        totalExitedToday: activeOut.length + returnedToday.length,
-        currentlyOut: activeOut.length,
-        returnedToday: returnedToday.length,
-        flaggedCount: flaggedReview.length,
-        overdueCount: overdueList.length,
-        notReturnedPastDismissalCount: notReturnedList.length,
-        statsByMethod
-      },
-      activeOut,
-      returnedToday,
-      flaggedReview,
-      overdueList,
-      notReturnedList,
-      dismissalTime: dismissalTimeStr,
-      isPastDismissal
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// ปุ่มสั่งเปิดประตูฉุกเฉิน (ล็อกสิทธิ์ด้วย JWT Middleware เฉพาะงานปกครองหรือ Admin เท่านั้น)
-app.post('/api/gate/manual-open', authenticateToken, requireRole(['discipline_head', 'admin']), (req, res) => {
-  const { duration = 30, reason = 'MANUAL_OVERRIDE' } = req.body;
-  const user = req.user;
-  console.log(`🚨 [GATE MANUAL OPEN] Authorized by ${user.username} (${user.role}) - reason: ${reason}`);
-  sendGateCommand('OPEN', duration, reason);
-  res.json({ success: true, message: `สั่งเปิดประตูแล้ว (${duration} วินาที)` });
-});
-
-// Endpoint จำลองหรือสั่งจำลองการผ่านเซนเซอร์ Ultrasonic (Trigger Sensor Pass)
-app.post('/api/gate/sensor-pass', async (req, res) => {
-  const { requestId, reason = 'SENSOR_PASSED' } = req.body || {};
-  await finalizeGateExit(requestId, reason);
-  sendGateCommand('CLOSE', 0, 'PASS_SENSOR');
-  res.json({ success: true, message: 'เซนเซอร์ตรวจพบการผ่าน ไม้กั้นปิดลงและตัดสิทธิ์ QR เรียบร้อย' });
-});
-
-// ดึงประวัติการสแกนจาก Supabase
-app.get('/api/gate/logs', async (req, res) => {
-  if (supabase) {
-    const data = await db.query('SELECT * FROM scan_logs ORDER BY scanned_at DESC LIMIT ?', [10]);
-    if (data) return res.json({ logs: data });
-  }
-  res.json({ logs: [] });
-});
-
-// Endpoint สำหรับทดสอบยิง LINE Notification
-app.post('/api/test/line', async (req, res) => {
-  const { message = '🔔 ทดสอบการแจ้งเตือน OnePass IoT Smart Gate ผ่าน LINE สำเร็จเรียบร้อย! 🚀' } = req.body;
-  const result = await sendLineNotification(message);
-  res.json({ success: true, result });
-});
-
-// ============================================================================
-// OVERDUE & LATE RETURN MONITORING ENGINE (ระบบเฝ้าระวังคนเลยเวลากลับ 2 จังหวะ)
-// ============================================================================
-const overdueAlertTracker = new Map(); // requestId -> { warned30m: boolean, warnedOverdue15m: boolean, diffMinutes: number }
-
-function getBangkokNow() {
-  const d = new Date();
-  const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
-  return new Date(utc + (3600000 * 7));
-}
-
-async function checkOverdueLeaveRequests() {
-  if (!supabase) return;
-  try {
-    const exitedRequests = await db.getLeaveRequestsWithStudent('lr.status = ?', ['exited']);
-
-    if (!exitedRequests || exitedRequests.length === 0) return;
-
-    const bkkNow = getBangkokNow();
-    const currentH = bkkNow.getHours();
-    const currentM = bkkNow.getMinutes();
-    const currentTotalMinutes = currentH * 60 + currentM;
-    const currentTimeStr = `${String(currentH).padStart(2, '0')}:${String(currentM).padStart(2, '0')} น.`;
-    const todayStr = getThaiDateStr();
-
-    for (const r of exitedRequests) {
-      // ข้ามคำร้องที่เป็นประเภท "ลากลับบ้าน" (ไม่ต้องกลับเข้าวิทยาลัย) ไม่ส่งแจ้งเตือนผิดๆ
-      if (r.no_return || r.expected_return_time === 'NO_RETURN' || r.leave_type === 'no_return') continue;
-
-      const tracker = overdueAlertTracker.get(r.id) || { warned30m: false, warnedOverdue15m: false };
-      const rDate = r.leave_date || (r.created_at ? r.created_at.split('T')[0] : todayStr);
-
-      if (rDate > todayStr) continue;
-
-      const retTimeStr = (r.expected_return_time || '15:30').substring(0, 5);
-      const [retH, retM] = retTimeStr.split(':').map(Number);
-      const returnTotalMinutes = retH * 60 + (retM || 0);
-
-      const isPastDay = rDate < todayStr;
-      const diffMinutes = isPastDay ? 999 : (currentTotalMinutes - returnTotalMinutes);
-
-      const studentName = r.users ? r.users.full_name : (r.student_name || 'นักเรียน');
-      const dept = (r.users && r.users.departments) ? r.users.departments.name : 'แผนกวิชาช่างไฟฟ้า';
-      const plate = r.plate_no || (r.users ? r.users.plate_no : '-');
-      const studentPhone = (r.users && r.users.phone) ? r.users.phone : '-';
-      const parentPhone = r.parent_phone || (r.users ? r.users.parent_phone : '-');
-
-      // จังหวะที่ 1: แจ้งเตือนเมื่อเหลือเวลาไม่เกิน 30 นาที (และยังไม่เลยเวลากลับ)
-      if (diffMinutes >= -30 && diffMinutes < 0) {
-        if (!tracker.warned30m) {
-          tracker.warned30m = true;
-          overdueAlertTracker.set(r.id, tracker);
-
-          const minsLeft = Math.abs(diffMinutes);
-          const msg = `\n⏰ [OnePass: แจ้งเตือนใกล้ครบเวลากลับ]\n━━━━━━━━━━━━━━━━━━━\n👤 นักเรียน: ${studentName} (${dept})\n⏳ เหลือเวลาอีกประมาณ: ${minsLeft} นาที\n📍 กำหนดเวลากลับเข้า: ก่อนเวลา ${retTimeStr} น.\n💡 เมื่อถึงวิทยาลัยแล้ว ให้เปิดแอปและกดปุ่ม "ฉันกลับถึงวิทยาลัยแล้ว"\n━━━━━━━━━━━━━━━━━━━`;
-          await sendLineNotification(msg);
-          console.log(`⏰ [STAGE 1: 30-MIN ALERT] Sent pre-warning to ${studentName} (${minsLeft} mins left)`);
-        }
-      }
-
-      // จังหวะที่ 2: แจ้งเตือนครู & ฝ่ายปกครองเมื่อสายเกิน 15 นาที
-      if (diffMinutes >= 15) {
-        if (!tracker.warnedOverdue15m) {
-          tracker.warnedOverdue15m = true;
-          tracker.overdueMinutes = diffMinutes;
-          overdueAlertTracker.set(r.id, tracker);
-
-          const msg = `\n🚨 [OnePass: นักเรียนยังไม่กดบันทึกกลับเข้า - สายเกิน 15 นาที!]\n━━━━━━━━━━━━━━━━━━━\n👤 นักเรียน: ${studentName} (${dept})\n🚗 ทะเบียนรถ: ${plate}\n⏰ กำหนดเวลากลับ: ${retTimeStr} น.\n⌛ เวลาปัจจุบัน: ${currentTimeStr} (สายแล้ว ${diffMinutes} นาที)\n📌 สถานะ: ยังไม่พบการกดปุ่มกลับเข้าในระบบ\n📞 เบอร์โทรนักเรียน: ${studentPhone}\n👨‍👩‍👧 เบอร์โทรผู้ปกครอง: ${parentPhone}\n━━━━━━━━━━━━━━━━━━━\n*(แจ้งเตือนอัตโนมัติเพื่อความปลอดภัยของนักศึกษา)*`;
-          await sendLineNotification(msg);
-
-          // ส่งแจ้งเตือน Telegram ไปยังฝ่ายปกครอง
-          try {
-            await notifyDisciplineStudentReturn({
-              studentName,
-              studentCode: r.users ? r.users.username : '',
-              dept,
-              classroom: (r.users && r.users.classrooms) ? r.users.classrooms.name : '-',
-              plateNo: plate,
-              returnTime: currentTimeStr,
-              expectedTime: retTimeStr,
-              returnMethod: 'button',
-              verificationStatus: 'flagged_review',
-              note: `เลยกำหนดเวลากลับเกิน 15 นาทีแล้ว (สาย ${diffMinutes} นาที) ยังไม่กดปุ่มกลับเข้า`,
-              notifyMode: 'all'
-            });
-          } catch (e) {}
-
-          console.log(`🚨 [STAGE 2: OVERDUE >15M ALERT] Sent overdue alert for ${studentName} (Overdue: ${diffMinutes} mins)`);
-        }
-      }
-    }
-  } catch (err) {
-    console.warn('Overdue check exception:', err.message);
-  }
-}
-
-// Background checker รันอัตโนมัติทุกๆ 60 วินาที
-setInterval(checkOverdueLeaveRequests, 60000);
-setTimeout(checkOverdueLeaveRequests, 4000);
-
-// API ดึงรายการสถานะ Overdue & Warning สำหรับหน้าเว็บ
-app.get('/api/requests/overdue-status', async (req, res) => {
-  if (!supabase) return res.json({ success: true, overdueCount: 0, warningCount: 0, items: [] });
-  try {
-    const exitedRequests = await db.getLeaveRequestsWithStudent('lr.status = ?', ['exited']);
-
-    const bkkNow = getBangkokNow();
-    const currentH = bkkNow.getHours();
-    const currentM = bkkNow.getMinutes();
-    const currentTotalMinutes = currentH * 60 + currentM;
-    const todayStr = getThaiDateStr();
-
-    const validExited = (exitedRequests || []).filter(r => !(r.no_return || r.expected_return_time === 'NO_RETURN' || r.leave_type === 'no_return'));
-
-    const items = validExited.map(r => {
-      const rDate = r.leave_date || (r.created_at ? r.created_at.split('T')[0] : todayStr);
-      const retTimeStr = (r.expected_return_time || '15:30').substring(0, 5);
-      const [retH, retM] = retTimeStr.split(':').map(Number);
-      const returnTotalMinutes = retH * 60 + (retM || 0);
-      const isPastDay = rDate < todayStr;
-      const diffMinutes = isPastDay ? 999 : (currentTotalMinutes - returnTotalMinutes);
-
-      const tracker = overdueAlertTracker.get(r.id) || {};
-
-      return {
-        id: r.id,
-        requestNo: r.request_no,
-        studentName: r.users ? r.users.full_name : 'นักเรียน',
-        studentCode: r.student_code || (r.users ? r.users.username : ''),
-        deptName: (r.users && r.users.departments) ? r.users.departments.name : 'แผนกวิชาช่างไฟฟ้า',
-        plateNo: r.plate_no || (r.users ? r.users.plate_no : '-'),
-        expectedReturnTime: retTimeStr,
-        parentPhone: r.parent_phone || (r.users ? r.users.parent_phone : '-'),
-        phone: (r.users && r.users.phone) ? r.users.phone : '-',
-        diffMinutes,
-        isWarning30m: diffMinutes >= -30 && diffMinutes < 0,
-        isOverdue15m: diffMinutes >= 15,
-        warned30m: Boolean(tracker.warned30m),
-        warnedOverdue15m: Boolean(tracker.warnedOverdue15m)
-      };
-    });
-
-    const overdueItems = items.filter(i => i.isOverdue15m);
-    const warningItems = items.filter(i => i.isWarning30m);
-
-    res.json({
-      success: true,
-      overdueCount: overdueItems.length,
-      warningCount: warningItems.length,
-      items,
-      overdueItems,
-      warningItems
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// Endpoint จำลองหรือสั่ง Trigger ตรวจสอบทันที
-app.post('/api/test/trigger-overdue-check', async (req, res) => {
-  await checkOverdueLeaveRequests();
-  res.json({
-    success: true,
-    message: 'Triggered overdue check successfully',
-    trackedCount: overdueAlertTracker.size
-  });
-});
-
-// ============================================================================
-// CRON JOB 1: PENDING APPROVAL REMINDERS (ข้อ 7: แจ้งเตือนซ้ำเมื่อค้างในขั้นเดิมเกิน 15 นาที)
-// ============================================================================
-const pendingReminderTracker = new Map(); // `${requestId}_step_${step}` -> lastRemindedTimestamp
-
-async function checkPendingApprovalReminders() {
-  if (!supabase) return { remindedCount: 0 };
-  try {
-    const settings = loadSettings();
-    const thresholdMins = Number(settings.approvalReminderMinutes || 15);
-    const pendingStatusList = ['pending_subject', 'pending_advisor', 'pending_dept_head', 'pending_discipline', 'pending_deputy'];
-    const pendingReqs = await db.getLeaveRequestsWithStudent('lr.status IN (?)', [pendingStatusList]);
-
-    if (!pendingReqs || pendingReqs.length === 0) return { remindedCount: 0 };
-
-    const nowMs = Date.now();
-    let remindedCount = 0;
-
-    for (const r of pendingReqs) {
-      const meta = getRequestMeta(r.request_no) || getRequestMeta(r.id) || {};
-      const currentStep = Number(r.current_step || 1);
-      const totalSteps = meta.totalSteps || 5;
-      const stepEnteredAtMap = meta.stepEnteredAt || {};
-      const enteredIso = stepEnteredAtMap[String(currentStep)] || meta.lastStepAt || r.updated_at || r.created_at;
-      const enteredMs = enteredIso ? new Date(enteredIso).getTime() : nowMs;
-      const waitingMins = Math.floor((nowMs - enteredMs) / 60000);
-
-      if (waitingMins >= thresholdMins) {
-        const trackKey = `${r.id}_step_${currentStep}`;
-        const lastReminded = pendingReminderTracker.get(trackKey) || 0;
-        // แจ้งเตือนซ้ำทุกๆ thresholdMins นาที
-        if (nowMs - lastReminded >= thresholdMins * 60000) {
-          pendingReminderTracker.set(trackKey, nowMs);
-          remindedCount++;
-
-          const reqDept = meta.deptName || (r.users && r.users.departments ? r.users.departments.name : 'แผนกวิชาช่างยนต์');
-          const approvers = resolveStepApproversInfo(reqDept, meta, totalSteps);
-          const targetInfo = approvers[currentStep];
-          const studentName = meta.studentName || (r.users ? r.users.full_name : 'นักเรียน');
-
-          const msg =
-            `\n🔔 [OnePass แจ้งเตือนซ้ำ: คำร้องรออนุมัติค้างเกิน ${thresholdMins} นาที]\n` +
-            `• คำร้อง: ${r.request_no}\n` +
-            `• นักเรียน: ${studentName} (${reqDept})\n` +
-            `• ค้างอยู่ที่ขั้นที่ ${currentStep}/${totalSteps}: ${targetInfo ? targetInfo.roleLabel + ' (' + targetInfo.name + ')' : ''}\n` +
-            `• รอมาแล้ว: ${waitingMins} นาที\n` +
-            `• 💡 หากครูผู้รับผิดชอบติดภารกิจ ผู้อนุมัติแทนสามารถกด "อนุมัติแทน" ในระบบได้ทันที`;
-          await sendLineNotification(msg);
-          console.log(`🔔 [REMINDER SENT] Request ${r.request_no} stuck at step ${currentStep} for ${waitingMins} mins`);
-        }
-      }
-    }
-    return { remindedCount };
-  } catch (err) {
-    console.warn('Pending reminder check error:', err.message);
-    return { remindedCount: 0, error: err.message };
-  }
-}
-
-setInterval(checkPendingApprovalReminders, 60000);
-setTimeout(checkPendingApprovalReminders, 5000);
-
-app.post('/api/test/trigger-reminder-check', async (req, res) => {
-  const result = await checkPendingApprovalReminders();
-  res.json({ success: true, result });
-});
-
-// ============================================================================
-// CRON JOB 2: AUTO-EXPIRE UNAPPROVED BEFORE OPERATING HOURS END & END-OF-DAY
-// (ข้อ 11: คำร้องที่ไม่ได้รับอนุมัติครบก่อนหมดเวลาทำการ ให้หมดอายุอัตโนมัติ)
-// ============================================================================
-let cronStats = {
-  lastRunTime: null,
-  lastExpiredCount: 0,
-  totalExpiredCount: 0,
-  history: []
-};
-
-async function autoExpireEndOfDayRequests(forceAllPastOrMidnight = false) {
-  const bkkNow = getBangkokNow();
-  const todayStr = getThaiDateStr();
-  const currentH = bkkNow.getHours();
-  const currentM = bkkNow.getMinutes();
-  const currentTotalMins = currentH * 60 + currentM;
-
-  const settings = loadSettings();
-  const dismissalMins = parseTimeToMins(settings.dismissalTime || '16:00');
-  const isPastOperatingHours = currentTotalMins >= dismissalMins;
-  // ช่วงสิ้นวัน 23:55 น. ขึ้นไป หรือเที่ยงคืน
-  const isLateNight = (currentH === 23 && currentM >= 55) || (currentH === 0 && currentM <= 5);
-
-  cronStats.lastRunTime = bkkNow.toISOString();
-
-  if (!supabase) return { count: 0, expired: [] };
-
-  try {
-    // ดึงคำร้องทั้งหมดที่ยังเปิดค้างอยู่ (รอตรวจทุกขั้น, อนุมัติแล้ว, หรือสแกนออกแล้วแต่ไม่กลับ)
-    const openStatusList = ['pending_subject', 'pending_advisor', 'pending_dept_head', 'pending_discipline', 'pending_deputy', 'approved', 'exited'];
-    const openRequests = await db.getLeaveRequestsWithStudent('lr.status IN (?)', [openStatusList]);
-
-    if (!openRequests || !openRequests.length) {
-      return { count: 0, expired: [] };
-    }
-
-    const toExpire = [];
-    const unreturnedStudents = [];
-
-    for (const r of openRequests) {
-      const rDate = r.leave_date || (r.created_at ? r.created_at.split('T')[0] : todayStr);
-      const isPastDay = rDate < todayStr;
-      const isTodayMidnight = (rDate === todayStr && isLateNight);
-      const isPendingStatus = r.status && r.status.startsWith('pending_');
-
-      // ข้อ 11: คำร้องของวันนี้ที่ยังไม่ได้รับอนุมัติครบก่อนหมดเวลาทำการ (เช่น 16:00 น.) ให้หมดอายุอัตโนมัติ
-      const isUnapprovedPastDismissal = (
-        settings.autoExpireAfterDismissal !== false &&
-        rDate === todayStr &&
-        isPendingStatus &&
-        isPastOperatingHours
-      );
-
-      if (isPastDay || isTodayMidnight || isUnapprovedPastDismissal || forceAllPastOrMidnight) {
-        toExpire.push({
-          ...r,
-          expireReason: isUnapprovedPastDismissal
-            ? `หมดอายุอัตโนมัติ (ไม่ได้รับอนุมัติครบทุกขั้นก่อนหมดเวลาทำการ ${settings.dismissalTime || '16:00'} น.)`
-            : 'หมดอายุการใช้งานประจำวัน (Cron Job สิ้นวันอัตโนมัติ)'
-        });
-        if (r.status === 'exited') {
-          unreturnedStudents.push(r);
-        }
-      }
-    }
-
-    if (toExpire.length === 0) {
-      return { count: 0, expired: [] };
-    }
-
-    const nowIso = new Date().toISOString();
-    for (const item of toExpire) {
-      await db.query(
-        'UPDATE leave_requests SET status = ?, rejection_reason = ?, updated_at = ? WHERE id = ?',
-        ['expired', item.expireReason, nowIso, item.id]
-      );
-
-      const meta = getRequestMeta(item.request_no) || getRequestMeta(item.id) || {};
-      const historyList = Array.isArray(meta.approvalHistory) ? [...meta.approvalHistory] : [];
-      historyList.push({
-        step: Number(item.current_step || 1),
-        role: 'system',
-        roleLabel: 'ระบบอัตโนมัติ',
-        approverUsername: 'system',
-        approverName: 'ระบบตัดหมดอายุอัตโนมัติ',
-        action: 'expired',
-        note: item.expireReason,
-        actionAt: nowIso
-      });
-      const updatedMeta = { ...meta, approvalHistory: historyList, rejectionReason: item.expireReason, lastStepAt: nowIso };
-      saveRequestMeta(item.request_no, updatedMeta);
-      saveRequestMeta(item.id, updatedMeta);
-    }
-
-    cronStats.lastExpiredCount = toExpire.length;
-    cronStats.totalExpiredCount += toExpire.length;
-    cronStats.history.unshift({
-      timestamp: bkkNow.toISOString(),
-      expiredCount: toExpire.length,
-      unreturnedCount: unreturnedStudents.length
-    });
-    if (cronStats.history.length > 20) cronStats.history.pop();
-
-    console.log(`🌙 [CRON JOB: EXPIRE] Marked ${toExpire.length} leave requests as 'expired' (Date <= ${todayStr})`);
-
-    // ส่งสรุปแจ้งเตือนฝ่ายปกครอง/ครูผ่าน LINE Notify กรณีมีนักเรียนออกแล้วไม่กลับเข้าก่อนสิ้นวัน
-    if (unreturnedStudents.length > 0) {
-      let listNames = unreturnedStudents.map((s, idx) => {
-        const u = s.users || {};
-        return `${idx + 1}. ${u.full_name || s.student_code} (${u.departments?.name || '-'}) [โทร: ${u.phone || '-'}]`;
-      }).join('\n');
-
-      const lineSummary = `\n🌙 [OnePass: สรุปสิ้นวัน - นักเรียนยังไม่กลับเข้าสถานศึกษา]\n━━━━━━━━━━━━━━━━━━━\nพบนักเรียนที่สแกนออกแล้ว แต่ไม่สแกนกลับเข้าก่อนสิ้นวัน จำนวน ${unreturnedStudents.length} คน:\n${listNames}\n━━━━━━━━━━━━━━━━━━━\n*(ระบบ Cron Job ได้เปลี่ยนสถานะ QR เป็น Expired เรียบร้อยแล้ว เพื่อความปลอดภัย)*`;
-      await sendLineNotification(lineSummary);
-    }
-
-    return {
-      count: toExpire.length,
-      expired: toExpire.map(r => ({ id: r.id, requestNo: r.request_no, prevStatus: r.status, date: r.leave_date, reason: r.expireReason }))
-    };
-  } catch (err) {
-    console.warn('⚠️ [CRON: EXPIRE] Exception during autoExpireEndOfDayRequests:', err.message);
-    return { count: 0, error: err.message };
-  }
-}
-
-// ตั้งเวลาให้ Cron Job ตรวจสอบทุกๆ 60 วินาที (และทำงานทันทีเมื่อเริ่มเซิร์ฟเวอร์เพื่อเคลียร์วันเก่า)
-setInterval(autoExpireEndOfDayRequests, 60000);
-setTimeout(autoExpireEndOfDayRequests, 3000);
-
-// API สำหรับ Admin Panel: ดึงสถานะและสั่งให้ Cron Job ตัดสิทธิ์ทันที
-app.get('/api/admin/cron/status', (req, res) => {
-  res.json({
-    success: true,
-    stats: cronStats
-  });
-});
-
-app.post('/api/admin/cron/expire-now', async (req, res) => {
-  const force = req.query.force === 'true' || req.body?.force === true;
-  const result = await autoExpireEndOfDayRequests(force);
-  res.json({
-    success: true,
-    message: `Cron Job ทำงานเรียบร้อย: ปรับสถานะเป็น Expired ทั้งหมด ${result.count} รายการ`,
-    result
-  });
-});
-
-// เริ่มต้นรันเซิร์ฟเวอร์
-
-// ============================================================================
-// STUDENT PRE-REGISTRATION & SELF-ACTIVATION MODULE (Enterprise Roster System)
-// ============================================================================
-
-// Rate Limit & Lockout tracking in memory (IP-level + Account-level)
-const rateLimitByIp = new Map(); // ip -> { count: number, resetAt: number }
-const MAX_IP_ATTEMPTS = 15;      // 15 attempts per 15 minutes per IP
-const IP_WINDOW_MS = 15 * 60 * 1000;
-
-function checkIpRateLimit(req, res) {
-  const clientIp = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
-  const now = Date.now();
-  let rec = rateLimitByIp.get(clientIp);
-  if (!rec || now > rec.resetAt) {
-    rec = { count: 1, resetAt: now + IP_WINDOW_MS };
-    rateLimitByIp.set(clientIp, rec);
-    return true;
-  }
-  rec.count++;
-  if (rec.count > MAX_IP_ATTEMPTS) {
-    const waitMins = Math.ceil((rec.resetAt - now) / 60000);
-    res.status(429).json({
-      success: false,
-      message: `มีการร้องขอจากเครือข่ายนี้บ่อยเกินไป กรุณารออีก ${waitMins} นาที`
-    });
-    return false;
-  }
-  return true;
-}
-
-// Middleware: Admin JWT Authentication (ตรวจ JWT ฝั่งเซิร์ฟเวอร์ทุก endpoint /api/admin/*)
-function requireAdminAuth(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ success: false, message: 'กรุณาเข้าสู่ระบบด้วยสิทธิ์ผู้ดูแลระบบ (Admin)' });
-  }
-  const token = authHeader.split(' ')[1];
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    if (!decoded || decoded.role !== 'admin') {
-      return res.status(403).json({ success: false, message: 'สิทธิ์การเข้าถึงถูกปฏิเสธ: เฉพาะผู้ดูแลระบบ (Admin) เท่านั้น' });
-    }
-    req.adminUser = decoded;
-    next();
-  } catch (err) {
-    return res.status(401).json({ success: false, message: 'เซสชันหมดอายุหรือไม่ถูกต้อง กรุณาเข้าสู่ระบบใหม่' });
-  }
-}
-
-// Middleware: Advisor/Admin JWT Authentication (สำหรับอนุมัติคำขอเปิดบัญชี)
-function requireApproverOrAdminAuth(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ success: false, message: 'กรุณาเข้าสู่ระบบ' });
-  }
-  const token = authHeader.split(' ')[1];
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    const allowed = ['admin', 'advisor', 'dept_head', 'discipline_head'];
-    if (!decoded || !allowed.includes(decoded.role)) {
-      return res.status(403).json({ success: false, message: 'เฉพาะครูที่ปรึกษาหรือแอดมินเท่านั้น' });
-    }
-    req.authUser = decoded;
-    next();
-  } catch (err) {
-    return res.status(401).json({ success: false, message: 'เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่' });
-  }
-}
-
-// ฟังก์ชันแปลงวันเกิด พ.ศ. -> ค.ศ. (ISO: YYYY-MM-DD)
-function parseThaiBirthDateToIso(rawDateStr) {
-  if (!rawDateStr) return null;
-  const str = String(rawDateStr).trim();
-  
-  // รูปแบบ 1: YYYY-MM-DD (ค.ศ. อยู่แล้ว)
-  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
-    const [y, m, d] = str.split('-').map(Number);
-    if (y > 2400) { // ถ้าเป็น พ.ศ. ในฟอร์แมต YYYY-MM-DD
-      return `${y - 543}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-    }
-    return str;
-  }
-
-  // รูปแบบ 2: วว/ดด/ปปปป (เช่น 15/08/2549 หรือ 15-08-2549)
-  const slashMatch = str.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})$/);
-  if (slashMatch) {
-    let day = parseInt(slashMatch[1], 10);
-    let month = parseInt(slashMatch[2], 10);
-    let year = parseInt(slashMatch[3], 10);
-    if (year > 2400) year -= 543; // แปลง พ.ศ. -> ค.ศ.
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-    }
-  }
-
-  // รูปแบบ 3: Date object หรือ timestamp
-  const d = new Date(str);
-  if (!isNaN(d.getTime())) {
-    let y = d.getFullYear();
-    if (y > 2400) y -= 543;
-    return `${y}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  }
-  return null;
-}
-
-// ฟังก์ชันปิดบังชื่อบางส่วนเพื่อความปลอดภัย (Masking e.g. นาย ธ*** รั***)
-function maskStudentName(fullName) {
-  if (!fullName) return '***';
-  const parts = fullName.trim().split(/\s+/);
-  return parts.map(p => {
-    if (p.length <= 2) return p;
-    return p[0] + '*'.repeat(Math.min(3, p.length - 1));
-  }).join(' ');
-}
-
-// ----------------------------------------------------------------------------
-// 1. ดาวน์โหลดไฟล์แม่แบบนักเรียน (Excel/CSV Template)
-// ----------------------------------------------------------------------------
-app.get('/api/admin/student-template', (req, res) => {
-  const csvHeaders = 'รหัสนักศึกษา,คำนำหน้า,ชื่อ,นามสกุล,แผนกวิชา,ห้องเรียน,วันเกิด(วว/ดด/ปปปป พ.ศ.),เบอร์โทร,เบอร์ผู้ปกครอง';
-  const sample1 = '66209010001,นาย,สมชาย,ใจดี,แผนกวิชาช่างยนต์,ปวช.3/1 (ช่างยนต์),15/08/2549,0812345678,0898765432';
-  const sample2 = '67202010002,นางสาว,สมหญิง,รักเรียน,แผนกวิชาการบัญชี,ปวช.2/1 (การบัญชี),20/01/2550,0823456789,0887654321';
-  const sample3 = '68301010003,นาย,อาทิตย์,ยอดเยี่ยม,แผนกวิชาช่างไฟฟ้ากำลัง,ปวส.2/1 (ช่างไฟฟ้ากำลัง),05/11/2547,0834567890,0876543210';
-  
-  const csvContent = '\uFEFF' + [csvHeaders, sample1, sample2, sample3].join('\r\n'); // BOM for Thai in Excel
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="OnePass_Student_Roster_Template.csv"');
-  return res.send(csvContent);
-});
-
-// ----------------------------------------------------------------------------
-// 2. พรีวิวและตรวจสอบไฟล์นำเข้ารายชื่อนักศึกษา (Admin Validation Preview)
-// ----------------------------------------------------------------------------
-app.post('/api/admin/import-students-preview', requireAdminAuth, async (req, res) => {
-  try {
-    const { students } = req.body; // Array of student rows from frontend parser
-    if (!Array.isArray(students) || students.length === 0) {
-      return res.status(400).json({ success: false, message: 'ไม่พบรายการข้อมูลนักเรียนในไฟล์' });
-    }
-
-    // โหลด departments และ classrooms ทั้งหมดจาก Supabase เพื่อนำมาจับคู่
-    let dbDepts = [];
-    let dbClasses = [];
-    if (supabase) {
-      const dData = await db.query('SELECT id, name, code FROM departments');
-      const cData = await db.query('SELECT id, name, department_id, advisor_name FROM classrooms');
-      dbDepts = dData || [];
-      dbClasses = cData || [];
-    }
-
-    // โหลดผู้ใช้ที่มีอยู่แล้วเพื่อตรวจสอบสถานะ
-    let existingStudentsMap = new Map();
-    if (supabase) {
-      const uData = await db.query('SELECT id, username, student_code, full_name, status, classroom_id FROM users');
-      if (uData) {
-        uData.forEach(u => {
-          if (u.student_code) existingStudentsMap.set(u.student_code.trim(), u);
-          if (u.username) existingStudentsMap.set(u.username.trim(), u);
-        });
-      }
-    }
-
-    const previewRows = [];
-    const seenCodesInFile = new Set();
-    let validCount = 0;
-    let conflictCount = 0;
-    let errorCount = 0;
-
-    for (let i = 0; i < students.length; i++) {
-      const row = students[i];
-      const rawCode = String(row.student_code || row.studentCode || row['รหัสนักศึกษา'] || '').trim();
-      const title = String(row.title || row['คำนำหน้า'] || '').trim();
-      const firstName = String(row.first_name || row.firstName || row['ชื่อ'] || '').trim();
-      const lastName = String(row.last_name || row.lastName || row['นามสกุล'] || '').trim();
-      const deptNameInput = String(row.department || row.dept || row['แผนกวิชา'] || '').trim();
-      const classNameInput = String(row.classroom || row.room || row['ห้องเรียน'] || '').trim();
-      const rawBirth = String(row.birth_date || row.birthDate || row['วันเกิด'] || '').trim();
-      const phone = String(row.phone || row['เบอร์โทร'] || '').trim();
-      const parentPhone = String(row.parent_phone || row.parentPhone || row['เบอร์ผู้ปกครอง'] || '').trim();
-
-      const fullName = `${title} ${firstName} ${lastName}`.trim() || String(row.full_name || row['ชื่อ-นามสกุล'] || '').trim();
-      const errors = [];
-
-      // ตรวจสอบรหัสนักศึกษา
-      if (!rawCode) {
-        errors.push('ไม่มีรหัสนักศึกษา');
-      } else if (seenCodesInFile.has(rawCode)) {
-        errors.push('รหัสนักศึกษาซ้ำในไฟล์เดียวกัน');
-      } else {
-        seenCodesInFile.add(rawCode);
-      }
-
-      // ตรวจสอบชื่อ
-      if (!fullName || fullName.length < 3) {
-        errors.push('ชื่อ-นามสกุลไม่ครบถ้วน');
-      }
-
-      // ตรวจสอบและแปลงวันเกิด
-      const birthDateIso = parseThaiBirthDateToIso(rawBirth);
-      if (!birthDateIso) {
-        errors.push('วันเกิดไม่ถูกต้อง (รูปแบบที่แนะนำ: วว/ดด/ปปปป เช่น 15/08/2549)');
-      }
-
-      // จับคู่แผนกวิชา
-      let matchedDept = null;
-      if (deptNameInput) {
-        matchedDept = dbDepts.find(d => 
-          d.name.includes(deptNameInput) || deptNameInput.includes(d.name) || d.code.toLowerCase() === deptNameInput.toLowerCase()
-        );
-      }
-      if (!matchedDept && deptNameInput) {
-        errors.push(`ไม่พบแผนกวิชา "${deptNameInput}" ในระบบ`);
-      }
-
-      // จับคู่ห้องเรียน (Single Source of Truth)
-      let matchedClass = null;
-      if (classNameInput) {
-        matchedClass = dbClasses.find(c => 
-          c.name.includes(classNameInput) || classNameInput.includes(c.name)
-        );
-      }
-      if (!matchedClass && matchedDept) {
-        // หาห้องแรกของแผนกเป็น fallback
-        matchedClass = dbClasses.find(c => c.department_id === matchedDept.id);
-      }
-
-      // ตรวจสอบกับข้อมูลเดิมในระบบ
-      let statusType = 'new'; // 'new' | 'update_pending' | 'already_active'
-      const existing = existingStudentsMap.get(rawCode);
-      if (existing) {
-        if (existing.status === 'active') {
-          statusType = 'already_active';
-          errors.push('บัญชีนี้เปิดใช้งานแล้วในระบบ (ข้ามการอัปเดตรหัสผ่าน)');
-        } else {
-          statusType = 'update_pending';
-        }
-      }
-
-      if (errors.length > 0) {
-        errorCount++;
-      } else if (statusType === 'update_pending') {
-        conflictCount++;
-      } else {
-        validCount++;
-      }
-
-      previewRows.push({
-        rowNumber: i + 1,
-        studentCode: rawCode,
-        fullName,
-        deptId: matchedDept ? matchedDept.id : null,
-        deptName: matchedDept ? matchedDept.name : deptNameInput,
-        classroomId: matchedClass ? matchedClass.id : null,
-        classroomName: matchedClass ? matchedClass.name : classNameInput,
-        advisorName: matchedClass ? matchedClass.advisor_name : null,
-        birthDate: birthDateIso,
-        rawBirthDate: rawBirth,
-        phone,
-        parentPhone,
-        statusType,
-        isValid: errors.length === 0,
-        errors
-      });
-    }
-
-    res.json({
-      success: true,
-      summary: {
-        total: previewRows.length,
-        validCount,
-        conflictCount,
-        errorCount
-      },
-      rows: previewRows,
-      availableDepartments: dbDepts,
-      availableClassrooms: dbClasses
-    });
-  } catch (err) {
-    console.error('import-students-preview error:', err);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการตรวจสอบไฟล์: ' + err.message });
-  }
-});
-
-// ----------------------------------------------------------------------------
-// 3. บันทึกรายชื่อนักศึกษาลงฐานข้อมูลจริง (Commit Roster Import with Audit Log)
-// ----------------------------------------------------------------------------
-app.post('/api/admin/import-students-commit', requireAdminAuth, async (req, res) => {
-  try {
-    const { rows, fileName, updateExistingPending } = req.body;
-    if (!Array.isArray(rows) || rows.length === 0) {
-      return res.status(400).json({ success: false, message: 'ไม่มีรายการข้อมูลที่ต้องบันทึก' });
-    }
-
-    if (!supabase) {
-      return res.status(500).json({ success: false, message: 'ไม่ได้เชื่อมต่อฐานข้อมูล MySQL' });
-    }
-
-    let successCount = 0;
-    let updatedCount = 0;
-    let failedCount = 0;
-    const errorDetails = [];
-
-    for (const r of rows) {
-      if (!r.isValid || !r.studentCode) {
-        failedCount++;
-        errorDetails.push({ code: r.studentCode, error: r.errors?.join(', ') || 'ข้อมูลไม่สมบูรณ์' });
-        continue;
-      }
-
-      try {
-        // ตรวจสอบว่ามีอยู่แล้วหรือไม่
-        const existRows = await db.query(
-          'SELECT id, username, status FROM users WHERE username = ? OR student_code = ?',
-          [r.studentCode, r.studentCode]
-        );
-        const exist = existRows[0];
-
-        if (exist) {
-          if (exist.status === 'active') {
-            // ไม่แตะต้องบัญชีที่ active แล้ว
-            failedCount++;
-            errorDetails.push({ code: r.studentCode, error: 'บัญชีเปิดใช้งานแล้ว ข้ามการบันทึก' });
-            continue;
-          }
-
-          if (updateExistingPending) {
-            // อัปเดตข้อมูลบัญชีที่ยังไม่เปิดใช้งาน
-            await db.query(
-              `UPDATE users SET full_name=?, department_id=?, classroom_id=?, birth_date=?, phone=?,
-                 parent_phone=?, status=? WHERE id=?`,
-              [r.fullName, r.deptId, r.classroomId, r.birthDate, r.phone || null, r.parentPhone || null, 'pending_activation', exist.id]
-            );
-            updatedCount++;
-          } else {
-            failedCount++;
-            errorDetails.push({ code: r.studentCode, error: 'มีข้อมูลเดิมแล้ว (ข้ามตามตัวเลือก)' });
-          }
-        } else {
-          // เพิ่มนักเรียนใหม่ สถานะ pending_activation
-          await db.insertWithUuid('users', {
-            username: r.studentCode,
-            student_code: r.studentCode,
-            password: '', // ยังไม่มีรหัสผ่าน (รอ Activate)
-            full_name: r.fullName,
-            role: 'student',
-            department_id: r.deptId,
-            classroom_id: r.classroomId,
-            birth_date: r.birthDate,
-            phone: r.phone || null,
-            parent_phone: r.parentPhone || null,
-            status: 'pending_activation',
-            failed_attempts: 0
-          });
-
-          successCount++;
-        }
-      } catch (rowErr) {
-        failedCount++;
-        errorDetails.push({ code: r.studentCode, error: rowErr.message });
-      }
-    }
-
-    // บันทึก Audit Log ลงตาราง student_import_logs (ข้อกำหนด 10)
-    try {
-      await db.insertAutoIncrement('student_import_logs', {
-        admin_id: req.adminUser.id || null,
-        admin_username: req.adminUser.username || 'admin',
-        file_name: fileName || 'Imported_File.xlsx',
-        total_rows: rows.length,
-        success_rows: successCount,
-        updated_rows: updatedCount,
-        failed_rows: failedCount,
-        error_summary: JSON.stringify(errorDetails)
-      });
-    } catch (auditErr) {
-      console.warn('Audit log write warning:', auditErr.message);
-    }
-
-    res.json({
-      success: true,
-      message: `บันทึกข้อมูลเรียบร้อย: เพิ่มใหม่ ${successCount} รายการ, อัปเดต ${updatedCount} รายการ, ล้มเหลว/ข้าม ${failedCount} รายการ`,
-      stats: { total: rows.length, successCount, updatedCount, failedCount }
-    });
-  } catch (err) {
-    console.error('import-students-commit error:', err);
-    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาดในการบันทึกข้อมูล: ' + err.message });
-  }
-});
-
-// ----------------------------------------------------------------------------
-// 4. เข้าสู่ระบบของนักเรียนด้วยรหัสนักศึกษาอย่างเดียว (Single-Identifier Login)
-// พร้อมระบบผูกอุปกรณ์ (Device Binding) ป้องกันการเข้าแทนกัน
-// ----------------------------------------------------------------------------
-app.post('/api/auth/student-login', async (req, res) => {
-  if (!checkIpRateLimit(req, res)) return;
-
-  const { studentCode, deviceId, deviceName } = req.body;
-  const genericErrMsg = 'รหัสนักศึกษาไม่ถูกต้อง หรือไม่พบบัญชีในระบบ กรุณาติดต่อครูที่ปรึกษาหรือฝ่ายทะเบียน';
-
-  if (!studentCode) {
-    return res.status(400).json({ success: false, message: genericErrMsg });
-  }
-
-  const cleanCode = String(studentCode).trim();
-  const clientDeviceId = String(deviceId || '').trim();
-  const clientDeviceName = String(deviceName || 'เบราว์เซอร์/อุปกรณ์ที่เข้าใช้งาน').trim();
-  const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
-
-  const deletedUsersSet = loadDeletedUsers();
-  if (deletedUsersSet.has(cleanCode.toLowerCase())) {
-    return res.status(401).json({ success: false, message: '⛔ บัญชีนักเรียนนี้ถูกลบออกจากระบบแล้ว' });
-  }
-
-  try {
-    let studentUser = null;
-
-    // 1. ค้นหาในฐานข้อมูล
-    if (supabase) {
-      try {
-        const data = await db.getUserByCodeOrUsernameWithRelations(cleanCode);
-        if (data && data.role === 'student') {
-          studentUser = data;
-        }
-      } catch (dbErr) {
-        console.warn('MySQL student lookup error:', dbErr.message);
-      }
-    }
-
-    // 2. ค้นหาใน profiles.json / Local Fallback
-    if (!studentUser) {
-      const profiles = loadProfiles();
-      for (const [key, p] of Object.entries(profiles)) {
-        if ((p.student_code === cleanCode || p.username === cleanCode || key.toLowerCase() === cleanCode.toLowerCase()) && (p.role === 'student' || !p.role)) {
-          studentUser = { ...p, username: p.username || key, role: 'student' };
-          break;
-        }
-      }
-    }
-
-    // 3. Fallback demo student
-    if (!studentUser && (cleanCode === '66209010012' || cleanCode === 'student')) {
-      const demo = ALL_SYSTEM_ACCOUNTS['student'];
-      const stored = getStoredProfile('student');
-      studentUser = { ...demo, ...stored };
-    }
-
-    if (!studentUser) {
-      appendLoginLog({
-        student_code: cleanCode,
-        device_id: clientDeviceId,
-        device_name: clientDeviceName,
-        ip_address: clientIp,
-        status: 'failed',
-        reason: 'user_not_found'
-      });
-      return res.status(400).json({ success: false, message: genericErrMsg });
-    }
-
-    // เติมข้อมูลให้สมบูรณ์
-    const storedProf = getStoredProfile(studentUser.username) || {};
-    studentUser = { ...studentUser, ...storedProf };
-    const advisorName = studentUser.advisor_name || studentUser.advisor || (studentUser.classrooms ? studentUser.classrooms.advisor_name : 'ครูที่ปรึกษา');
-    const deptName = studentUser.dept || (studentUser.departments ? studentUser.departments.name : 'แผนกวิชา');
-    const classroomName = studentUser.classroom || (studentUser.classrooms ? studentUser.classrooms.name : 'ปวช.1');
-
-    // บันทึกและอัปเดต Device Binding เป็นอุปกรณ์ปัจจุบัน (เข้าได้ทันทีทุกเครื่อง ไม่ต้องติดหน้าตรวจพบอุปกรณ์ใหม่)
-    const boundDevId = studentUser.bound_device_id || storedProf.bound_device_id || null;
-    const nowIso = new Date().toISOString();
-    const isNewDevice = boundDevId && clientDeviceId && boundDevId !== clientDeviceId;
-    const bindData = {
-      bound_device_id: clientDeviceId || 'dev_' + Date.now(),
-      bound_device_name: clientDeviceName,
-      bound_device_at: nowIso
-    };
-
-    saveStoredProfile(studentUser.username, bindData);
-    if (supabase && studentUser.id) {
-      try {
-        await db.query(
-          'UPDATE users SET bound_device_id = ?, bound_device_name = ?, bound_device_at = ? WHERE id = ?',
-          [bindData.bound_device_id, bindData.bound_device_name, bindData.bound_device_at, studentUser.id]
-        );
-      } catch (e) {}
-    }
-
-    studentUser = { ...studentUser, ...bindData };
-
-    appendLoginLog({
-      student_code: studentUser.student_code || studentUser.username,
-      student_name: studentUser.full_name,
-      device_id: clientDeviceId,
-      device_name: clientDeviceName,
-      ip_address: clientIp,
-      status: 'success'
-    });
-
-    // แจ้งเตือน Telegram หากผูกไว้ (แจ้งเตือนความปลอดภัยแบบ Non-blocking เมื่อมีอุปกรณ์ใหม่)
-    const studentChatId = studentUser.telegram_chat_id || storedProf.telegram_chat_id;
-    if (studentChatId && sendTelegramMessage && isNewDevice) {
-      const msg = `🔔 <b>แจ้งเตือนความปลอดภัย OnePass</b>\n\nมีการเข้าสู่ระบบบัญชีของคุณจากอุปกรณ์:\n📱 <b>อุปกรณ์:</b> ${clientDeviceName}\n🌐 <b>IP:</b> ${clientIp}\n⏰ <b>เวลา:</b> ${new Date().toLocaleTimeString('th-TH')}`;
-      sendTelegramMessage(studentChatId, msg).catch(e => console.warn('TG alert error:', e.message));
-    }
-
-    const token = generateToken(studentUser);
-    console.log(`📱 [STUDENT LOGIN] Student ${studentUser.username} logged in successfully from ${clientDeviceName}`);
-
-    return res.json({
-      success: true,
-      token,
-      user: sanitizeUser(studentUser),
-      need_onboarding: !studentUser.onboarding_completed
-    });
-
-  } catch (err) {
-    console.error('student-login error:', err);
-    res.status(500).json({ success: false, message: genericErrMsg });
-  }
-});
-
-// ----------------------------------------------------------------------------
-// 5. ยืนยัน OTP สำหรับอุปกรณ์ใหม่ของนักเรียน
-// ----------------------------------------------------------------------------
-app.post('/api/auth/verify-device-otp', async (req, res) => {
-  if (!checkIpRateLimit(req, res)) return;
-
-  const { studentCode, otp, deviceId, deviceName } = req.body;
-  if (!studentCode || !otp) {
-    return res.status(400).json({ success: false, message: 'กรุณากรอกรหัส OTP 6 หลัก' });
-  }
-
-  const cleanCode = String(studentCode).trim();
-  const cleanOtp = String(otp).trim();
-  const profiles = loadProfiles();
-  let studentUser = profiles[cleanCode.toLowerCase()] || Object.values(profiles).find(p => p.student_code === cleanCode || p.username === cleanCode);
-
-  if (!studentUser && (cleanCode === '66209010012' || cleanCode === 'student')) {
-    studentUser = { ...ALL_SYSTEM_ACCOUNTS['student'], ...getStoredProfile('student') };
-  }
-
-  if (!studentUser) {
-    return res.status(400).json({ success: false, message: 'ไม่พบข้อมูลนักเรียน' });
-  }
-
-  const storedOtp = studentUser.pending_device_otp;
-  const otpExp = studentUser.pending_device_otp_expires;
-
-  if (!storedOtp || storedOtp !== cleanOtp) {
-    return res.status(400).json({ success: false, message: 'รหัส OTP ไม่ถูกต้อง' });
-  }
-
-  if (otpExp && new Date(otpExp) < new Date()) {
-    return res.status(400).json({ success: false, message: 'รหัส OTP หมดอายุแล้ว กรุณาล็อกอินใหม่อีกครั้ง' });
-  }
-
-  // ผูกเครื่องใหม่สำเร็จ
-  const bindData = {
-    bound_device_id: deviceId || studentUser.pending_device_id || 'dev_' + Date.now(),
-    bound_device_name: deviceName || studentUser.pending_device_name || 'อุปกรณ์ใหม่',
-    bound_device_at: new Date().toISOString(),
-    pending_device_otp: null,
-    pending_device_otp_expires: null
-  };
-
-  saveStoredProfile(studentUser.username, bindData);
-  if (supabase && studentUser.id) {
-    try {
-      await db.query(
-        `UPDATE users SET bound_device_id = ?, bound_device_name = ?, bound_device_at = ?,
-           pending_device_otp = ?, pending_device_otp_expires = ? WHERE id = ?`,
-        [bindData.bound_device_id, bindData.bound_device_name, bindData.bound_device_at,
-         bindData.pending_device_otp, bindData.pending_device_otp_expires, studentUser.id]
-      );
-    } catch (e) {}
-  }
-
-  // อัปเดตสถานะใน device_requests
-  const reqs = loadDeviceRequests();
-  reqs.forEach(r => {
-    if (r.student_code === cleanCode && r.status === 'pending') {
-      r.status = 'approved_by_otp';
-      r.approved_at = new Date().toISOString();
-    }
-  });
-  saveDeviceRequests(reqs);
-
-  appendLoginLog({
-    student_code: studentUser.student_code || studentUser.username,
-    student_name: studentUser.full_name,
-    device_id: bindData.bound_device_id,
-    device_name: bindData.bound_device_name,
-    status: 'success_otp_verified'
-  });
-
-  studentUser = { ...studentUser, ...bindData };
-  const token = generateToken(studentUser);
-
-  res.json({
-    success: true,
-    message: 'ยืนยันตัวตนสำเร็จ ผูกอุปกรณ์ใหม่เรียบร้อยแล้ว',
-    token,
-    user: sanitizeUser(studentUser),
-    need_onboarding: !studentUser.onboarding_completed
-  });
-});
-
-// ----------------------------------------------------------------------------
-// 6. นักเรียนบันทึกข้อมูลเพิ่มเติมครั้งแรก (Onboarding: ทะเบียนรถ, เบอร์โทร, รูปรถ)
-// ----------------------------------------------------------------------------
-app.post('/api/student/onboarding', authenticateToken, async (req, res) => {
-  if (req.user.role !== 'student') {
-    return res.status(403).json({ success: false, message: 'เฉพาะนักเรียนเท่านั้นที่สามารถใช้งานหน้านี้ได้' });
-  }
-
-  const { vehiclePlate, phone, vehiclePhoto } = req.body;
-  const cleanPlate = vehiclePlate ? String(vehiclePlate).trim() : '';
-  const cleanPhone = phone ? String(phone).trim() : '';
-
-  if (vehiclePhoto && vehiclePhoto.length > 5 * 1024 * 1024) {
-    return res.status(400).json({ success: false, message: 'ขนาดไฟล์ภาพรถเกินขีดจำกัด (สูงสุด 3MB)' });
-  }
-
-  const updateData = {
-    plate_no: cleanPlate,
-    vehicle_plate: cleanPlate,
-    phone: cleanPhone,
-    phone_number: cleanPhone,
-    plate_photo: vehiclePhoto || null,
-    vehicle_photo: vehiclePhoto || null,
-    onboarding_completed: true,
-    onboarding_at: new Date().toISOString()
-  };
-
-  saveStoredProfile(req.user.username, updateData);
-  if (supabase && req.user.id) {
-    try {
-      await db.query(
-        `UPDATE users SET plate_no=?, vehicle_plate=?, phone=?, phone_number=?, plate_photo=?, vehicle_photo=?,
-           onboarding_completed=? WHERE id=?`,
-        [updateData.plate_no, updateData.vehicle_plate, updateData.phone, updateData.phone_number,
-         updateData.plate_photo, updateData.vehicle_photo, updateData.onboarding_completed, req.user.id]
-      );
-    } catch (e) {
-      console.warn('Update onboarding to MySQL error:', e.message);
-    }
-  }
-
-  const updatedUser = { ...req.user, ...updateData };
-  console.log(`✅ [ONBOARDING] Completed onboarding for student: ${req.user.username}`);
-
-  res.json({
-    success: true,
-    message: 'บันทึกข้อมูลเพิ่มเติมเรียบร้อยแล้ว',
-    user: sanitizeUser(updatedUser)
-  });
-});
-
-// ----------------------------------------------------------------------------
-// 7. จัดการอุปกรณ์ของนักเรียน (Device Approvals / Reset) สำหรับครูที่ปรึกษาและแอดมิน
-// ----------------------------------------------------------------------------
-app.get('/api/admin/devices/pending', authenticateToken, async (req, res) => {
-  const isAdvisor = req.user.role === 'advisor' || req.user.role === 'teacher';
-  const isAdmin = req.user.role === 'admin' || req.user.role === 'discipline_head';
-
-  if (!isAdvisor && !isAdmin) {
-    return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์เข้าถึง' });
-  }
-
-  let list = loadDeviceRequests().filter(r => r.status === 'pending');
-  if (isAdvisor && !isAdmin) {
-    list = list.filter(r => r.advisor_username === req.user.username || !r.advisor_username);
-  }
-
-  res.json({ success: true, requests: list });
-});
-
-app.post('/api/admin/devices/:id/approve', authenticateToken, async (req, res) => {
-  const isAdvisor = req.user.role === 'advisor' || req.user.role === 'teacher';
-  const isAdmin = req.user.role === 'admin' || req.user.role === 'discipline_head';
-
-  if (!isAdvisor && !isAdmin) {
-    return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์ดำเนินการ' });
-  }
-
-  const reqId = req.params.id;
-  const list = loadDeviceRequests();
-  const target = list.find(r => r.id === reqId);
-
-  if (!target) {
-    return res.status(404).json({ success: false, message: 'ไม่พบรายการคำขอนี้' });
-  }
-
-  target.status = 'approved';
-  target.approved_by = req.user.username;
-  target.approved_at = new Date().toISOString();
-  saveDeviceRequests(list);
-
-  // อัปเดตผูกเครื่องให้นักเรียน
-  const bindData = {
-    bound_device_id: target.device_id,
-    bound_device_name: target.device_name,
-    bound_device_at: new Date().toISOString(),
-    pending_device_otp: null,
-    pending_device_otp_expires: null
-  };
-  saveStoredProfile(target.student_code, bindData);
-
-  if (supabase && target.student_id) {
-    try {
-      await db.query(
-        `UPDATE users SET bound_device_id = ?, bound_device_name = ?, bound_device_at = ?,
-           pending_device_otp = ?, pending_device_otp_expires = ? WHERE id = ?`,
-        [bindData.bound_device_id, bindData.bound_device_name, bindData.bound_device_at,
-         bindData.pending_device_otp, bindData.pending_device_otp_expires, target.student_id]
-      );
-      await db.query('UPDATE device_approval_requests SET status = ? WHERE id = ?', ['approved', target.id]);
-    } catch (e) {}
-  }
-
-  // ส่งแจ้งเตือนหานักเรียนผ่าน Telegram
-  const studentProf = getStoredProfile(target.student_code);
-  if (studentProf && studentProf.telegram_chat_id && sendTelegramMessage) {
-    sendTelegramMessage(
-      studentProf.telegram_chat_id,
-      `✅ <b>อนุมัติอุปกรณ์ใหม่สำเร็จ</b>\n\nครูที่ปรึกษา/ผู้ดูแลระบบได้อนุมัติเครื่อง (${target.device_name}) ให้กับคุณแล้ว ตอนนี้คุณสามารถเข้าสู่ระบบจากเครื่องนี้ได้ทันที`
-    ).catch(e => {});
-  }
-
-  res.json({ success: true, message: 'อนุมัติการผูกอุปกรณ์เรียบร้อยแล้ว' });
-});
-
-app.post('/api/admin/devices/:id/reject', authenticateToken, async (req, res) => {
-  const isAdvisor = req.user.role === 'advisor' || req.user.role === 'teacher';
-  const isAdmin = req.user.role === 'admin' || req.user.role === 'discipline_head';
-
-  if (!isAdvisor && !isAdmin) {
-    return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์ดำเนินการ' });
-  }
-
-  const reqId = req.params.id;
-  const list = loadDeviceRequests();
-  const target = list.find(r => r.id === reqId);
-
-  if (!target) {
-    return res.status(404).json({ success: false, message: 'ไม่พบรายการคำขอนี้' });
-  }
-
-  target.status = 'rejected';
-  target.rejected_by = req.user.username;
-  target.rejected_at = new Date().toISOString();
-  saveDeviceRequests(list);
-
-  res.json({ success: true, message: 'ปฏิเสธคำขอเรียบร้อยแล้ว' });
-});
-
-app.post('/api/admin/devices/reset', authenticateToken, async (req, res) => {
-  const isAdvisor = req.user.role === 'advisor' || req.user.role === 'teacher';
-  const isAdmin = req.user.role === 'admin' || req.user.role === 'discipline_head';
-
-  if (!isAdvisor && !isAdmin) {
-    return res.status(403).json({ success: false, message: 'ไม่มีสิทธิ์ดำเนินการ' });
-  }
-
-  const { studentCode } = req.body;
-  if (!studentCode) {
-    return res.status(400).json({ success: false, message: 'กรุณาระบุรหัสนักศึกษา' });
-  }
-
-  const cleanCode = String(studentCode).trim();
-  const resetData = {
-    bound_device_id: null,
-    bound_device_name: null,
-    bound_device_at: null,
-    pending_device_id: null,
-    pending_device_name: null,
-    pending_device_otp: null,
-    pending_device_otp_expires: null
-  };
-
-  saveStoredProfile(cleanCode, resetData);
-  if (supabase) {
-    try {
-      await db.query(
-        `UPDATE users SET bound_device_id=?, bound_device_name=?, bound_device_at=?, pending_device_id=?,
-           pending_device_name=?, pending_device_otp=?, pending_device_otp_expires=? WHERE student_code=? OR username=?`,
-        [resetData.bound_device_id, resetData.bound_device_name, resetData.bound_device_at, resetData.pending_device_id,
-         resetData.pending_device_name, resetData.pending_device_otp, resetData.pending_device_otp_expires, cleanCode, cleanCode]
-      );
-    } catch (e) {}
-  }
-
-  console.log(`🔄 [DEVICE RESET] Reset bound device for student ${cleanCode} by ${req.user.username}`);
-  res.json({ success: true, message: `รีเซ็ตการผูกอุปกรณ์ของนักเรียน ${cleanCode} เรียบร้อยแล้ว สามารถผูกเครื่องใหม่ได้ทันที` });
-});
-
-// ----------------------------------------------------------------------------
-// 8. นำเข้ารายชื่อนักเรียน (Admin Student Roster Import: Excel / CSV)
-// ----------------------------------------------------------------------------
-app.get('/api/admin/students/template', (req, res) => {
-  const csvContent = '\uFEFF' + [
-    'รหัสนักศึกษา,คำนำหน้า,ชื่อ,นามสกุล,สาขาวิชา,ระดับชั้น,ชั้นปี,ห้อง,ครูที่ปรึกษา(username)',
-    '66209010001,นาย,สมชาย,ใจดี,แผนกวิชาช่างยนต์,ปวช.,1,1,teacher_auto',
-    '66209010002,นางสาว,สมหญิง,รักเรียน,แผนกวิชาการบัญชี,ปวส.,1,2,head_account',
-    '66209010003,นาย,สมศักดิ์,มีทรัพย์,แผนกวิชาช่างไฟฟ้ากำลัง,ปวช.,2,1,teacher_auto'
-  ].join('\r\n');
-
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename=student_roster_template.csv');
-  res.status(200).send(csvContent);
-});
-
-app.post('/api/admin/students/import', authenticateToken, async (req, res) => {
-  const isAdmin = req.user.role === 'admin' || req.user.role === 'discipline_head';
-  if (!isAdmin) {
-    return res.status(403).json({ success: false, message: 'เฉพาะผู้ดูแลระบบเท่านั้นที่สามารถนำเข้ารายชื่อนักเรียนได้' });
-  }
-
-  const { students, commit } = req.body;
-  if (!Array.isArray(students) || students.length === 0) {
-    return res.status(400).json({ success: false, message: 'ไม่พบข้อมูลนักเรียนที่ส่งมา' });
-  }
-
-  const errors = [];
-  const validRows = [];
-  const seenCodes = new Set();
-  const allAccounts = { ...ALL_SYSTEM_ACCOUNTS, ...loadProfiles() };
-
-  students.forEach((row, idx) => {
-    const rowNum = idx + 1;
-    const code = String(row.studentCode || row['รหัสนักศึกษา'] || '').trim();
-    const prefix = String(row.prefix || row['คำนำหน้า'] || '').trim();
-    const firstName = String(row.firstName || row['ชื่อ'] || '').trim();
-    const lastName = String(row.lastName || row['นามสกุล'] || '').trim();
-    const dept = String(row.department || row['สาขาวิชา'] || '').trim();
-    const level = String(row.curriculumLevel || row['ระดับชั้น'] || '').trim();
-    const year = parseInt(row.classYear || row['ชั้นปี'] || 1, 10);
-    const room = parseInt(row.roomNumber || row['ห้อง'] || 1, 10);
-    const advisorUser = String(row.advisorUsername || row['ครูที่ปรึกษา'] || row['ครูที่ปรึกษา(username)'] || '').trim();
-
-    // Validation
-    if (!code) {
-      errors.push({ row: rowNum, field: 'studentCode', message: 'รหัสนักศึกษาต้องไม่ว่างเปล่า' });
-      return;
-    }
-    if (seenCodes.has(code)) {
-      errors.push({ row: rowNum, studentCode: code, field: 'studentCode', message: 'รหัสนักศึกษาซ้ำในไฟล์ที่นำเข้า' });
-      return;
-    }
-    seenCodes.add(code);
-
-    if (!firstName || !lastName) {
-      errors.push({ row: rowNum, studentCode: code, field: 'name', message: 'ชื่อและนามสกุลต้องไม่ว่างเปล่า' });
-      return;
-    }
-
-    if (!dept) {
-      errors.push({ row: rowNum, studentCode: code, field: 'department', message: 'ต้องระบุสาขาวิชา' });
-      return;
-    }
-
-    // ครูที่ปรึกษาต้องมีในระบบ
-    let matchedAdvisor = null;
-    if (advisorUser) {
-      matchedAdvisor = allAccounts[advisorUser.toLowerCase()] || Object.values(allAccounts).find(a => a.username === advisorUser || (a.full_name && a.full_name.includes(advisorUser)));
-      if (!matchedAdvisor) {
-        errors.push({ row: rowNum, studentCode: code, field: 'advisor', message: `ไม่พบบัญชีครูที่ปรึกษา '${advisorUser}' ในระบบ` });
-        return;
-      }
-    }
-
-    const fullName = `${prefix}${firstName} ${lastName}`.trim();
-    const classroomName = `${level}${year}/${room}`;
-
-    validRows.push({
-      student_code: code,
-      username: code,
-      student_prefix: prefix,
-      first_name: firstName,
-      last_name: lastName,
-      full_name: fullName,
-      dept: dept,
-      curriculum_level: level,
-      class_year: year,
-      room_number: room,
-      classroom: classroomName,
-      advisor_username: matchedAdvisor ? matchedAdvisor.username : (advisorUser || 'teacher_auto'),
-      advisor_name: matchedAdvisor ? (matchedAdvisor.full_name || matchedAdvisor.username) : 'อ.อนุสรณ์ ช่างยนต์',
-      role: 'student',
-      status: 'active',
-      onboarding_completed: false
-    });
-  });
-
-  // Preview Mode
-  if (!commit) {
-    return res.json({
-      success: true,
-      preview: true,
-      total: students.length,
-      validCount: validRows.length,
-      invalidCount: errors.length,
-      errors,
-      sample: validRows.slice(0, 10)
-    });
-  }
-
-  // Commit Mode
-  if (errors.length > 0) {
-    return res.status(400).json({
-      success: false,
-      message: `มีข้อผิดพลาดในข้อมูล ${errors.length} รายการ กรุณาตรวจสอบและแก้ไขก่อนบันทึก`,
-      errors
-    });
-  }
-
-  let successCount = 0;
-  for (const s of validRows) {
-    saveStoredProfile(s.username, s);
-    if (supabase) {
-      try {
-        await db.query(
-          `INSERT INTO users (id, username, student_code, full_name, role, status, student_prefix, first_name,
-             last_name, curriculum_level, class_year, room_number, advisor_username, advisor_name, onboarding_completed)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON DUPLICATE KEY UPDATE student_code=VALUES(student_code), full_name=VALUES(full_name),
-             role=VALUES(role), status=VALUES(status), student_prefix=VALUES(student_prefix),
-             first_name=VALUES(first_name), last_name=VALUES(last_name), curriculum_level=VALUES(curriculum_level),
-             class_year=VALUES(class_year), room_number=VALUES(room_number), advisor_username=VALUES(advisor_username),
-             advisor_name=VALUES(advisor_name), onboarding_completed=VALUES(onboarding_completed)`,
-          [crypto.randomUUID(), s.username, s.student_code, s.full_name, 'student', 'active', s.student_prefix,
-           s.first_name, s.last_name, s.curriculum_level, s.class_year, s.room_number, s.advisor_username,
-           s.advisor_name, false]
-        );
-      } catch (e) {
-        console.warn('Upsert to MySQL warning:', e.message);
-      }
-    }
-    successCount++;
-  }
-
-  console.log(`📥 [IMPORT ROSTER] Successfully imported/updated ${successCount} students.`);
-  res.json({
-    success: true,
-    message: `นำเข้ารายชื่อนักเรียนสำเร็จทั้งหมด ${successCount} รายการ`,
-    count: successCount
-  });
-});
-
-// ----------------------------------------------------------------------------
-// 6. นักเรียนขอเปิดบัญชีแบบ "รอยืนยัน" (กรณีไม่มีชื่อในรายชื่อ Excel ตามข้อกำหนด 7)
-// ----------------------------------------------------------------------------
-app.post('/api/auth/request-pending-account', async (req, res) => {
-  if (!checkIpRateLimit(req, res)) return;
-
-  const { studentCode, fullName, departmentId, classroomId, birthDate, phone, parentPhone, note } = req.body;
-  if (!studentCode || !fullName || !departmentId) {
-    return res.status(400).json({ success: false, message: 'กรุณากรอกข้อมูลสำคัญให้ครบถ้วน' });
-  }
-
-  if (!supabase) {
-    return res.status(500).json({ success: false, message: 'ระบบฐานข้อมูลไม่พร้อมใช้งาน' });
-  }
-
-  try {
-    const cleanCode = String(studentCode).trim();
-    // ตรวจสอบว่ามีรหัสนี้อยู่แล้วหรือไม่
-    const existRows = await db.query(
-      'SELECT id, status FROM users WHERE username = ? OR student_code = ?',
-      [cleanCode, cleanCode]
-    );
-    const exist = existRows[0];
-
-    if (exist) {
-      return res.status(400).json({ success: false, message: 'รหัสนักศึกษานี้มีอยู่ในระบบแล้ว' });
-    }
-
-    const isoBirth = parseThaiBirthDateToIso(birthDate);
-
-    // บันทึกสถานะ pending_approval
-    await db.insertWithUuid('users', {
-      username: cleanCode,
-      student_code: cleanCode,
-      password: '',
-      full_name: String(fullName).trim(),
-      role: 'student',
-      department_id: parseInt(departmentId, 10),
-      classroom_id: classroomId ? parseInt(classroomId, 10) : null,
-      birth_date: isoBirth,
-      phone: phone || null,
-      parent_phone: parentPhone || null,
-      status: 'pending_approval',
-      college: 'วิทยาลัยการอาชีพองครักษ์'
-    });
-
-    res.json({
-      success: true,
-      message: 'ยื่นคำขอลงทะเบียนเรียบร้อยแล้ว กรุณาติดต่ออาจารย์ที่ปรึกษาหรือแอดมินเพื่อตรวจสอบและอนุมัติบัญชี'
-    });
-  } catch (err) {
-    console.error('request-pending-account error:', err);
+    console.error('Login error:', err);
     res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด: ' + err.message });
   }
 });
 
-// ----------------------------------------------------------------------------
-// 7. ครูที่ปรึกษา/แอดมิน ดูและอนุมัติบัญชีที่รอยืนยัน (ข้อกำหนด 9)
-// ----------------------------------------------------------------------------
-app.get('/api/admin/pending-approvals', requireApproverOrAdminAuth, async (req, res) => {
-  if (!supabase) return res.json({ success: true, students: [] });
+// Mandatory First-time Password Change
+app.post('/api/auth/change-password-first-time', async (req, res) => {
   try {
-    let whereClause = 'u.status = ?';
-    const params = ['pending_approval'];
+    const { user_id, new_password, confirm_password } = req.body;
 
-    // ถ้าเป็นครูที่ปรึกษา ให้ดูเฉพาะห้องที่ตัวเองเป็นที่ปรึกษา
-    if (req.authUser.role === 'advisor' && req.authUser.classroom_id) {
-      whereClause += ' AND u.classroom_id = ?';
-      params.push(req.authUser.classroom_id);
+    if (!user_id) {
+      return res.status(400).json({ success: false, message: 'ข้อมูลผู้ใช้ไม่ถูกต้อง' });
+    }
+    if (!new_password || new_password.length < 6) {
+      return res.status(400).json({ success: false, message: 'รหัสผ่านใหม่ต้องมีความยาวอย่างน้อย 6 ตัวอักษร' });
+    }
+    if (new_password !== confirm_password) {
+      return res.status(400).json({ success: false, message: 'รหัสผ่านใหม่และการยืนยันไม่ตรงกัน' });
+    }
+    if (new_password === '123456') {
+      return res.status(400).json({ success: false, message: 'รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสผ่านเริ่มต้น (123456)' });
     }
 
-    const data = await db.queryUsersWithRelations(whereClause, params, 'u.created_at DESC');
-    res.json({ success: true, students: (data || []).map(sanitizeUser) });
+    const salt = bcrypt.genSaltSync(10);
+    const hash = bcrypt.hashSync(new_password, salt);
+
+    await query('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?', [hash, user_id]);
+
+    const [users] = await query('SELECT * FROM users WHERE id = ? LIMIT 1', [user_id]);
+    const fullProfile = await buildUserProfile(users[0]);
+
+    res.json({
+      success: true,
+      must_change_password: false,
+      message: 'เปลี่ยนรหัสผ่านเรียบร้อยแล้ว ยินดีต้อนรับเข้าสู่ระบบ OnePass',
+      user: fullProfile
+    });
+  } catch (err) {
+    console.error('Password change error:', err);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด: ' + err.message });
+  }
+});
+
+// Helper endpoint: Get sample test accounts for each role
+app.get('/api/auth/test-accounts', async (req, res) => {
+  try {
+    // 1. Student
+    const [students] = await query(`
+      SELECT u.id, u.username, u.full_name, 'student' AS test_role, 'ผู้เรียน' AS role_label,
+             l.name AS level_name, m.name AS major_name
+      FROM users u
+      JOIN students s ON u.id = s.user_id
+      LEFT JOIN levels l ON s.level_id = l.id
+      LEFT JOIN majors m ON s.major_id = m.id
+      LIMIT 2
+    `);
+
+    // 2. Teachers / Roles
+    // Subject teacher
+    const [subjectTeachers] = await query(`
+      SELECT id, username, full_name, 'subject_teacher' AS test_role, 'ครูรายวิชา' AS role_label
+      FROM users WHERE role = 'teacher' LIMIT 2
+    `);
+
+    // Advisor
+    const [advisors] = await query(`
+      SELECT DISTINCT u.id, u.username, u.full_name, 'advisor' AS test_role, 'ครูที่ปรึกษา' AS role_label,
+             l.name AS level_name, m.name AS major_name
+      FROM advisor_assignments aa
+      JOIN users u ON aa.teacher_id = u.id
+      LEFT JOIN levels l ON aa.level_id = l.id
+      LEFT JOIN majors m ON aa.major_id = m.id
+      LIMIT 2
+    `);
+
+    // Head of Major
+    const [heads] = await query(`
+      SELECT u.id, u.username, u.full_name, 'head_major' AS test_role, 'หัวหน้าแผนก' AS role_label,
+             m.name AS major_name
+      FROM majors m
+      JOIN users u ON m.head_teacher_id = u.id
+      LIMIT 2
+    `);
+
+    // Head of Discipline
+    const [discipline] = await query(`
+      SELECT u.id, u.username, u.full_name, 'head_discipline' AS test_role, 'หัวหน้างานปกครอง' AS role_label
+      FROM gate_duty_assignments g
+      JOIN users u ON g.head_of_discipline_user_id = u.id
+      LIMIT 1
+    `);
+
+    // Deputy Director
+    const [deputy] = await query(`
+      SELECT u.id, u.username, u.full_name, 'deputy_director' AS test_role, 'รองผู้อำนวยการฝ่ายกิจการนักเรียน นักศึกษา' AS role_label
+      FROM users u
+      WHERE u.role = 'deputy_director' OR u.id IN (SELECT deputy_director_user_id FROM gate_duty_assignments)
+      LIMIT 2
+    `);
+
+    res.json({
+      success: true,
+      default_password: '123456',
+      accounts: {
+        student: students,
+        subject_teacher: subjectTeachers,
+        advisor: advisors,
+        head_major: heads,
+        head_discipline: discipline,
+        deputy_director: deputy
+      }
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-app.post('/api/admin/approve-pending-student', requireApproverOrAdminAuth, async (req, res) => {
-  const { studentId, action, reason } = req.body; // action: 'approve' | 'reject'
-  if (!studentId || !['approve', 'reject'].includes(action)) {
-    return res.status(400).json({ success: false, message: 'ข้อมูลคำสั่งไม่ถูกต้อง' });
-  }
+// ==========================================
+// 2. STUDENT ROUTES
+// ==========================================
 
-  if (!supabase) return res.status(500).json({ success: false, message: 'ฐานข้อมูลไม่พร้อมใช้งาน' });
-
+// Get student info and assigned approvers
+app.get('/api/student/info/:userId', async (req, res) => {
   try {
-    if (action === 'approve') {
-      // อนุมัติ: ให้เป็น pending_activation เพื่อให้นักเรียนตั้งรหัสผ่านเอง
-      await db.query('UPDATE users SET status = ? WHERE id = ?', ['pending_activation', studentId]);
-      res.json({ success: true, message: 'อนุมัติบัญชีนักเรียนเรียบร้อยแล้ว (นักเรียนสามารถยืนยันตัวตนและตั้งรหัสผ่านได้แล้ว)' });
+    const userId = parseInt(req.params.userId, 10);
+    const [students] = await query(`
+      SELECT s.*, l.name AS level_name, m.name AS major_name,
+             sp.photo_url AS student_photo, sp.prefix_th, sp.first_name_th, sp.last_name_th,
+             u.full_name, u.username AS student_code
+      FROM students s
+      JOIN users u ON s.user_id = u.id
+      LEFT JOIN levels l ON s.level_id = l.id
+      LEFT JOIN majors m ON s.major_id = m.id
+      LEFT JOIN student_profiles sp ON s.id = sp.student_id
+      WHERE s.user_id = ?
+      LIMIT 1
+    `, [userId]);
+
+    if (students.length === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลผู้เรียน' });
+    }
+
+    const student = students[0];
+    const levelId = student.level_id;
+    const majorId = student.major_id;
+
+    // 1. Advisor
+    let advisor = null;
+    if (levelId && majorId) {
+      const [advRows] = await query(`
+        SELECT aa.teacher_id, u.full_name, u.username
+        FROM advisor_assignments aa
+        JOIN users u ON aa.teacher_id = u.id
+        WHERE aa.level_id = ? AND aa.major_id = ?
+        LIMIT 1
+      `, [levelId, majorId]);
+      if (advRows.length > 0) advisor = advRows[0];
+    }
+
+    // 2. Head of Major
+    let headMajor = null;
+    if (majorId) {
+      const [hmRows] = await query(`
+        SELECT m.head_teacher_id, u.full_name, u.username
+        FROM majors m
+        JOIN users u ON m.head_teacher_id = u.id
+        WHERE m.id = ?
+        LIMIT 1
+      `, [majorId]);
+      if (hmRows.length > 0) headMajor = hmRows[0];
+    }
+
+    // 3. Head of Discipline & Deputy Director
+    let headDiscipline = null;
+    let deputyDirector = null;
+    const [gdRows] = await query(`
+      SELECT g.head_of_discipline_user_id, g.deputy_director_user_id,
+             u1.full_name AS discipline_name, u1.username AS discipline_username,
+             u2.full_name AS deputy_name, u2.username AS deputy_username
+      FROM gate_duty_assignments g
+      LEFT JOIN users u1 ON g.head_of_discipline_user_id = u1.id
+      LEFT JOIN users u2 ON g.deputy_director_user_id = u2.id
+      WHERE g.id = 1
+      LIMIT 1
+    `);
+
+    if (gdRows.length > 0) {
+      const row = gdRows[0];
+      if (row.head_of_discipline_user_id) {
+        headDiscipline = { teacher_id: row.head_of_discipline_user_id, full_name: row.discipline_name, username: row.discipline_username };
+      }
+      if (row.deputy_director_user_id) {
+        deputyDirector = { teacher_id: row.deputy_director_user_id, full_name: row.deputy_name, username: row.deputy_username };
+      }
+    }
+
+    res.json({
+      success: true,
+      student,
+      approvers: {
+        advisor,
+        head_major: headMajor,
+        head_discipline: headDiscipline,
+        deputy_director: deputyDirector
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Get teachers list
+app.get('/api/student/teachers', async (req, res) => {
+  try {
+    const [teachers] = await query(`
+      SELECT id, username, full_name, position
+      FROM users
+      WHERE role = 'teacher'
+      ORDER BY full_name ASC
+    `);
+    res.json({ success: true, teachers });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ==========================================
+// 3. LEAVE REQUESTS ROUTES
+// ==========================================
+
+// Create request
+app.post('/api/requests', async (req, res) => {
+  try {
+    const {
+      user_id,
+      leave_date,
+      leave_time,
+      expected_return_time,
+      is_not_returning,
+      reason,
+      reason_detail,
+      attachment_url,
+      subject_teacher_id
+    } = req.body;
+
+    if (!user_id || !reason || !subject_teacher_id) {
+      return res.status(400).json({ success: false, message: 'กรุณากรอกข้อมูลและเลือกครูรายวิชาให้ครบถ้วน' });
+    }
+
+    // Get student details
+    const [students] = await query('SELECT * FROM students WHERE user_id = ? LIMIT 1', [user_id]);
+    if (students.length === 0) {
+      return res.status(400).json({ success: false, message: 'ไม่พบข้อมูลนักเรียน' });
+    }
+    const student = students[0];
+
+    // Auto-detect approvers
+    let advisorId = subject_teacher_id;
+    let headMajorId = subject_teacher_id;
+    let headDisciplineId = subject_teacher_id;
+    let deputyDirectorId = subject_teacher_id;
+
+    // Advisor
+    const [adv] = await query('SELECT teacher_id FROM advisor_assignments WHERE level_id = ? AND major_id = ? LIMIT 1', [student.level_id, student.major_id]);
+    if (adv.length > 0) advisorId = adv[0].teacher_id;
+
+    // Head of Major
+    const [hm] = await query('SELECT head_teacher_id FROM majors WHERE id = ? LIMIT 1', [student.major_id]);
+    if (hm.length > 0) headMajorId = hm[0].head_teacher_id;
+
+    // Gate duty assignments
+    const [gd] = await query('SELECT head_of_discipline_user_id, deputy_director_user_id FROM gate_duty_assignments WHERE id = 1 LIMIT 1');
+    if (gd.length > 0) {
+      if (gd[0].head_of_discipline_user_id) headDisciplineId = gd[0].head_of_discipline_user_id;
+      if (gd[0].deputy_director_user_id) deputyDirectorId = gd[0].deputy_director_user_id;
+    }
+
+    // Generate Request No
+    const datePrefix = (leave_date || new Date().toISOString().slice(0, 10)).replace(/-/g, '');
+    const [seq] = await query("SELECT COUNT(*) AS total FROM onepass_requests WHERE request_no LIKE ?", [`OP-${datePrefix}-%`]);
+    const seqNum = (seq[0].total || 0) + 1;
+    const requestNo = `OP-${datePrefix}-${String(seqNum).padStart(4, '0')}`;
+
+    const [result] = await query(`
+      INSERT INTO onepass_requests (
+        request_no, student_id, user_id, leave_date, leave_time, expected_return_time,
+        is_not_returning, leave_type, reason, reason_detail, attachment_url,
+        subject_teacher_id, advisor_teacher_id, head_major_teacher_id, head_discipline_user_id, deputy_director_user_id,
+        status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_subject')
+    `, [
+      requestNo,
+      student.id,
+      user_id,
+      leave_date || new Date().toISOString().slice(0, 10),
+      leave_time || '09:00',
+      expected_return_time || null,
+      is_not_returning ? 1 : 0,
+      is_not_returning ? 'leave_school' : 'temporary',
+      reason,
+      reason_detail || '',
+      attachment_url || null,
+      subject_teacher_id,
+      advisorId,
+      headMajorId,
+      headDisciplineId,
+      deputyDirectorId
+    ]);
+
+    const requestId = result.insertId;
+
+    // Log creation
+    await query(`
+      INSERT INTO onepass_logs (request_id, user_id, role_acted, action, comment)
+      VALUES (?, ?, 'student', 'created', ?)
+    `, [requestId, user_id, `ยื่นคำขออนุญาตออกนอกสถานศึกษา รหัส ${requestNo}`]);
+
+    // Send Telegram Notifications (Student + Subject Teacher)
+    (async () => {
+      try {
+        const [studentRows] = await query('SELECT * FROM users WHERE id = ? LIMIT 1', [user_id]);
+        const [teacherRows] = await query('SELECT * FROM users WHERE id = ? LIMIT 1', [subject_teacher_id]);
+        if (studentRows.length > 0 && teacherRows.length > 0) {
+          const reqData = {
+            id: requestId,
+            request_no: requestNo,
+            leave_date: leave_date || new Date().toISOString().slice(0, 10),
+            leave_time: leave_time || '09:00',
+            is_not_returning: is_not_returning ? 1 : 0,
+            reason: reason,
+            reason_detail: reason_detail
+          };
+          await telegram.notifyRequestCreated(reqData, studentRows[0], teacherRows[0]);
+        }
+      } catch (err) {
+        console.error('[Telegram] notifyRequestCreated error:', err.message);
+      }
+    })();
+
+    res.json({
+      success: true,
+      message: `ยื่นคำขอเรียบร้อยแล้ว (รหัส: ${requestNo}) รอครูรายวิชาพิจารณาอนุมัติ`,
+      request_id: requestId,
+      request_no: requestNo
+    });
+  } catch (err) {
+    console.error('Create request error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// List requests
+app.get('/api/requests', async (req, res) => {
+  try {
+    const { userId, role, tab, status } = req.query;
+    const uid = parseInt(userId, 10);
+
+    let sql = `
+      SELECT r.*,
+             u_std.full_name AS student_name, u_std.username AS student_code, u_std.photo_url AS student_photo,
+             l.name AS level_name, m.name AS major_name, s.room,
+             u_sub.full_name AS subject_teacher_name,
+             u_adv.full_name AS advisor_teacher_name,
+             u_hm.full_name AS head_major_teacher_name,
+             u_hd.full_name AS head_discipline_name,
+             u_dep.full_name AS deputy_director_name
+      FROM onepass_requests r
+      JOIN users u_std ON r.user_id = u_std.id
+      JOIN students s ON r.student_id = s.id
+      LEFT JOIN levels l ON s.level_id = l.id
+      LEFT JOIN majors m ON s.major_id = m.id
+      LEFT JOIN users u_sub ON r.subject_teacher_id = u_sub.id
+      LEFT JOIN users u_adv ON r.advisor_teacher_id = u_adv.id
+      LEFT JOIN users u_hm ON r.head_major_teacher_id = u_hm.id
+      LEFT JOIN users u_hd ON r.head_discipline_user_id = u_hd.id
+      LEFT JOIN users u_dep ON r.deputy_director_user_id = u_dep.id
+    `;
+
+    const conditions = [];
+    const params = [];
+
+    if (role === 'student' || tab === 'my') {
+      conditions.push('r.user_id = ?');
+      params.push(uid);
+    } else if (!['admin', 'super_admin'].includes(role)) {
+      if (tab === 'subject') {
+        conditions.push("r.subject_teacher_id = ? AND r.status = 'pending_subject'");
+        params.push(uid);
+      } else if (tab === 'advisor') {
+        conditions.push("r.advisor_teacher_id = ? AND r.status = 'pending_advisor'");
+        params.push(uid);
+      } else if (tab === 'head_major') {
+        conditions.push("r.head_major_teacher_id = ? AND r.status = 'pending_head_major'");
+        params.push(uid);
+      } else if (tab === 'head_discipline') {
+        conditions.push("r.head_discipline_user_id = ? AND r.status = 'pending_head_discipline'");
+        params.push(uid);
+      } else if (tab === 'deputy') {
+        conditions.push("(r.deputy_director_user_id = ? OR ? = 'deputy_director') AND r.status = 'pending_deputy'");
+        params.push(uid, role);
+      } else {
+        conditions.push(`(
+          r.subject_teacher_id = ? OR
+          r.advisor_teacher_id = ? OR
+          r.head_major_teacher_id = ? OR
+          r.head_discipline_user_id = ? OR
+          r.deputy_director_user_id = ?
+        )`);
+        params.push(uid, uid, uid, uid, uid);
+      }
+    }
+
+    if (status) {
+      conditions.push('r.status = ?');
+      params.push(status);
+    }
+
+    if (conditions.length > 0) {
+      sql += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    sql += ' ORDER BY r.id DESC LIMIT 100';
+
+    const [rows] = await query(sql, params);
+    res.json({ success: true, count: rows.length, requests: rows });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Single request detail
+app.get('/api/requests/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const [rows] = await query(`
+      SELECT r.*,
+             u_std.full_name AS student_name, u_std.username AS student_code, u_std.photo_url AS student_photo,
+             l.name AS level_name, m.name AS major_name, s.room, s.phone AS student_phone,
+             u_sub.full_name AS subject_teacher_name,
+             u_adv.full_name AS advisor_teacher_name,
+             u_hm.full_name AS head_major_teacher_name,
+             u_hd.full_name AS head_discipline_name,
+             u_dep.full_name AS deputy_director_name,
+             u_g_out.full_name AS gate_out_staff_name,
+             u_g_in.full_name AS gate_in_staff_name
+      FROM onepass_requests r
+      JOIN users u_std ON r.user_id = u_std.id
+      JOIN students s ON r.student_id = s.id
+      LEFT JOIN levels l ON s.level_id = l.id
+      LEFT JOIN majors m ON s.major_id = m.id
+      LEFT JOIN users u_sub ON r.subject_teacher_id = u_sub.id
+      LEFT JOIN users u_adv ON r.advisor_teacher_id = u_adv.id
+      LEFT JOIN users u_hm ON r.head_major_teacher_id = u_hm.id
+      LEFT JOIN users u_hd ON r.head_discipline_user_id = u_hd.id
+      LEFT JOIN users u_dep ON r.deputy_director_user_id = u_dep.id
+      LEFT JOIN users u_g_out ON r.gate_out_by = u_g_out.id
+      LEFT JOIN users u_g_in ON r.gate_in_by = u_g_in.id
+      WHERE r.id = ?
+      LIMIT 1
+    `, [id]);
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบคำขอนี้' });
+    }
+
+    const request = rows[0];
+
+    // Generate QR Data URL if qr_token exists
+    let qrDataUrl = null;
+    if (request.qr_token) {
+      try {
+        qrDataUrl = await QRCode.toDataURL(request.qr_token, { width: 300, margin: 2 });
+      } catch (e) {
+        console.error('QR generate error:', e);
+      }
+    }
+    request.qr_data_url = qrDataUrl;
+
+    const [logs] = await query(`
+      SELECT l.*, u.full_name AS user_name, u.username
+      FROM onepass_logs l
+      LEFT JOIN users u ON l.user_id = u.id
+      WHERE l.request_id = ?
+      ORDER BY l.id ASC
+    `, [id]);
+
+    res.json({ success: true, request, logs });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Cancel request
+app.post('/api/requests/:id/cancel', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { userId } = req.body;
+
+    const [rows] = await query('SELECT * FROM onepass_requests WHERE id = ? LIMIT 1', [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบคำขอนี้' });
+    }
+    const reqData = rows[0];
+    if (reqData.status === 'approved' || reqData.status === 'completed') {
+      return res.status(400).json({ success: false, message: 'ไม่สามารถยกเลิกคำขอที่ได้รับการอนุมัติแล้ว' });
+    }
+
+    await query("UPDATE onepass_requests SET status = 'cancelled' WHERE id = ?", [id]);
+    await query(`
+      INSERT INTO onepass_logs (request_id, user_id, role_acted, action, comment)
+      VALUES (?, ?, 'student', 'cancelled', 'ผู้ขอยกเลิกคำขอ')
+    `, [id, userId || reqData.user_id]);
+
+    res.json({ success: true, message: 'ยกเลิกคำขอเรียบร้อยแล้ว' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ==========================================
+// 4. APPROVAL WORKFLOW ROUTES (5 Roles)
+// ==========================================
+
+app.post('/api/approvals/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { userId, roleActed, decision, comment } = req.body;
+
+    if (!id || !userId || !roleActed || !decision) {
+      return res.status(400).json({ success: false, message: 'ข้อมูลการอนุมัติไม่ครบถ้วน' });
+    }
+
+    const [rows] = await query('SELECT * FROM onepass_requests WHERE id = ? LIMIT 1', [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบคำขอนี้' });
+    }
+    const current = rows[0];
+
+    // Security Check: Student CANNOT approve any request!
+    const [actingUsers] = await query('SELECT id, username, role, full_name FROM users WHERE id = ? LIMIT 1', [userId]);
+    if (actingUsers.length === 0) {
+      return res.status(401).json({ success: false, message: 'ไม่พบผู้ใช้งานที่ดำเนินการ' });
+    }
+    const actor = actingUsers[0];
+
+    if (actor.role === 'student' || current.user_id === actor.id) {
+      return res.status(403).json({ success: false, message: '⛔ นักเรียนไม่สามารถอนุมัติคำขอของตนเองหรือผู้อื่นได้' });
+    }
+
+    let newStatus = current.status;
+    const now = new Date();
+    const updateFields = [];
+    const updateParams = [];
+
+    // Role-specific fields
+    const roleMap = {
+      subject_teacher: { prefix: 'subject', nextStatus: 'pending_advisor', label: 'ครูรายวิชา' },
+      advisor: { prefix: 'advisor', nextStatus: 'pending_head_major', label: 'ครูที่ปรึกษา' },
+      head_major: { prefix: 'head_major', nextStatus: 'pending_head_discipline', label: 'หัวหน้าแผนก' },
+      head_discipline: { prefix: 'head_discipline', nextStatus: 'pending_deputy', label: 'หัวหน้างานปกครอง' },
+      deputy_director: { prefix: 'deputy_director', nextStatus: 'approved', label: 'รองผู้อำนวยการฝ่ายกิจการนักเรียน นักศึกษา' }
+    };
+
+    const config = roleMap[roleActed];
+    if (!config) {
+      return res.status(400).json({ success: false, message: 'บทบาทผู้ลงนามไม่ถูกต้อง' });
+    }
+
+    // Strict Authorization Check: Only the designated approver for this step (or admin) can approve!
+    const isAdmin = ['admin', 'super_admin'].includes(actor.role);
+    if (!isAdmin) {
+      let isAuthorized = false;
+      if (roleActed === 'subject_teacher' && current.subject_teacher_id === actor.id) isAuthorized = true;
+      else if (roleActed === 'advisor' && current.advisor_teacher_id === actor.id) isAuthorized = true;
+      else if (roleActed === 'head_major' && current.head_major_teacher_id === actor.id) isAuthorized = true;
+      else if (roleActed === 'head_discipline' && current.head_discipline_user_id === actor.id) isAuthorized = true;
+      else if (roleActed === 'deputy_director' && current.deputy_director_user_id === actor.id) isAuthorized = true;
+
+      if (!isAuthorized) {
+        return res.status(403).json({
+          success: false,
+          message: `⛔ ท่านไม่มีสิทธิ์ในการพิจารณาในฐานะ "${config.label}" สำหรับคำขอนี้ เนื่องจากเป็นหน้าที่ของผู้ได้รับมอบหมายในขั้นตอนนี้เท่านั้น`
+        });
+      }
+    }
+
+    const decisionStatus = decision === 'approve' ? 'approved' : 'rejected';
+    updateFields.push(`\`${config.prefix}_status\` = ?`);
+    updateParams.push(decisionStatus);
+
+    updateFields.push(`\`${config.prefix}_comment\` = ?`);
+    updateParams.push(comment || (decision === 'approve' ? 'อนุมัติ' : 'ไม่อนุมัติ'));
+
+    updateFields.push(`\`${config.prefix}_action_at\` = ?`);
+    updateParams.push(now);
+
+    let qrToken = current.qr_token;
+    let qrExpiresAt = current.qr_expires_at;
+
+    if (decision === 'reject') {
+      newStatus = 'rejected';
     } else {
-      // ปฏิเสธ: ลบหรือระงับ
-      await db.query('DELETE FROM users WHERE id = ?', [studentId]);
-      res.json({ success: true, message: 'ปฏิเสธและลบคำขอเรียบร้อยแล้ว' });
+      // Advance to next status
+      newStatus = config.nextStatus;
+      // If final level approved, generate QR Code!
+      if (newStatus === 'approved') {
+        qrToken = 'OP-' + crypto.randomBytes(8).toString('hex').toUpperCase();
+        // QR Code expires in exactly 30 minutes from approval!
+        const expDate = new Date(Date.now() + 30 * 60 * 1000);
+        const pad = n => String(n).padStart(2, '0');
+        qrExpiresAt = `${expDate.getFullYear()}-${pad(expDate.getMonth()+1)}-${pad(expDate.getDate())} ${pad(expDate.getHours())}:${pad(expDate.getMinutes())}:${pad(expDate.getSeconds())}`;
+      }
+    }
+
+    updateFields.push('`status` = ?');
+    updateParams.push(newStatus);
+
+    if (qrToken && !current.qr_token) {
+      updateFields.push('`qr_token` = ?', '`qr_expires_at` = ?');
+      updateParams.push(qrToken, qrExpiresAt);
+    }
+
+    updateParams.push(id);
+    await query(`UPDATE onepass_requests SET ${updateFields.join(', ')} WHERE id = ?`, updateParams);
+
+    // Audit Log
+    const actionLabel = decision === 'approve' ? 'approved' : 'rejected';
+    await query(`
+      INSERT INTO onepass_logs (request_id, user_id, role_acted, action, comment)
+      VALUES (?, ?, ?, ?, ?)
+    `, [id, userId, roleActed, actionLabel, `[${config.label}] ${decision === 'approve' ? 'อนุมัติคำขอ' : 'ไม่อนุมัติคำขอ'}: ${comment || '-'}`]);
+
+    // Send Telegram Notifications (Student + Next Approver)
+    (async () => {
+      try {
+        const [studentRows] = await query('SELECT * FROM users WHERE id = ? LIMIT 1', [current.user_id]);
+        const [actorRows] = await query('SELECT full_name FROM users WHERE id = ? LIMIT 1', [userId]);
+        const actorName = actorRows.length > 0 ? actorRows[0].full_name : config.label;
+
+        let nextApproverUser = null;
+        if (decision === 'approve' && newStatus !== 'approved') {
+          let nextApproverId = null;
+          if (roleActed === 'subject_teacher') nextApproverId = current.advisor_teacher_id;
+          else if (roleActed === 'advisor') nextApproverId = current.head_major_teacher_id;
+          else if (roleActed === 'head_major') nextApproverId = current.head_discipline_user_id;
+          else if (roleActed === 'head_discipline') nextApproverId = current.deputy_director_user_id;
+
+          if (nextApproverId) {
+            const [nextRows] = await query('SELECT * FROM users WHERE id = ? LIMIT 1', [nextApproverId]);
+            if (nextRows.length > 0) nextApproverUser = nextRows[0];
+          }
+        }
+
+        if (studentRows.length > 0) {
+          await telegram.notifyApprovalAction({
+            request: { ...current, qr_token: qrToken || current.qr_token },
+            actorRole: roleActed,
+            actorName: actorName,
+            decision: decision,
+            comment: comment,
+            studentUser: studentRows[0],
+            nextApproverUser: nextApproverUser,
+            isFullyApproved: (newStatus === 'approved')
+          });
+        }
+      } catch (err) {
+        console.error('[Telegram] notifyApprovalAction error:', err.message);
+      }
+    })();
+
+    res.json({
+      success: true,
+      message: `${config.label}ได้ทำการบันทึก${decision === 'approve' ? 'อนุมัติ' : 'ไม่อนุมัติ'}เรียบร้อยแล้ว`,
+      new_status: newStatus,
+      qr_token: qrToken
+    });
+  } catch (err) {
+    console.error('Approval error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ==========================================
+// 5. GATE DUTY & SCANNER ROUTES
+// ==========================================
+
+// Verify pass by QR token or Request No
+app.get('/api/gate/verify/:token', async (req, res) => {
+  try {
+    const token = req.params.token.trim();
+    const [rows] = await query(`
+      SELECT r.*,
+             u_std.full_name AS student_name, u_std.username AS student_code, u_std.photo_url AS student_photo,
+             l.name AS level_name, m.name AS major_name, s.room, s.phone AS student_phone,
+             u_sub.full_name AS subject_teacher_name,
+             u_adv.full_name AS advisor_teacher_name,
+             u_dep.full_name AS deputy_director_name
+      FROM onepass_requests r
+      JOIN users u_std ON r.user_id = u_std.id
+      JOIN students s ON r.student_id = s.id
+      LEFT JOIN levels l ON s.level_id = l.id
+      LEFT JOIN majors m ON s.major_id = m.id
+      LEFT JOIN users u_sub ON r.subject_teacher_id = u_sub.id
+      LEFT JOIN users u_adv ON r.advisor_teacher_id = u_adv.id
+      LEFT JOIN users u_dep ON r.deputy_director_user_id = u_dep.id
+      WHERE r.qr_token = ? OR r.request_no = ?
+      LIMIT 1
+    `, [token, token]);
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, valid: false, message: 'ไม่พบบัตรผ่านหรือรหัส QR Code นี้ในระบบ' });
+    }
+
+    const pass = rows[0];
+    const now = new Date();
+    const isExpired = (pass.status === 'expired') || (pass.qr_expires_at && (new Date(pass.qr_expires_at) < now) && !pass.gate_out_at);
+
+    if (isExpired) {
+      return res.json({
+        success: true,
+        valid: false,
+        is_expired: true,
+        pass,
+        status_label: '❌ บัตรผ่านหมดอายุแล้ว (เกิน 30 นาที) ระบบทำลายรหัส QR อัตโนมัติแล้ว ต้องยื่นขออนุญาตใหม่'
+      });
+    }
+
+    const isApproved = pass.status === 'approved' || pass.status === 'completed';
+
+    let qrDataUrl = null;
+    if (pass.qr_token) {
+      try {
+        qrDataUrl = await QRCode.toDataURL(pass.qr_token, { width: 300, margin: 2 });
+      } catch (e) {
+        console.error('QR generate error:', e);
+      }
+    }
+    pass.qr_data_url = qrDataUrl;
+
+    res.json({
+      success: true,
+      valid: isApproved,
+      pass,
+      status_label: isApproved ? 'บัตรผ่านได้รับอนุมัติถูกต้อง' : `คำขอยังไม่ได้รับการอนุมัติ (สถานะ: ${pass.status})`
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Generate QR Code image directly
+app.get('/api/qrcode', async (req, res) => {
+  try {
+    const text = req.query.text || 'ONEPASS';
+    const dataUrl = await QRCode.toDataURL(text, { width: 250, margin: 2 });
+    res.json({ success: true, text, data_url: dataUrl });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Record Gate Exit (ออกจากสถานศึกษา)
+app.post('/api/gate/check-out', async (req, res) => {
+  try {
+    const { requestId, guardUserId, notes } = req.body;
+    const now = new Date();
+
+    const [checkRows] = await query('SELECT * FROM onepass_requests WHERE id = ?', [requestId]);
+    if (checkRows.length > 0) {
+      const pass = checkRows[0];
+      if ((pass.status === 'expired') || (pass.qr_expires_at && new Date(pass.qr_expires_at) < now && !pass.gate_out_at)) {
+        return res.status(400).json({
+          success: false,
+          message: '❌ บัตรผ่านหมดอายุแล้ว (เกิน 30 นาที) ระบบทำลายรหัสอัตโนมัติแล้ว ไม่สามารถบันทึกเวลาออกได้ ต้องยื่นขออนุญาตใหม่'
+        });
+      }
+    }
+
+    await query(`
+      UPDATE onepass_requests
+      SET gate_out_at = ?, gate_out_by = ?
+      WHERE id = ?
+    `, [now, guardUserId || null, requestId]);
+
+    await query(`
+      INSERT INTO onepass_logs (request_id, user_id, role_acted, action, comment)
+      VALUES (?, ?, 'gate_staff', 'gate_exit', ?)
+    `, [requestId, guardUserId || 1, `บันทึกเวลาออกนอกสถานศึกษา: ${now.toLocaleTimeString('th-TH')} ${notes ? '(' + notes + ')' : ''}`]);
+
+    // Send Telegram Notification to Student
+    (async () => {
+      try {
+        const [reqRows] = await query('SELECT * FROM onepass_requests WHERE id = ? LIMIT 1', [requestId]);
+        if (reqRows.length > 0) {
+          const [stdRows] = await query('SELECT * FROM users WHERE id = ? LIMIT 1', [reqRows[0].user_id]);
+          if (stdRows.length > 0) {
+            await telegram.notifyGateRecord(reqRows[0], stdRows[0], 'exit', now);
+          }
+        }
+      } catch (err) {
+        console.error('[Telegram] notifyGateRecord exit error:', err.message);
+      }
+    })();
+
+    res.json({ success: true, message: 'บันทึกเวลาออกนอกสถานศึกษาสำเร็จ', gate_out_at: now });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Record Gate Return (กลับเข้าสถานศึกษา)
+app.post('/api/gate/check-in', async (req, res) => {
+  try {
+    const { requestId, guardUserId, notes } = req.body;
+    const now = new Date();
+
+    await query(`
+      UPDATE onepass_requests
+      SET gate_in_at = ?, gate_in_by = ?, status = 'completed'
+      WHERE id = ?
+    `, [now, guardUserId || null, requestId]);
+
+    await query(`
+      INSERT INTO onepass_logs (request_id, user_id, role_acted, action, comment)
+      VALUES (?, ?, 'gate_staff', 'gate_return', ?)
+    `, [requestId, guardUserId || 1, `บันทึกเวลากลับเข้าสถานศึกษา: ${now.toLocaleTimeString('th-TH')} ${notes ? '(' + notes + ')' : ''}`]);
+
+    // Send Telegram Notification to Student
+    (async () => {
+      try {
+        const [reqRows] = await query('SELECT * FROM onepass_requests WHERE id = ? LIMIT 1', [requestId]);
+        if (reqRows.length > 0) {
+          const [stdRows] = await query('SELECT * FROM users WHERE id = ? LIMIT 1', [reqRows[0].user_id]);
+          if (stdRows.length > 0) {
+            await telegram.notifyGateRecord(reqRows[0], stdRows[0], 'return', now);
+          }
+        }
+      } catch (err) {
+        console.error('[Telegram] notifyGateRecord return error:', err.message);
+      }
+    })();
+
+    res.json({ success: true, message: 'บันทึกเวลากลับเข้าสถานศึกษาสำเร็จ (สถานะ: สิ้นสุด/สมบูรณ์)', gate_in_at: now });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ==========================================
+// 5.5 ESP32 SMART GATE HARDWARE ENDPOINTS
+// ==========================================
+
+let deviceHardwareState = {
+  online: false,
+  lastSeen: null,
+  wifi: false,
+  wifi_ip: null,
+  ultrasonic: false,
+  ultrasonic_distance: null,
+  button_pressed: false,
+  output_cycle: false,
+  qr_connected: false
+};
+let pendingDeviceCommand = null;
+
+// ESP32 Hardware Status Report (Called by smart_gate_esp32_report.ino every 3 seconds)
+app.post('/api/device/status', (req, res) => {
+  const { wifi, wifi_ip, ultrasonic, ultrasonic_distance, button_pressed, output_cycle, qr_connected } = req.body;
+
+  deviceHardwareState = {
+    online: true,
+    lastSeen: new Date(),
+    wifi: Boolean(wifi),
+    wifi_ip: wifi_ip || null,
+    ultrasonic: Boolean(ultrasonic),
+    ultrasonic_distance: ultrasonic_distance != null ? ultrasonic_distance : -1,
+    button_pressed: Boolean(button_pressed),
+    output_cycle: Boolean(output_cycle),
+    qr_connected: Boolean(qr_connected)
+  };
+
+  const responseObj = { success: true };
+  if (pendingDeviceCommand) {
+    responseObj.command = pendingDeviceCommand;
+    console.log(`[ESP32 Device] Dispatched command to board: ${pendingDeviceCommand}`);
+    pendingDeviceCommand = null; // Clear command after sending
+  }
+
+  res.json(responseObj);
+});
+
+// Get Hardware Status (For Web UI / Admin / Gate Duty)
+app.get('/api/device/status', (req, res) => {
+  const isOnline = Boolean(deviceHardwareState.lastSeen && (Date.now() - new Date(deviceHardwareState.lastSeen).getTime() < 12000));
+  res.json({
+    success: true,
+    device: {
+      ...deviceHardwareState,
+      online: isOnline,
+      lastSeenThai: deviceHardwareState.lastSeen ? telegram.formatThaiDateTime(deviceHardwareState.lastSeen) : 'ยังไม่มีการเชื่อมต่อ'
+    }
+  });
+});
+
+// Send Command to ESP32 (e.g. OPEN_TEST, TEST_SERVO from Web UI)
+app.post('/api/device/command', (req, res) => {
+  const { command } = req.body;
+  const validCommands = ['OPEN_TEST', 'TEST_SERVO', 'TEST_LED_GREEN', 'TEST_LED_RED', 'TEST_LED_YELLOW', 'TEST_RELAY', 'TEST_BUZZER'];
+  if (!validCommands.includes(command)) {
+    return res.status(400).json({ success: false, message: 'คำสั่งไม่ถูกต้อง' });
+  }
+  pendingDeviceCommand = command;
+  console.log(`[ESP32 Device] Admin queued command: ${command}`);
+  res.json({ success: true, message: `ส่งคำสั่ง ${command} ไปยังบอร์ด ESP32 เรียบร้อยแล้ว (บอร์ดจะดำเนินการภายใน 3 วินาที)` });
+});
+
+// ESP32 Gate Scan API (Called by smart_gate_esp32_report.ino when QR scanner reads a token)
+app.post('/api/gate/scan', async (req, res) => {
+  try {
+    const { token, scanType = 'auto' } = req.body;
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'กรุณาระบุรหัส QR Token' });
+    }
+
+    const cleanToken = token.trim();
+    // In case token contains rotating TOTP part (e.g. BASE_TOKEN.TOTP)
+    const baseToken = cleanToken.includes('.') ? cleanToken.split('.')[0] : cleanToken;
+
+    // Look up leave request in MySQL
+    const [rows] = await query(`
+      SELECT r.*, u.full_name AS student_name, u.username AS student_code,
+             l.name AS level_name, m.name AS major_name, s.room
+      FROM onepass_requests r
+      JOIN users u ON r.user_id = u.id
+      JOIN students s ON r.student_id = s.id
+      LEFT JOIN levels l ON s.level_id = l.id
+      LEFT JOIN majors m ON s.major_id = m.id
+      WHERE r.qr_token = ?
+      LIMIT 1
+    `, [baseToken]);
+
+    if (rows.length === 0) {
+      console.warn(`[Gate Scan] QR Token not found: ${cleanToken}`);
+      return res.json({
+        success: false,
+        message: '❌ ไม่พบรหัส QR ในระบบ หรือบัตรผ่านไม่ถูกต้อง'
+      });
+    }
+
+    const pass = rows[0];
+
+    const now = new Date();
+
+    // Check 30-minute expiration if not yet exited:
+    if (!pass.gate_out_at && pass.qr_expires_at) {
+      const expTime = new Date(pass.qr_expires_at);
+      if (now > expTime || pass.status === 'expired') {
+        // Automatically destroy QR code and mark status as 'expired'
+        await query(`
+          UPDATE onepass_requests
+          SET status = 'expired', qr_token = NULL
+          WHERE id = ?
+        `, [pass.id]);
+
+        await query(`
+          INSERT INTO onepass_logs (request_id, user_id, role_acted, action, comment)
+          VALUES (?, 1, 'system', 'expired', 'QR Code หมดอายุ 30 นาที (ระบบทำลายรหัส QR อัตโนมัติ ต้องยื่นขออนุญาตใหม่)')
+        `, [pass.id]);
+
+        console.warn(`[Gate Scan] QR EXPIRED: ${pass.request_no} expired at ${pass.qr_expires_at}`);
+        return res.json({
+          success: false,
+          message: '❌ บัตรผ่านหมดอายุแล้ว (เกิน 30 นาที) ระบบทำลายรหัส QR อัตโนมัติ ไม่สามารถสแกนได้ ต้องยื่นขออนุญาตใหม่'
+        });
+      }
+    }
+
+    // Check approval status
+    if (pass.status !== 'approved' && pass.status !== 'completed') {
+      return res.json({
+        success: false,
+        message: `❌ คำขอนี้ยังไม่ได้รับอนุมัติครบสาย (สถานะ: ${pass.status})`
+      });
+    }
+
+    let actionRecorded = '';
+
+    // Logic: First scan = check-out (gate_out), Second scan = check-in (gate_in)
+    if (!pass.gate_out_at) {
+      // Record exit (ขาออก)
+      await query(`
+        UPDATE onepass_requests
+        SET gate_out_at = NOW(), gate_out_by = COALESCE(gate_out_by, 1)
+        WHERE id = ?
+      `, [pass.id]);
+
+      // If "leave_school" (not returning), mark completed right away
+      if (pass.is_not_returning) {
+        await query(`UPDATE onepass_requests SET status = 'completed' WHERE id = ?`, [pass.id]);
+      }
+
+      actionRecorded = 'exit';
+
+      // Log
+      await query(`
+        INSERT INTO onepass_logs (request_id, user_id, role_acted, action, comment)
+        VALUES (?, 1, 'gate_scanner', 'gate_out', ?)
+      `, [pass.id, `ตู้สแกน ESP32 บันทึกเวลาออก: ${pass.student_name} (${pass.student_code})`]);
+
+      // Notify Student via Telegram
+      const [stdUser] = await query('SELECT * FROM users WHERE id = ?', [pass.user_id]);
+      if (stdUser.length > 0) {
+        telegram.notifyGateRecord(pass, stdUser[0], 'exit', now);
+      }
+    } else if (!pass.gate_in_at && !pass.is_not_returning) {
+      // Record return (ขากลับเข้า)
+      await query(`
+        UPDATE onepass_requests
+        SET gate_in_at = NOW(), gate_in_by = COALESCE(gate_in_by, 1), status = 'completed'
+        WHERE id = ?
+      `, [pass.id]);
+
+      actionRecorded = 'return';
+
+      // Log
+      await query(`
+        INSERT INTO onepass_logs (request_id, user_id, role_acted, action, comment)
+        VALUES (?, 1, 'gate_scanner', 'gate_in', ?)
+      `, [pass.id, `ตู้สแกน ESP32 บันทึกเวลากลับเข้า: ${pass.student_name} (${pass.student_code})`]);
+
+      // Notify Student via Telegram
+      const [stdUser] = await query('SELECT * FROM users WHERE id = ?', [pass.user_id]);
+      if (stdUser.length > 0) {
+        telegram.notifyGateRecord(pass, stdUser[0], 'return', now);
+      }
+    } else {
+      // Already exited and returned
+      return res.json({
+        success: false,
+        message: '⛔ บัตรผ่านนี้ได้ใช้งานบันทึกเวลาออกและกลับเข้าเรียบร้อยแล้ว (สถานะเสร็จสิ้น)'
+      });
+    }
+
+    console.log(`[Gate Scan] SUCCESS: ${pass.request_no} - ${pass.student_name} (${actionRecorded})`);
+
+    // Return success to ESP32 so it executes testOpenSequence() to lift barrier!
+    res.json({
+      success: true,
+      action: actionRecorded,
+      message: `✅ สแกนสำเร็จ (${actionRecorded === 'exit' ? 'บันทึกเวลาออก' : 'บันทึกเวลากลับ'}) เปิดไม้กั้น`,
+      openDuration: 4,
+      student: {
+        name: pass.student_name,
+        code: pass.student_code,
+        level: pass.level_name,
+        major: pass.major_name,
+        room: pass.room
+      }
+    });
+  } catch (err) {
+    console.error('[Gate Scan] Error:', err);
+    res.status(500).json({ success: false, message: 'เกิดข้อผิดพลาด: ' + err.message });
+  }
+});
+
+// ==========================================
+// 6. ADMIN ROUTES (จัดการผู้ใช้, ติดตามสถานะ, กำหนดภาคเรียน)
+// ==========================================
+
+// Dashboard Statistics
+app.get('/api/admin/stats', async (req, res) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+
+    const [reqStats] = await query(`
+      SELECT 
+        COUNT(*) AS total_all,
+        SUM(CASE WHEN leave_date = ? THEN 1 ELSE 0 END) AS total_today,
+        SUM(CASE WHEN status LIKE 'pending_%' THEN 1 ELSE 0 END) AS pending_count,
+        SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved_count,
+        SUM(CASE WHEN gate_out_at IS NOT NULL AND gate_in_at IS NULL THEN 1 ELSE 0 END) AS currently_out_count,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+        SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected_count
+      FROM onepass_requests
+    `, [today]);
+
+    const [userStats] = await query(`
+      SELECT 
+        COUNT(*) AS total_users,
+        SUM(CASE WHEN role = 'student' THEN 1 ELSE 0 END) AS total_students,
+        SUM(CASE WHEN role = 'teacher' THEN 1 ELSE 0 END) AS total_teachers,
+        SUM(CASE WHEN role = 'deputy_director' THEN 1 ELSE 0 END) AS total_deputies,
+        SUM(CASE WHEN role IN ('admin', 'super_admin') THEN 1 ELSE 0 END) AS total_admins
+      FROM users
+    `);
+
+    const [termInfo] = await query('SELECT academic_year, semester FROM academic_term WHERE id = 1 LIMIT 1');
+
+    res.json({
+      success: true,
+      stats: {
+        ...reqStats[0],
+        ...userStats[0],
+        academic_year: termInfo.length > 0 ? termInfo[0].academic_year : '2569',
+        semester: termInfo.length > 0 ? termInfo[0].semester : '2'
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// User Management: List Users
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const { search, role, page = 1, limit = 50 } = req.query;
+    const offset = (parseInt(page, 10) - 1) * parseInt(limit, 10);
+
+    let sql = `
+      SELECT u.id, u.username, u.full_name, u.role, u.position, u.email, u.telegram_chat_id,
+             u.must_change_password, u.created_at,
+             s.student_code, l.name AS level_name, m.name AS major_name, s.room
+      FROM users u
+      LEFT JOIN students s ON u.id = s.user_id
+      LEFT JOIN levels l ON s.level_id = l.id
+      LEFT JOIN majors m ON s.major_id = m.id
+    `;
+    const conditions = [];
+    const params = [];
+
+    if (search) {
+      conditions.push('(u.username LIKE ? OR u.full_name LIKE ? OR s.student_code LIKE ?)');
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    }
+
+    if (role && role !== 'all') {
+      conditions.push('u.role = ?');
+      params.push(role);
+    }
+
+    if (conditions.length > 0) {
+      sql += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    sql += ' ORDER BY u.id DESC LIMIT ? OFFSET ?';
+    params.push(parseInt(limit, 10), offset);
+
+    const [users] = await query(sql, params);
+    res.json({ success: true, count: users.length, users });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// User Management: Create User
+app.post('/api/admin/users', async (req, res) => {
+  try {
+    const { username, full_name, role, position, email, telegram_chat_id } = req.body;
+
+    if (!username || !full_name || !role) {
+      return res.status(400).json({ success: false, message: 'กรุณากรอกรหัสผู้ใช้ ชื่อ-สกุล และบทบาท' });
+    }
+
+    const [existing] = await query('SELECT id FROM users WHERE username = ? LIMIT 1', [username.trim()]);
+    if (existing.length > 0) {
+      return res.status(400).json({ success: false, message: `รหัสผู้ใช้ ${username} มีอยู่ในระบบแล้ว` });
+    }
+
+    // Default password '123456'
+    const salt = bcrypt.genSaltSync(10);
+    const hash = bcrypt.hashSync('123456', salt);
+
+    const [result] = await query(`
+      INSERT INTO users (username, full_name, role, position, email, telegram_chat_id, password_hash, must_change_password)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+    `, [username.trim(), full_name.trim(), role, position || null, email || null, telegram_chat_id || null, hash]);
+
+    res.json({
+      success: true,
+      message: `เพิ่มผู้ใช้ ${full_name} เรียบร้อยแล้ว (รหัสผ่านเริ่มต้น: 123456)`,
+      user_id: result.insertId
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// User Management: Get Single User Details (with Student Profile if student)
+app.get('/api/admin/users/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const [users] = await query('SELECT * FROM users WHERE id = ? LIMIT 1', [id]);
+    if (users.length === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบผู้ใช้' });
+    }
+    const user = users[0];
+
+    let studentData = null;
+    let profileData = null;
+
+    if (user.role === 'student') {
+      const [students] = await query('SELECT * FROM students WHERE user_id = ? LIMIT 1', [id]);
+      if (students.length > 0) {
+        studentData = students[0];
+        const [profiles] = await query('SELECT * FROM student_profiles WHERE student_id = ? LIMIT 1', [studentData.id]);
+        if (profiles.length > 0) profileData = profiles[0];
+      }
+    }
+
+    res.json({
+      success: true,
+      user,
+      student: studentData,
+      profile: profileData
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// User Management: Edit User (Supports Full Student/Teacher Profile Updates)
+app.put('/api/admin/users/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const {
+      full_name, role, position, email, telegram_chat_id,
+      // Student specific fields
+      student_code, phone, level_id, major_id, room, student_status,
+      prefix_th, first_name_th, last_name_th, father_phone, mother_phone
+    } = req.body;
+
+    // 1. Update users table
+    await query(`
+      UPDATE users
+      SET full_name = ?, role = ?, position = ?, email = ?, telegram_chat_id = ?
+      WHERE id = ?
+    `, [full_name.trim(), role, position || null, email || null, telegram_chat_id || null, id]);
+
+    // 2. If student or student fields provided, update students & student_profiles
+    if (role === 'student' || level_id || major_id || student_status) {
+      const [existingStudents] = await query('SELECT id FROM students WHERE user_id = ? LIMIT 1', [id]);
+      let studentId = null;
+
+      // Get major department name
+      let deptName = null;
+      if (major_id) {
+        const [m] = await query('SELECT name FROM majors WHERE id = ? LIMIT 1', [major_id]);
+        if (m.length > 0) deptName = m[0].name;
+      }
+
+      // Get education level name
+      let eduLevel = null;
+      if (level_id) {
+        const [l] = await query('SELECT name FROM levels WHERE id = ? LIMIT 1', [level_id]);
+        if (l.length > 0) eduLevel = l[0].name;
+      }
+
+      if (existingStudents.length > 0) {
+        studentId = existingStudents[0].id;
+        await query(`
+          UPDATE students
+          SET student_code = COALESCE(?, student_code),
+              phone = ?,
+              level_id = ?,
+              major_id = ?,
+              department = COALESCE(?, department),
+              education_level = COALESCE(?, education_level),
+              room = ?,
+              student_status = COALESCE(?, student_status)
+          WHERE id = ?
+        `, [
+          student_code || null,
+          phone || null,
+          level_id || null,
+          major_id || null,
+          deptName,
+          eduLevel,
+          room || null,
+          student_status || 'studying',
+          studentId
+        ]);
+      } else {
+        // Insert student record if didn't exist
+        const [ins] = await query(`
+          INSERT INTO students (user_id, student_code, department, education_level, room, phone, level_id, major_id, student_status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+          id,
+          student_code || req.body.username || '',
+          deptName,
+          eduLevel,
+          room || null,
+          phone || null,
+          level_id || null,
+          major_id || null,
+          student_status || 'studying'
+        ]);
+        studentId = ins.insertId;
+      }
+
+      // 3. Update student_profiles if present
+      if (studentId) {
+        const [existingProfiles] = await query('SELECT student_id FROM student_profiles WHERE student_id = ? LIMIT 1', [studentId]);
+        if (existingProfiles.length > 0) {
+          await query(`
+            UPDATE student_profiles
+            SET prefix_th = COALESCE(?, prefix_th),
+                first_name_th = COALESCE(?, first_name_th),
+                last_name_th = COALESCE(?, last_name_th),
+                father_phone = COALESCE(?, father_phone),
+                mother_phone = COALESCE(?, mother_phone)
+            WHERE student_id = ?
+          `, [
+            prefix_th || null,
+            first_name_th || null,
+            last_name_th || null,
+            father_phone || null,
+            mother_phone || null,
+            studentId
+          ]);
+        } else if (prefix_th || first_name_th || last_name_th) {
+          await query(`
+            INSERT INTO student_profiles (student_id, prefix_th, first_name_th, last_name_th, father_phone, mother_phone)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `, [
+            studentId,
+            prefix_th || null,
+            first_name_th || null,
+            last_name_th || null,
+            father_phone || null,
+            mother_phone || null
+          ]);
+        }
+      }
+    }
+
+    res.json({ success: true, message: 'อัปเดตข้อมูลผู้ใช้งานและข้อมูลการเรียนเรียบร้อยแล้ว' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// User Management: 1-Click Reset Password to 123456
+app.post('/api/admin/users/:id/reset-password', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const salt = bcrypt.genSaltSync(10);
+    const hash = bcrypt.hashSync('123456', salt);
+
+    await query(`
+      UPDATE users 
+      SET password_hash = ?, must_change_password = 1 
+      WHERE id = ?
+    `, [hash, id]);
+
+    const [u] = await query('SELECT username, full_name FROM users WHERE id = ? LIMIT 1', [id]);
+    const name = u.length > 0 ? u[0].full_name : '';
+
+    res.json({
+      success: true,
+      message: `รีเซ็ตรหัสผ่านของ ${name} เป็น 123456 สำเร็จ (บังคับเปลี่ยนเมื่อใช้งานครั้งต่อไป)`
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// User Management: Delete User
+app.delete('/api/admin/users/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    await query('DELETE FROM users WHERE id = ?', [id]);
+    res.json({ success: true, message: 'ลบผู้ใช้งานเรียบร้อยแล้ว' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Admin Metadata: Levels, Majors, Teachers for dropdowns
+app.get('/api/admin/metadata', async (req, res) => {
+  try {
+    const [levels] = await query('SELECT id, name FROM levels ORDER BY id ASC');
+    const [majors] = await query('SELECT id, name, head_teacher_id FROM majors ORDER BY id ASC');
+    const [teachers] = await query("SELECT id, username, full_name, position, role FROM users WHERE role IN ('teacher', 'deputy_director', 'director', 'admin') ORDER BY full_name ASC");
+
+    res.json({ success: true, levels, majors, teachers });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Majors Management: List Majors & Assign Head of Department
+app.get('/api/admin/majors', async (req, res) => {
+  try {
+    const [majors] = await query(`
+      SELECT m.id, m.name, m.head_teacher_id,
+             u.full_name AS head_teacher_name, u.username AS head_teacher_code, u.position AS head_teacher_position
+      FROM majors m
+      LEFT JOIN users u ON m.head_teacher_id = u.id
+      ORDER BY m.id ASC
+    `);
+    const [teachers] = await query("SELECT id, username, full_name, position FROM users WHERE role IN ('teacher', 'deputy_director', 'director') ORDER BY full_name ASC");
+
+    res.json({ success: true, majors, teachers });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Majors Management: Update Head Teacher for Major
+app.put('/api/admin/majors/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { head_teacher_id, name } = req.body;
+
+    const fields = [];
+    const params = [];
+
+    if (head_teacher_id !== undefined) {
+      fields.push('head_teacher_id = ?');
+      params.push(head_teacher_id ? parseInt(head_teacher_id, 10) : null);
+    }
+    if (name) {
+      fields.push('name = ?');
+      params.push(name.trim());
+    }
+
+    if (fields.length === 0) {
+      return res.status(400).json({ success: false, message: 'ไม่มีข้อมูลที่ต้องอัปเดต' });
+    }
+
+    params.push(id);
+    await query(`UPDATE majors SET ${fields.join(', ')} WHERE id = ?`, params);
+
+    res.json({ success: true, message: 'บันทึกหัวหน้าแผนกวิชาเรียบร้อยแล้ว' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Advisor Assignments: List All Assignments
+app.get('/api/admin/advisors', async (req, res) => {
+  try {
+    const [advisors] = await query(`
+      SELECT aa.id, aa.level_id, aa.major_id, aa.teacher_id,
+             l.name AS level_name,
+             m.name AS major_name,
+             u.full_name AS teacher_name, u.username AS teacher_code, u.position AS teacher_position
+      FROM advisor_assignments aa
+      JOIN levels l ON aa.level_id = l.id
+      JOIN majors m ON aa.major_id = m.id
+      JOIN users u ON aa.teacher_id = u.id
+      ORDER BY aa.level_id ASC, aa.major_id ASC
+    `);
+
+    const [levels] = await query('SELECT id, name FROM levels ORDER BY id ASC');
+    const [majors] = await query('SELECT id, name FROM majors ORDER BY id ASC');
+    const [teachers] = await query("SELECT id, username, full_name, position FROM users WHERE role IN ('teacher', 'deputy_director', 'director') ORDER BY full_name ASC");
+
+    res.json({ success: true, advisors, levels, majors, teachers });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Advisor Assignments: Add New Assignment
+app.post('/api/admin/advisors', async (req, res) => {
+  try {
+    const { level_id, major_id, teacher_id } = req.body;
+    if (!level_id || !major_id || !teacher_id) {
+      return res.status(400).json({ success: false, message: 'กรุณาระบุระดับชั้น แผนกวิชา และครูที่ปรึกษา' });
+    }
+
+    const [result] = await query(`
+      INSERT INTO advisor_assignments (level_id, major_id, teacher_id)
+      VALUES (?, ?, ?)
+    `, [parseInt(level_id, 10), parseInt(major_id, 10), parseInt(teacher_id, 10)]);
+
+    res.json({ success: true, message: 'เพิ่มครูที่ปรึกษาประจำชั้นเรียนเรียบร้อยแล้ว', id: result.insertId });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Advisor Assignments: Update Assignment Teacher
+app.put('/api/admin/advisors/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { teacher_id } = req.body;
+    if (!teacher_id) {
+      return res.status(400).json({ success: false, message: 'กรุณาเลือกครูที่ปรึกษา' });
+    }
+
+    await query('UPDATE advisor_assignments SET teacher_id = ? WHERE id = ?', [parseInt(teacher_id, 10), id]);
+    res.json({ success: true, message: 'อัปเดตครูที่ปรึกษาเรียบร้อยแล้ว' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Advisor Assignments: Delete Assignment
+app.delete('/api/admin/advisors/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    await query('DELETE FROM advisor_assignments WHERE id = ?', [id]);
+    res.json({ success: true, message: 'ลบรายการครูที่ปรึกษาเรียบร้อยแล้ว' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Settings: Get All Settings (Term, Gate Duty, Telegram)
+app.get('/api/admin/settings', async (req, res) => {
+  try {
+    const [term] = await query('SELECT * FROM academic_term WHERE id = 1 LIMIT 1');
+    const [duty] = await query(`
+      SELECT g.*, 
+             u1.full_name AS discipline_name, u1.username AS discipline_username,
+             u2.full_name AS deputy_name, u2.username AS deputy_username
+      FROM gate_duty_assignments g
+      LEFT JOIN users u1 ON g.head_of_discipline_user_id = u1.id
+      LEFT JOIN users u2 ON g.deputy_director_user_id = u2.id
+      WHERE g.id = 1 LIMIT 1
+    `);
+    const [telegramRows] = await query('SELECT * FROM telegram_settings WHERE id = 1 LIMIT 1');
+    const [teachers] = await query("SELECT id, username, full_name, position, role FROM users WHERE role IN ('teacher', 'deputy_director', 'director') ORDER BY full_name ASC");
+
+    res.json({
+      success: true,
+      term: term.length > 0 ? term[0] : { academic_year: '2569', semester: '2' },
+      gate_duty: duty.length > 0 ? duty[0] : null,
+      telegram: telegramRows.length > 0 ? telegramRows[0] : { bot_token: '', chat_id: '' },
+      teachers
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Settings: Update Academic Term
+app.post('/api/admin/settings/term', async (req, res) => {
+  try {
+    const { academic_year, semester } = req.body;
+    if (!academic_year || !semester) {
+      return res.status(400).json({ success: false, message: 'กรุณาระบุปีการศึกษาและภาคเรียน' });
+    }
+
+    await query(`
+      UPDATE academic_term
+      SET academic_year = ?, semester = ?, updated_at = NOW()
+      WHERE id = 1
+    `, [academic_year.trim(), String(semester).trim()]);
+
+    // Also log in academic_terms
+    await query(`
+      INSERT INTO academic_terms (academic_year, semester, opened_at, opened_by)
+      VALUES (?, ?, NOW(), 1)
+    `, [academic_year.trim(), String(semester).trim()]);
+
+    res.json({
+      success: true,
+      message: `บันทึกกำหนดปีการศึกษา ${academic_year} ภาคเรียนที่ ${semester} เรียบร้อยแล้ว`
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Settings: Update Gate Duty (Head of Discipline & Deputy Director)
+app.post('/api/admin/settings/gate-duty', async (req, res) => {
+  try {
+    const { head_of_discipline_user_id, deputy_director_user_id } = req.body;
+
+    await query(`
+      UPDATE gate_duty_assignments
+      SET head_of_discipline_user_id = ?, deputy_director_user_id = ?, updated_at = NOW()
+      WHERE id = 1
+    `, [head_of_discipline_user_id, deputy_director_user_id]);
+
+    res.json({ success: true, message: 'บันทึกผู้รับผิดชอบงานปกครองและรองผู้อำนวยการเรียบร้อยแล้ว' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Settings: Update Telegram Settings & Test Send
+app.post('/api/admin/settings/telegram', async (req, res) => {
+  try {
+    const { bot_token, chat_id, test_send } = req.body;
+
+    await query(`
+      UPDATE telegram_settings
+      SET bot_token = ?, chat_id = ?, updated_at = NOW()
+      WHERE id = 1
+    `, [bot_token ? bot_token.trim() : null, chat_id ? chat_id.trim() : null]);
+
+    let testResult = null;
+    if (test_send && bot_token && chat_id) {
+      try {
+        await telegram.sendTelegramMessage(chat_id.trim(), '🔔 <b>[OnePass ทดสอบการแจ้งเตือน]</b>\nการตั้งค่า Telegram Bot ของระบบ OnePass ถูกต้องและเชื่อมต่อสำเร็จแล้ว!');
+        testResult = 'ส่งข้อความทดสอบสำเร็จแล้ว กรุณาตรวจสอบใน Telegram';
+      } catch (te) {
+        testResult = 'ทดสอบส่งไม่สำเร็จ: ' + te.message;
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'บันทึกการตั้งค่า Telegram เรียบร้อยแล้ว' + (testResult ? ` (${testResult})` : '')
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ==========================================
+// BACKGROUND TASK: 30-MINUTE QR AUTO-DESTROY
+// ==========================================
+setInterval(async () => {
+  try {
+    const [expiredList] = await query(`
+      SELECT id, request_no, user_id, qr_expires_at FROM onepass_requests
+      WHERE status = 'approved' AND qr_expires_at IS NOT NULL AND qr_expires_at < NOW() AND gate_out_at IS NULL
+    `);
+
+    if (expiredList.length > 0) {
+      console.log(`[QR Auto-Destroy] Destroying ${expiredList.length} expired QR code(s) older than 30 mins...`);
+      for (const req of expiredList) {
+        // Destroy QR Token and mark status as 'expired'
+        await query(`
+          UPDATE onepass_requests
+          SET status = 'expired', qr_token = NULL
+          WHERE id = ?
+        `, [req.id]);
+
+        await query(`
+          INSERT INTO onepass_logs (request_id, user_id, role_acted, action, comment)
+          VALUES (?, 1, 'system', 'expired', 'QR Code หมดอายุ 30 นาที (ระบบทำลายรหัส QR อัตโนมัติ ต้องยื่นขออนุญาตใหม่)')
+        `, [req.id]);
+
+        // Send Telegram notification to Student
+        const [std] = await query('SELECT * FROM users WHERE id = ?', [req.user_id]);
+        if (std.length > 0) {
+          const studentChatId = await telegram.getUserChatId(std[0].id);
+          const msg = 
+`⚠️ <b>[OnePass] บัตรผ่านและ QR Code หมดอายุแล้ว</b>
+━━━━━━━━━━━━━━━━━━━━
+📌 <b>เลขที่คำขอ:</b> <code>${req.request_no}</code>
+👤 <b>ผู้เรียน:</b> ${std[0].full_name} (${std[0].username})
+⏳ <b>เหตุผล:</b> บัตรผ่านมีอายุใช้งานเพียง 30 นาทีหลังได้รับอนุมัติ และเกินกำหนดเวลาแล้ว
+🗑️ <b>สถานะ:</b> ระบบได้ทำการทำลายรหัส QR Code อัตโนมัติเรียบร้อยแล้ว
+❌ ไม่สามารถนำไปสแกนที่ตู้ประตูได้ หากมีความประสงค์จะออกนอกสถานศึกษา กรุณายื่นขออนุญาตใหม่อีกครั้ง`;
+          await telegram.sendTelegramMessage(studentChatId, msg);
+        }
+      }
     }
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error('[QR Auto-Destroy] Error checking expired QR codes:', err.message);
   }
+}, 60000);
+
+// Catch-all route for SPA
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// ----------------------------------------------------------------------------
-// 8. ดึงประวัติ Audit Logs การนำเข้าไฟล์ (สำหรับหน้าจอ Admin)
-// ----------------------------------------------------------------------------
-app.get('/api/admin/import-logs', requireAdminAuth, async (req, res) => {
-  if (!supabase) return res.json({ success: true, logs: [] });
-  try {
-    const data = await db.query('SELECT * FROM student_import_logs ORDER BY imported_at DESC LIMIT ?', [20]);
-    res.json({ success: true, logs: data || [] });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`=======================================================`);
-  console.log(`🚀 Smart Gate System running at: http://localhost:${PORT}`);
-  console.log(`☁️ MySQL Database: ${supabase ? 'CONNECTED!' : 'NOT CONFIGURED (local JSON fallback mode)'}`);
-  console.log(`=======================================================`);
+// Start Server
+app.listen(PORT, async () => {
+  console.log(`=================================================`);
+  console.log(`OnePass Web Application (Node.js + Vanilla JS)`);
+  console.log(`Server is running at: http://localhost:${PORT}`);
+  console.log(`=================================================`);
+  await initDatabase();
+  telegram.startTelegramPolling();
 });

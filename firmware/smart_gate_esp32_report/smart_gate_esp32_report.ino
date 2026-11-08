@@ -64,7 +64,12 @@
 // ถ้าจอไม่ขึ้นอะไรเลย ให้ลองเปลี่ยน 0x27 เป็น 0x3F (ที่อยู่ I2C ที่พบบ่อยอีกแบบ)
 #define LCD_I2C_ADDR     0x27
 
+#ifndef SERVER_HOST
 #define SERVER_HOST "onepass.ongkharak.ac.th"
+#endif
+#ifndef SERVER_PORT
+#define SERVER_PORT 443
+#endif
 #define SERVER_PATH "/api/device/status"
 #ifndef DEVICE_STATUS_KEY
 #define DEVICE_STATUS_KEY ""
@@ -120,20 +125,32 @@ void drainQrSerial() {
   }
 }
 
-// ส่งรหัส QR ที่สแกนได้ไปตรวจสอบที่เซิร์ฟเวอร์จริง (เหมือนที่หน้า Kiosk ใช้)
+// ส่งรหัส QR ที่สแกนได้ไปตรวจสอบที่เซิร์ฟเวอร์จริง (สแกนผ่าน เปิดไม้กั้นอัตโนมัติ)
 void submitQrScan(const String& token) {
   Serial.print("[QR SCAN] ");
   Serial.println(token);
 
   if (WiFi.status() != WL_CONNECTED) return;
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(8000);
+  WiFiClientSecure secureClient;
+  WiFiClient plainClient;
+  WiFiClient* client = nullptr;
 
-  if (!client.connect(SERVER_HOST, 443)) {
-    Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan)");
-    return;
+  if (SERVER_PORT == 443) {
+    secureClient.setInsecure();
+    secureClient.setTimeout(8000);
+    if (!secureClient.connect(SERVER_HOST, SERVER_PORT)) {
+      Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan HTTPS)");
+      return;
+    }
+    client = &secureClient;
+  } else {
+    plainClient.setTimeout(8000);
+    if (!plainClient.connect(SERVER_HOST, SERVER_PORT)) {
+      Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan HTTP)");
+      return;
+    }
+    client = &plainClient;
   }
 
   String body = "{\"token\":\"" + token + "\",\"scanType\":\"auto\"}";
@@ -146,16 +163,16 @@ void submitQrScan(const String& token) {
   request += "Connection: close\r\n\r\n";
   request += body;
 
-  client.print(request);
+  client->print(request);
 
   String response = "";
   unsigned long timeout = millis();
-  while (client.connected() && millis() - timeout < 8000) {
-    while (client.available()) {
-      response += (char)client.read();
+  while (client->connected() && millis() - timeout < 8000) {
+    while (client->available()) {
+      response += (char)client->read();
     }
   }
-  client.stop();
+  client->stop();
 
   bool success = response.indexOf("\"success\":true") >= 0;
 
@@ -249,13 +266,25 @@ void connectWiFi() {
 void reportStatus() {
   if (WiFi.status() != WL_CONNECTED) return;
 
-  WiFiClientSecure client;
-  client.setInsecure();
-  client.setTimeout(8000);
+  WiFiClientSecure secureClient;
+  WiFiClient plainClient;
+  WiFiClient* client = nullptr;
 
-  if (!client.connect(SERVER_HOST, 443)) {
-    Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ");
-    return;
+  if (SERVER_PORT == 443) {
+    secureClient.setInsecure();
+    secureClient.setTimeout(8000);
+    if (!secureClient.connect(SERVER_HOST, SERVER_PORT)) {
+      Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (Status HTTPS)");
+      return;
+    }
+    client = &secureClient;
+  } else {
+    plainClient.setTimeout(8000);
+    if (!plainClient.connect(SERVER_HOST, SERVER_PORT)) {
+      Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (Status HTTP)");
+      return;
+    }
+    client = &plainClient;
   }
 
   String body = "{";
@@ -279,16 +308,16 @@ void reportStatus() {
   request += "Connection: close\r\n\r\n";
   request += body;
 
-  client.print(request);
+  client->print(request);
 
   String response = "";
   unsigned long timeout = millis();
-  while (client.connected() && millis() - timeout < 8000) {
-    while (client.available()) {
-      response += (char)client.read();
+  while (client->connected() && millis() - timeout < 8000) {
+    while (client->available()) {
+      response += (char)client->read();
     }
   }
-  client.stop();
+  client->stop();
 
   if (response.indexOf("200 OK") >= 0) {
     Serial.println("✅ รายงานสถานะสำเร็จ");
@@ -409,6 +438,14 @@ void setup() {
 
 void loop() {
   drainQrSerial();
+
+  // ตรวจจับปุ่มฉุกเฉิน (Active LOW) ถ้ากดให้ยกไม้กั้นทันที
+  if (digitalRead(PIN_BUTTON) == LOW) {
+    Serial.println("🚨 ตรวจพบการกดปุ่มฉุกเฉินหน้าตู้ (GPIO 15) สั่งยกไม้กั้นทันที!");
+    lcd.setCursor(0, 1);
+    lcd.print("EMERGENCY OPEN! ");
+    testOpenSequence();
+  }
 
   if (WiFi.status() != WL_CONNECTED) {
     if (millis() - lastReconnectAttempt > 10000) {
