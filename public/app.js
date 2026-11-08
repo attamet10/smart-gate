@@ -4647,27 +4647,20 @@ function toggleNoReturn(isChecked) {
   }
 }
 
-// ====================== เลือกครูรายวิชาโดยตรงจากฐานข้อมูล (โหลดไว 0ms + ข้ามขั้นพักกลางวัน/คาบว่าง) ======================
-const DEFAULT_SYSTEM_TEACHERS = [
-  { username: 'subject_auto', fullName: 'อ.วิชัย เครื่องยนต์', full_name: 'อ.วิชัย เครื่องยนต์', dept: 'แผนกวิชาช่างยนต์' },
-  { username: 'teacher_auto', fullName: 'อ.อนุสรณ์ ช่างยนต์', full_name: 'อ.อนุสรณ์ ช่างยนต์', dept: 'แผนกวิชาช่างยนต์ (ครูที่ปรึกษา)' },
-  { username: 'head_auto', fullName: 'อ.ประสิทธิ์ ยานยนต์', full_name: 'อ.ประสิทธิ์ ยานยนต์', dept: 'แผนกวิชาช่างยนต์ (หัวหน้าแผนก)' },
-  { username: 'subject_electric', fullName: 'อ.ธีรพงษ์ วงจรไฟฟ้า', full_name: 'อ.ธีรพงษ์ วงจรไฟฟ้า', dept: 'แผนกวิชาช่างไฟฟ้า' },
-  { username: 'teacher_electric', fullName: 'อ.กิตติศักดิ์ ไฟฟ้า', full_name: 'อ.กิตติศักดิ์ ไฟฟ้า', dept: 'แผนกวิชาช่างไฟฟ้า (ครูที่ปรึกษา)' },
-  { username: 'head_electric', fullName: 'อ.สมศักดิ์ พลังงาน', full_name: 'อ.สมศักดิ์ พลังงาน', dept: 'แผนกวิชาช่างไฟฟ้า (หัวหน้าแผนก)' },
-  { username: 'subject_account', fullName: 'อ.กมลชนก การเงิน', full_name: 'อ.กมลชนก การเงิน', dept: 'แผนกวิชาการบัญชี' },
-  { username: 'teacher_account', fullName: 'อ.พิมพา บัญชี', full_name: 'อ.พิมพา บัญชี', dept: 'แผนกวิชาการบัญชี (ครูที่ปรึกษา)' },
-  { username: 'head_account', fullName: 'อ.วรรณา ยอดเงิน', full_name: 'อ.วรรณา ยอดเงิน', dept: 'แผนกวิชาการบัญชี (หัวหน้าแผนก)' },
-  { username: 'subject_digital', fullName: 'อ.ปิยะพงษ์ โปรแกรม', full_name: 'อ.ปิยะพงษ์ โปรแกรม', dept: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล' },
-  { username: 'teacher_digital', fullName: 'อ.ธนากร ดิจิทัล', full_name: 'อ.ธนากร ดิจิทัล', dept: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล (ครูที่ปรึกษา)' },
-  { username: 'head_digital', fullName: 'อ.ณัฐพงษ์ เทคโนโลยี', full_name: 'อ.ณัฐพงษ์ เทคโนโลยี', dept: 'แผนกวิชาเทคโนโลยีธุรกิจดิจิทัล (หัวหน้าแผนก)' },
-  { username: 'subject_office', fullName: 'อ.วิภาดา ธุรการ', full_name: 'อ.วิภาดา ธุรการ', dept: 'แผนกวิชาการจัดการสำนักงาน' },
-  { username: 'teacher_office', fullName: 'อ.นภาวรรณ สำนักงาน', full_name: 'อ.นภาวรรณ สำนักงาน', dept: 'แผนกวิชาการจัดการสำนักงาน (ครูที่ปรึกษา)' },
-  { username: 'head_office', fullName: 'อ.สุภาณี การจัดการ', full_name: 'อ.สุภาณี การจัดการ', dept: 'แผนกวิชาการจัดการสำนักงาน (หัวหน้าแผนก)' },
-  { username: 'subject_common', fullName: 'อ.สายชล สามัญศึกษา', full_name: 'อ.สายชล สามัญศึกษา', dept: 'แผนกวิชาสามัญสัมพันธ์' }
-];
+// ====================== เลือกครูรายวิชาโดยตรงจากฐานข้อมูลจริง (ข้ามขั้นพักกลางวัน/คาบว่าง) ======================
+// ดึงรายชื่อครูจริงจากแคช LocalStorage ของเครื่องนักเรียน (ถ้าเคยโหลดแล้ว)
+function getLocalCachedTeachers() {
+  try {
+    const raw = localStorage.getItem('onepass_real_teachers');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (e) {}
+  return [];
+}
 
-let cachedTeachersList = [...DEFAULT_SYSTEM_TEACHERS];
+let cachedTeachersList = getLocalCachedTeachers();
 window.isFreePeriodMode = false;
 
 // จัดการโหมดคาบว่าง / พักกลางวัน (ไม่ต้องกรอกครูรายวิชา -> ส่งตรงถึงครูที่ปรึกษา)
@@ -4722,13 +4715,13 @@ function onManualTeacherChange(val) {
 }
 window.onManualTeacherChange = onManualTeacherChange;
 
-// เติมรายชื่อครูทั้งหมดในระบบลง Dropdown (แสดงผลทันที 0ms ไม่ให้ค้างหมุน)
+// เติมรายชื่อครูจริงจากฐานข้อมูลลง Dropdown
 async function populateManualTeacherSelect(preferredUsername = '') {
   const manualSelect = document.getElementById('form-manual-teacher-select');
   if (!manualSelect) return;
 
   const currentVal = preferredUsername || manualSelect.value;
-  const teachers = (cachedTeachersList && cachedTeachersList.length > 0) ? cachedTeachersList : DEFAULT_SYSTEM_TEACHERS;
+  const teachers = (cachedTeachersList && Array.isArray(cachedTeachersList)) ? cachedTeachersList : [];
 
   const optionsHtml = [
     `<option value="">-- เลือกครูรายวิชา (หรือเลือกคาบว่าง/พักกลางวัน) --</option>`,
@@ -4740,7 +4733,8 @@ async function populateManualTeacherSelect(preferredUsername = '') {
     if (!uName || uName === 'SKIP_FREE_PERIOD') return;
     const fName = t.fullName || t.full_name || uName;
     const dLabel = t.dept || t.role_label || 'ครูผู้สอน';
-    optionsHtml.push(`<option value="${escapeHtml(uName)}" data-name="${escapeHtml(fName)}">${escapeHtml(fName)} (${escapeHtml(dLabel)})</option>`);
+    const classLabel = t.classroom || t.classrooms ? ` • ผู้สอน ${t.classroom || t.classrooms}` : '';
+    optionsHtml.push(`<option value="${escapeHtml(uName)}" data-name="${escapeHtml(fName)}">${escapeHtml(fName)} (${escapeHtml(dLabel)}${escapeHtml(classLabel)})</option>`);
   });
 
   manualSelect.innerHTML = optionsHtml.join('');
@@ -4752,24 +4746,17 @@ async function ensureTeachersListLoaded() {
   populateManualTeacherSelect();
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
+    const timeoutId = setTimeout(() => controller.abort(), 3000);
     const res = await fetch('/api/teachers', { signal: controller.signal });
     clearTimeout(timeoutId);
 
     if (res.ok) {
       const data = await res.json();
-      if (data.success && Array.isArray(data.teachers) && data.teachers.length > 0) {
-        const map = new Map();
-        DEFAULT_SYSTEM_TEACHERS.forEach(t => map.set(t.username, t));
-        data.teachers.forEach(t => {
-          map.set(t.username, {
-            username: t.username,
-            fullName: t.fullName || t.full_name || t.username,
-            full_name: t.fullName || t.full_name || t.username,
-            dept: t.dept || t.role_label || ''
-          });
-        });
-        cachedTeachersList = Array.from(map.values());
+      if (data.success && Array.isArray(data.teachers)) {
+        cachedTeachersList = data.teachers;
+        try {
+          localStorage.setItem('onepass_real_teachers', JSON.stringify(data.teachers));
+        } catch (e) {}
         populateManualTeacherSelect();
       }
     }

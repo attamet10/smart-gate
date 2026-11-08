@@ -1378,20 +1378,57 @@ app.post('/api/auth/token', async (req, res) => {
   return res.status(404).json({ success: false, message: 'User not found' });
 });
 
-// ดึงรายชื่อครูทั้งหมด (ครูรายวิชา + ครูที่ปรึกษา + หัวหน้าแผนก + ครูที่ถูกสร้างอัตโนมัติ) สำหรับเลือกในตารางสอน/ตั้งสอนแทน/อนุมัติแทน
+// ดึงรายชื่อครูทั้งหมดจากฐานข้อมูลจริง (MySQL / Database)
 app.get('/api/teachers', async (req, res) => {
-  const allTeacherMap = getAllActiveTeacherAccountsMap();
-  const teachers = Object.values(allTeacherMap)
-    .filter(u => ['subject_teacher', 'advisor', 'dept_head', 'discipline_head', 'deputy_director'].includes(u.role))
-    .map(u => ({
-      username: u.username,
-      fullName: u.full_name,
-      full_name: u.full_name,
-      role: u.role,
-      dept: u.dept || (u.departments ? u.departments.name : ''),
-      isAutoCreated: Boolean(u.isAutoCreated)
-    }));
-  res.json({ success: true, teachers });
+  try {
+    const teacherRoles = ['subject_teacher', 'advisor', 'dept_head', 'teacher', 'discipline_head', 'deputy_director'];
+    let dbTeachers = [];
+
+    if (typeof db !== 'undefined' && db && db.queryUsersWithRelations) {
+      const rows = await db.queryUsersWithRelations('u.role IN (?)', [teacherRoles], 'u.full_name ASC');
+      if (rows && rows.length > 0) {
+        dbTeachers = rows;
+      }
+    } else if (supabase) {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*, departments(id, name), classrooms(id, name)')
+        .in('role', teacherRoles)
+        .order('full_name', { ascending: true });
+      if (!error && data && data.length > 0) {
+        dbTeachers = data;
+      }
+    }
+
+    if (dbTeachers.length > 0) {
+      const teachers = dbTeachers.map(u => ({
+        username: u.username,
+        fullName: u.full_name || u.username,
+        full_name: u.full_name || u.username,
+        role: u.role,
+        dept: u.departments?.name || u.dept || '',
+        classroom: u.classrooms?.name || u.classroom || '',
+        role_label: u.role === 'subject_teacher' ? 'ครูรายวิชา' : (u.role === 'advisor' || u.role === 'teacher' ? 'ครูที่ปรึกษา' : 'หัวหน้าแผนก')
+      }));
+      return res.json({ success: true, teachers, source: 'database' });
+    }
+
+    // กรณีไม่มีข้อมูลในฐานข้อมูล (เช่น รันออฟไลน์) จึง fallback
+    const allTeacherMap = getAllActiveTeacherAccountsMap();
+    const fallbackTeachers = Object.values(allTeacherMap)
+      .filter(u => teacherRoles.includes(u.role))
+      .map(u => ({
+        username: u.username,
+        fullName: u.full_name,
+        full_name: u.full_name,
+        role: u.role,
+        dept: u.dept || (u.departments ? u.departments.name : ''),
+        role_label: u.role === 'subject_teacher' ? 'ครูรายวิชา' : (u.role === 'advisor' || u.role === 'teacher' ? 'ครูที่ปรึกษา' : 'หัวหน้าแผนก')
+      }));
+    res.json({ success: true, teachers: fallbackTeachers, source: 'fallback' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 // ============================================================================
