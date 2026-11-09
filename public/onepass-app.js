@@ -65,6 +65,96 @@ function initEventListeners() {
     btnLogout.addEventListener('click', handleLogout);
   }
 
+  // YouTube-Style Profile Dropdown Events
+  const btnProfileToggle = document.getElementById('btn-profile-toggle');
+  const profileDropdownMenu = document.getElementById('profile-dropdown-menu');
+  const profileContainer = document.querySelector('.profile-dropdown-container');
+
+  if (btnProfileToggle && profileDropdownMenu) {
+    btnProfileToggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isOpen = profileDropdownMenu.style.display === 'block';
+      profileDropdownMenu.style.display = isOpen ? 'none' : 'block';
+      if (profileContainer) {
+        if (!isOpen) profileContainer.classList.add('active');
+        else profileContainer.classList.remove('active');
+      }
+    });
+
+    // Close when clicking outside
+    document.addEventListener('click', (e) => {
+      if (profileDropdownMenu.style.display === 'block' && !profileDropdownMenu.contains(e.target) && !btnProfileToggle.contains(e.target)) {
+        profileDropdownMenu.style.display = 'none';
+        if (profileContainer) profileContainer.classList.remove('active');
+      }
+    });
+  }
+
+  // Dropdown Item: Gate Pass Inspection
+  const dropdownBtnGate = document.getElementById('dropdown-btn-gate');
+  if (dropdownBtnGate) {
+    dropdownBtnGate.addEventListener('click', () => {
+      if (profileDropdownMenu) profileDropdownMenu.style.display = 'none';
+      if (profileContainer) profileContainer.classList.remove('active');
+      switchView('gate');
+    });
+  }
+
+  // Dropdown Item: Link Telegram Modal
+  const dropdownBtnTelegram = document.getElementById('dropdown-btn-telegram');
+  const modalTelegram = document.getElementById('modal-user-telegram');
+  const btnCloseTelegramModal = document.getElementById('btn-close-telegram-modal');
+  const btnCancelTelegramModal = document.getElementById('btn-cancel-telegram-modal');
+  const btnSaveUserTelegram = document.getElementById('btn-save-user-telegram');
+  const inputUserTelegramChatId = document.getElementById('input-user-telegram-chatid');
+
+  if (dropdownBtnTelegram && modalTelegram) {
+    dropdownBtnTelegram.addEventListener('click', () => {
+      if (profileDropdownMenu) profileDropdownMenu.style.display = 'none';
+      if (profileContainer) profileContainer.classList.remove('active');
+      if (state.currentUser && inputUserTelegramChatId) {
+        inputUserTelegramChatId.value = state.currentUser.telegram_chat_id || '';
+      }
+      modalTelegram.style.display = 'block';
+    });
+
+    const closeModal = () => { modalTelegram.style.display = 'none'; };
+    if (btnCloseTelegramModal) btnCloseTelegramModal.addEventListener('click', closeModal);
+    if (btnCancelTelegramModal) btnCancelTelegramModal.addEventListener('click', closeModal);
+
+    if (btnSaveUserTelegram) {
+      btnSaveUserTelegram.addEventListener('click', async () => {
+        if (!state.currentUser) return;
+        const tgId = inputUserTelegramChatId ? inputUserTelegramChatId.value.trim() : '';
+        btnSaveUserTelegram.disabled = true;
+        btnSaveUserTelegram.textContent = '⏳ กำลังบันทึก...';
+
+        try {
+          const res = await fetch('/api/user/telegram', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId: state.currentUser.id, telegramChatId: tgId })
+          });
+          const data = await res.json();
+          if (data.success) {
+            state.currentUser.telegram_chat_id = data.telegram_chat_id;
+            sessionStorage.setItem('onepass_user', JSON.stringify(state.currentUser));
+            updateProfileDropdown(state.currentUser);
+            showAlert(data.message, 'success');
+            closeModal();
+          } else {
+            showAlert(data.message || 'เกิดข้อผิดพลาดในการบันทึก', 'danger');
+          }
+        } catch (err) {
+          showAlert('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้: ' + err.message, 'danger');
+        } finally {
+          btnSaveUserTelegram.disabled = false;
+          btnSaveUserTelegram.textContent = '💾 บันทึก Telegram ID';
+        }
+      });
+    }
+  }
+
   // Gate View Toggle Buttons
   const btnOpenGate = document.getElementById('btn-open-gate');
   if (btnOpenGate) {
@@ -595,13 +685,7 @@ function onLoginSuccess(user) {
     super_admin: 'ผู้ดูแลระบบสูงสุด'
   };
   const roleText = roleLabels[user.role] || user.role;
-  document.getElementById('nav-user-info').textContent = `👤 ${user.full_name} (${roleText})`;
-
-  // Admin button in top navbar
-  const btnAdmin = document.getElementById('btn-open-admin');
-  if (btnAdmin) {
-    btnAdmin.style.display = user.is_admin ? 'inline-block' : 'none';
-  }
+  updateProfileDropdown(user, roleText);
 
   if (user.role === 'admin' || user.role === 'super_admin') {
     switchView('admin');
@@ -609,6 +693,40 @@ function onLoginSuccess(user) {
     switchView('student');
   } else {
     switchView('teacher');
+  }
+}
+
+function updateProfileDropdown(user, roleText) {
+  if (!user) return;
+  const firstLetter = (user.full_name || 'U').trim().charAt(0).toUpperCase();
+
+  const elLetter1 = document.getElementById('profile-avatar-letter');
+  if (elLetter1) elLetter1.textContent = firstLetter;
+
+  const elLetter2 = document.getElementById('dropdown-avatar-letter');
+  if (elLetter2) elLetter2.textContent = firstLetter;
+
+  const elName = document.getElementById('nav-user-info');
+  if (elName) elName.textContent = user.full_name;
+
+  const elFull = document.getElementById('dropdown-user-fullname');
+  if (elFull) elFull.textContent = user.full_name;
+
+  const elUser = document.getElementById('dropdown-user-username');
+  if (elUser) elUser.textContent = '@' + user.username;
+
+  const elRole = document.getElementById('dropdown-user-role');
+  if (elRole) elRole.textContent = roleText || user.role;
+
+  const elTgBadge = document.getElementById('dropdown-tg-badge');
+  if (elTgBadge) {
+    if (user.telegram_chat_id) {
+      elTgBadge.textContent = 'เชื่อมต่อแล้ว';
+      elTgBadge.classList.add('connected');
+    } else {
+      elTgBadge.textContent = 'ยังไม่ผูก';
+      elTgBadge.classList.remove('connected');
+    }
   }
 }
 

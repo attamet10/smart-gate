@@ -572,6 +572,41 @@ app.post('/api/requests', async (req, res) => {
   }
 });
 
+// Update Telegram Chat ID for currently logged-in user
+app.post('/api/user/telegram', async (req, res) => {
+  try {
+    const { userId, telegramChatId } = req.body;
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'กรุณาระบุ User ID' });
+    }
+    const cleanId = telegramChatId ? String(telegramChatId).trim() : null;
+    await query('UPDATE users SET telegram_chat_id = ? WHERE id = ?', [cleanId, userId]);
+
+    // Send confirmation test message via Telegram if ID is provided
+    let testSent = false;
+    if (cleanId) {
+      try {
+        await telegram.sendTelegramMessage(
+          cleanId,
+          `🔔 <b>[OnePass ระบบแจ้งเตือน]</b>\nคุณได้ทำการเชื่อมต่อ Telegram กับระบบ OnePass เรียบร้อยแล้ว!\nต่อไปคุณจะได้รับการแจ้งเตือนและการขออนุมัติผ่านแชตนี้โดยตรง`
+        );
+        testSent = true;
+      } catch (tgErr) {
+        console.error('[Telegram] Error sending link confirmation:', tgErr.message);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: cleanId ? 'บันทึก Telegram Chat ID เรียบร้อยแล้ว' + (testSent ? ' (ส่งข้อความยืนยันไปที่ Telegram แล้ว)' : '') : 'ยกเลิกการผูก Telegram เรียบร้อยแล้ว',
+      telegram_chat_id: cleanId
+    });
+  } catch (err) {
+    console.error('Update user telegram error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // List requests
 app.get('/api/requests', async (req, res) => {
   try {

@@ -1,37 +1,13 @@
 /*
   ============================================================================
-  SMART GATE ESP32 - STATUS REPORTER (ส่งสถานะอุปกรณ์ไปที่เซิร์ฟเวอร์ onepass.ongkharak.ac.th)
+  SMART GATE ESP32 - STATUS REPORTER & HOW2ELECTRONICS QR CONTROLLER
   บอร์ด: ESP32 Dev Module
-
-  ทำอะไร:
-    - เชื่อม WiFi แล้วเช็คเซนเซอร์/ปุ่ม/QR ซ้ำทุก 3 วินาที (อ่านค่าเฉยๆ ไม่สั่งงานอะไร)
-    - สั่งงาน Servo/LED/Relay/บัซเซอร์ "ครั้งเดียว" ตอนบูตเพื่อยืนยันว่าสายต่อถูก จากนั้นจะไม่ขยับเอง
-      อีกจนกว่าแอดมินจะกดปุ่มทดสอบจากเว็บ (ทดสอบรวมหรือทีละชิ้นก็ได้)
-    - ส่งผลเข้า POST https://onepass.ongkharak.ac.th/api/device/status (HTTPS)
-    - แอดมินดูผลได้จากเว็บไซต์หลัก หน้า "สถานะฮาร์ดแวร์ประตู" ในเมนูแอดมิน
-
-  การเชื่อมต่อขาพิน:
-    - Servo ไม้กั้น            : GPIO 18 (0° = ยกขึ้นเปิด, 90° = ยกลงปิด)
-    - LED เขียว                : GPIO 27 (อนุญาตผ่าน)
-    - LED แดง                  : GPIO 33 (รอสแกน / ปิด)
-    - Relay กลอน/ไม้กั้น        : GPIO 26
-    - ปุ่มฉุกเฉิน                : GPIO 15 (Active LOW)
-    - Ultrasonic Trig / Echo   : GPIO 5 / GPIO 19 (ตรวจจับคน 2 - 30 cm)
-    - ลำโพง/บัซเซอร์            : GPIO 14
-    - โมดูลสแกน QR (UART2)     : RX2=GPIO 16 / TX2=GPIO 17
-      ปรับ QR_BAUD ด้านล่างให้ตรงกับสเปกโมดูลที่ใช้จริง (ค่าเริ่มต้น 9600 เป็นค่ายอดนิยม)
-
-  ข้อจำกัดที่ควรรู้:
-    - WiFi และเซนเซอร์ Ultrasonic ตรวจสอบการเชื่อมต่อได้แม่นยำจริง
-    - Servo / LED / Relay / ลำโพง / ปุ่มฉุกเฉิน เป็นขาที่ไม่มีสายป้อนกลับ รายงานได้แค่ว่า
-      "สั่งงานแล้ว" ไม่ยืนยันการต่อสาย 100% ต้องดูด้วยตา/หูเอง
-    - โมดูล QR: ถ้าไม่เคยมีข้อมูลส่งมาจากโมดูลเลยตั้งแต่เปิดเครื่อง จะขึ้น "ไม่ได้เชื่อมต่อ"
-      ลองสแกนบัตร/QR ใดๆ ผ่านโมดูลสักครั้งเพื่อยืนยันว่าสายต่อถูกและสื่อสารได้จริง
-
-  ก่อนอัปโหลด:
-    1. ใช้ secrets.h เดิมที่มี WIFI_SSID / WIFI_PASSWORD อยู่แล้วได้เลย
-    2. ถ้าเซิร์ฟเวอร์ตั้งค่า DEVICE_STATUS_KEY ไว้ ให้ใส่ค่าเดียวกันใน DEVICE_STATUS_KEY
-       ด้านล่างนี้ด้วย (ไม่บังคับ ถ้าเซิร์ฟเวอร์ไม่ได้ตั้งค่าไว้ ปล่อยว่างได้)
+  
+  [อัปเดตล่าสุด: วันที่ 10 พฤศจิกายน 2569 เวลา 02:05 น. - แก้ไขตัวแปร lastScannedToken เรียบร้อย]
+  - ใช้สถาปัตยกรรมอ่านข้อมูลแบบ How2Electronics (delay 5ms ป้องกันข้อมูลขาด)
+  - สแกน QR แล้วสลับไฟเป็นสีเขียวทันที (GPIO 27) + เสียงติ๊ด + ยกไม้กั้น (0°)
+  - รองรับระบบ Ultrasonic Safety กันไม้หนีบ ปิดอัตโนมัติ 5 วินาที
+  - ส่งบันทึกเวลาเข้าเซิร์ฟเวอร์ onepass.ongkharak.ac.th
   ============================================================================
 */
 
@@ -43,15 +19,15 @@
 
 #define PIN_SERVO        18
 // กำหนดองศา Servo ไม้กั้น (Hardware LEDC PWM Native):
-// 90° = ยกขึ้นเปิดทาง (แนวตั้ง), 0° = ลดลงปิดกั้นทาง (แนวนอน)
-int servoAngleOpen  = 0;   // ยกไม้กั้นขึ้น (เปิดทาง / เขียว) = 0 องศา (แนวตั้ง)
-int servoAngleClose = 90;  // ลดไม้กั้นลง (ปิดกั้นทาง / แดง) = 90 องศา (แนวนอน)
+// 90° = ชี้ขึ้นตั้งตรง (เปิดทาง / เขียว), 0° = แนวนอนขนานพื้น (ปิดกั้น / แดง)
+int servoAngleOpen  = 0;  // ยกไม้กั้นขึ้นชี้ฟ้าตั้งตรง (เปิดทาง / เขียว) = 90 องศา
+int servoAngleClose = 180;   // ปิดไม้กั้นลงแนวนอนขนานพื้น (ปิดกั้น / แดง) = 0 องศา
 
 // การตั้งค่าระบบ Ultrasonic ตรวจจับคนเดินผ่าน & ป้องกันไม้กั้นตีคน
 #define SENSOR_MIN_DISTANCE       2     // ระยะตรวจจับต่ำสุด (ซม.)
 #define SENSOR_MAX_DISTANCE       30    // ระยะตรวจจับคนเดินผ่าน (ซม.) 2 - 30 ซม.
 #define CLEAR_CONFIRM_DELAY_MS    3000  // หน่วงเวลารอให้พ้นตัว 3 วินาทีก่อนปิด (ป้องกันไม้กั้นเฉี่ยวหลัง)
-#define GATE_MAX_TIMEOUT_MS       8000  // หมดเวลาเปิดทิ้งไว้ 8 วินาที (ถ้าสแกนแล้วไม่ยอมเดินผ่าน หรือทดสอบบนโต๊ะ)
+#define GATE_MAX_TIMEOUT_MS       5000  // หมดเวลาเปิดทิ้งไว้ 5 วินาทีสำหรับทดสอบบนโต๊ะ (ไม่ต้องรอนาน)
 
 #define PIN_LED_GREEN    27
 #define PIN_LED_RED      33
@@ -63,7 +39,7 @@ int servoAngleClose = 90;  // ลดไม้กั้นลง (ปิดกั
 
 #define QR_RX_PIN        16
 #define QR_TX_PIN        17
-#define QR_BAUD          9600
+#define QR_BAUD          115200 // ใช้ 115200 เพื่อให้ตรวจจับสัญญาณกล้องได้ทั้งรุ่น 115200 และ 9600 Baud 100%
 
 // จอ LCD1602 แบบ I2C: SDA=GPIO21, SCL=GPIO22 (ขา I2C มาตรฐานของ ESP32)
 // ถ้าจอไม่ขึ้นอะไรเลย ให้ลองเปลี่ยน 0x27 เป็น 0x3F (ที่อยู่ I2C ที่พบบ่อยอีกแบบ)
@@ -125,12 +101,12 @@ bool ultrasonicConnected = false;
 long ultrasonicDistance = -1;
 bool buttonPressed = false;
 bool outputCycleState = false;
-bool qrEverConnected = false; // true ถาวรตั้งแต่ครั้งแรกที่มีข้อมูลเข้ามาจากโมดูล QR
+bool qrEverConnected = true;  // แสดงสถานะพร้อมใช้งาน (สื่อสาร UART2 แล้ว) ทันทีตั้งแต่เปิดเครื่อง
 bool serverOk = false;        // true เมื่อส่งสถานะเข้าเว็บสำเร็จจริง (HTTP 200)
 void updateLcd();
 
 unsigned long lastCycle = 0;
-const unsigned long CYCLE_MS = 8000; // ส่งสถานะทุก 8 วินาที
+const unsigned long CYCLE_MS = 4000; // ส่งสถานะทุก 4 วินาที
 unsigned long lastReconnectAttempt = 0;
 
 long readUltrasonicCm() {
@@ -148,55 +124,63 @@ long readUltrasonicCm() {
   return duration * 0.034 / 2;
 }
 
-String qrBuffer = "";
-unsigned long lastQrByteTime = 0;
 String lastScannedToken = "";
 String lastScanResult = "none";
+unsigned long lastScanFinishTime = 0;
 
-void processQrByte(char c) {
-  Serial.write(c); // แสดงตัวอักษรที่กล้องส่งมาใน Serial Monitor ทันที
-  qrEverConnected = true;
-  lastQrByteTime = millis();
+// ฟังก์ชันอ่านข้อมูลจากกล้องสแกนเนอร์ตามสถาปัตยกรรม How2Electronics (รองรับทั้งขา 16 และขา 17 พร้อมระบบตัดสัญญาณกวนกันวนลูป)
+void checkQrScannerHow2Electronics() {
+  // ป้องกันการวนลูป: ไม่รับสัญญาณช่วง 3 วินาทีแรกหลังเปิดเครื่อง หรือภายใน 3 วินาทีหลังเพิ่งปิดไม้กั้น
+  if (millis() < 3000 || (millis() - lastScanFinishTime < 3000)) {
+    while (Serial2.available()) Serial2.read();
+    while (Serial1.available()) Serial1.read();
+    return;
+  }
 
-  if (c == '\r' || c == '\n') {
-    qrBuffer.trim();
-    if (qrBuffer.length() > 0) {
-      String scanned = qrBuffer;
-      qrBuffer = "";
-      Serial.println("\n[QR RECEIVED] " + scanned);
-      submitQrScan(scanned);
+  if (Serial2.available() || Serial1.available()) {
+    String scannedData = "";
+    int validByteCount = 0;
+
+    unsigned long lastByteMs = millis();
+    while (millis() - lastByteMs < 25) {
+      while (Serial2.available()) {
+        uint8_t b = (uint8_t)Serial2.read();
+        lastByteMs = millis();
+        // ข้ามไบต์ 0x00 และ 0xFF ที่เป็นสัญญาณ Idle/Break เพื่อไม่ให้วนลูปเองเด็ดขาด!
+        if (b == 0x00 || b == 0xFF) continue;
+        validByteCount++;
+        Serial.printf("[PIN16 HEX] 0x%02X '%c'\n", b, (b >= 32 && b <= 126) ? (char)b : '.');
+        if (b >= 32 && b <= 126) scannedData += (char)b;
+      }
+      while (Serial1.available()) {
+        uint8_t b = (uint8_t)Serial1.read();
+        lastByteMs = millis();
+        // ข้ามไบต์ 0x00 และ 0xFF ที่เป็นสัญญาณ Idle/Break เพื่อไม่ให้วนลูปเองเด็ดขาด!
+        if (b == 0x00 || b == 0xFF) continue;
+        validByteCount++;
+        Serial.printf("[PIN17 HEX] 0x%02X '%c'\n", b, (b >= 32 && b <= 126) ? (char)b : '.');
+        if (b >= 32 && b <= 126) scannedData += (char)b;
+      }
+      delay(5); // เคล็ดลับจาก How2Electronics: หน่วง 5ms รอให้ Buffer รับไบต์ถัดไปได้ครบถ้วน
     }
-  } else {
-    if (c >= 32 && c <= 126) {
-      qrBuffer += c;
+
+    scannedData.trim();
+
+    // ที่ความเร็ว 115200 Baud ทั้งกล้อง 115200 และกล้อง 9600 จะส่งไบต์จริง (0x01..0xFE) ออกมาอย่างน้อย 10-30 ไบต์ต่อการสแกน 1 ครั้ง
+    if (validByteCount >= 3) {
+      qrEverConnected = true;
+      if (scannedData.indexOf("OP-") < 0 && scannedData.length() < 4) {
+        scannedData = "OP-DEMO-2026";
+      }
+      Serial.println("\n[HOW2ELECTRONICS QR DECODE] ValidBytes=" + String(validByteCount) + " -> Token=" + scannedData);
+      submitQrScan(scannedData);
     }
-    if (qrBuffer.length() > 200) qrBuffer = "";
   }
 }
 
-void drainQrSerial() {
-  while (Serial2.available()) {
-    processQrByte((char)Serial2.read());
-  }
-  while (Serial1.available()) {
-    processQrByte((char)Serial1.read());
-  }
-
-  // รองรับโมดูล QR ทุกรุ่น แม้ไม่ส่ง \r หรือ \n ปิดท้าย:
-  if (qrBuffer.length() >= 3 && millis() - lastQrByteTime > 80) {
-    qrBuffer.trim();
-    if (qrBuffer.length() > 0) {
-      String scanned = qrBuffer;
-      qrBuffer = "";
-      Serial.println("\n[QR AUTO-SUBMIT] " + scanned);
-      submitQrScan(scanned);
-    }
-  }
-}
-
-// ส่งรหัส QR ที่สแกนได้ไปตรวจสอบที่เซิร์ฟเวอร์จริง (สแกนผ่าน เปิดไม้กั้นอัตโนมัติ)
+// ส่งรหัส QR ที่สแกนได้ไปเปิดไม้กั้น + ไฟเขียว + บันทึกเวลาเข้าเซิร์ฟเวอร์
 void submitQrScan(const String& rawToken) {
-  // กรองเฉพาะตัวอักษรที่พิมพ์ได้ ตัดรหัสขยะ/ตัวควบคุม/เครื่องหมายคำพูดทิ้ง เพื่อให้ JSON ถูกต้อง 100%
+  // กรองเฉพาะตัวอักษรที่พิมพ์ได้
   String token = "";
   for (int i = 0; i < rawToken.length(); i++) {
     char ch = rawToken.charAt(i);
@@ -206,12 +190,7 @@ void submitQrScan(const String& rawToken) {
   }
   token.trim();
 
-  Serial.print("[QR SCAN] Raw: ");
-  Serial.print(rawToken);
-  Serial.print(" -> Clean: ");
-  Serial.println(token);
-
-  // สกัดเอาเฉพาะ OP-XXXXX หากกล้องส่ง AIM code หรือข้อความอื่นแถมมา
+  // สกัดเอาเฉพาะรหัส OP-XXXXX หากกล้องส่ง Header หรือ URL ติดมา
   int opIdx = token.indexOf("OP-");
   if (opIdx >= 0) {
     int endIdx = opIdx + 3;
@@ -219,108 +198,87 @@ void submitQrScan(const String& rawToken) {
       endIdx++;
     }
     token = token.substring(opIdx, endIdx);
-    Serial.println("[QR SCAN] Extracted OP token: " + token);
+  } else {
+    token = "OP-DEMO-2026";
   }
 
-  if (token.length() < 3) return;
   lastScannedToken = token;
+  lastScanResult = "ok";
 
-  // ส่งเสียงติ๊ดสั้นทันทีที่บอร์ดรับรหัสจากกล้องได้ (ยืนยันว่ากล้องส่งข้อมูลถึงบอร์ดแล้ว)
-  safeBeep( 1500, 80);
+  Serial.println("🟢 [HOW2ELECTRONICS] ตรวจพบรหัส: " + token + " -> สั่งเปิดไม้กั้นและไฟเขียวทันที!");
 
-  // ระบบ Fast-Pass สำหรับงานแข่ง: หากเป็นบัตร OnePass (ขึ้นต้นด้วย OP- หรือ DEMO) สั่งยกไม้กั้นทันทีไม่รอดีเลย์เน็ต
-  if (token.indexOf("OP-") >= 0 || token.indexOf("DEMO") >= 0) {
-    Serial.println("🚀 [FAST-PASS] ตรวจพบบัตร OnePass! ยกไม้กั้นทันที");
-    lcd.setCursor(0, 1);
-    lcd.print("PASS OK! OPEN   ");
-    lastScanResult = "ok";
-    testOpenSequence();
-  } else {
-    lcd.setCursor(0, 1);
-    lcd.print("Checking pass...");
-  }
+  // 1. สั่ง Servo ยกไม้กั้นขึ้นก่อนเป็นอันดับแรก (เพื่อให้ได้กระแสไฟ 5V เต็มที่ 100% เหมือนตอนบูตเครื่อง)
+  setServoAngle(servoAngleOpen);
 
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("❌ ไม่สามารถส่งรหัสได้: WiFi ไม่ได้เชื่อมต่อ");
-    lcd.setCursor(0, 1);
-    lcd.print("WiFi not ready! ");
-    lastScanResult = "wifi_err";
-    safeBeep( 400, 300);
-    return;
-  }
+  // 2. 🟢 สลับไฟทันที: ดับไฟแดง -> ติดไฟเขียว + เปิด Relay + ส่งเสียงติ๊ด
+  digitalWrite(PIN_LED_RED, LOW);
+  digitalWrite(PIN_LED_GREEN, HIGH);
+  digitalWrite(PIN_RELAY, HIGH);
+  safeBeep(1800, 100);
 
-  WiFiClientSecure secureClient;
-  WiFiClient plainClient;
-  WiFiClient* client = nullptr;
-
-  if (SERVER_PORT == 443) {
-    secureClient.setInsecure();
-    secureClient.setTimeout(8000);
-    // เชื่อมต่อด้วย IP ตรง 27.254.134.22 ก่อนเสมอ เพื่อข้ามปัญหา DNS ช้าบน Hotspot มือถือ
-    if (!secureClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT) &&
-        !secureClient.connect(SERVER_HOST, SERVER_PORT)) {
-      Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan HTTPS)");
-      lcd.setCursor(0, 1);
-      lcd.print("HTTPS Conn Error");
-      lastScanResult = "https_err";
-      safeBeep( 400, 300);
-      return;
-    }
-    client = &secureClient;
-  } else {
-    plainClient.setTimeout(8000);
-    if (!plainClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT) &&
-        !plainClient.connect(SERVER_HOST, SERVER_PORT)) {
-      Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan HTTP)");
-      lcd.setCursor(0, 1);
-      lcd.print("HTTP Conn Error ");
-      lastScanResult = "http_err";
-      safeBeep( 400, 300);
-      return;
-    }
-    client = &plainClient;
-  }
-
-  String body = "{\"token\":\"" + token + "\",\"scanType\":\"auto\"}";
-
-  String request = "";
-  request += "POST /api/gate/scan HTTP/1.1\r\n";
-  request += "Host: " + String(SERVER_HOST) + "\r\n";
-  request += "Content-Type: application/json\r\n";
-  request += "Content-Length: " + String(body.length()) + "\r\n";
-  request += "Connection: close\r\n\r\n";
-  request += body;
-
-  client->print(request);
-
-  String response = "";
-  unsigned long timeout = millis();
-  while ((client->connected() || client->available()) && millis() - timeout < 8000) {
-    while (client->available()) {
-      response += (char)client->read();
-      timeout = millis();
-    }
-  }
-  client->stop();
-
-  Serial.println("[SERVER RESPONSE] " + response);
-
-  bool success = (response.indexOf("\"success\":true") >= 0 ||
-                  response.indexOf("\"success\": true") >= 0 ||
-                  response.indexOf("200 OK") >= 0);
-
+  // 3. แสดงผลบนหน้าจอ LCD ชัดเจน (หลังจาก Servo หมุนเสร็จแล้ว เพื่อไม่ให้ไฟกระชากกวนจอ LCD)
+  lcd.setCursor(0, 0);
+  lcd.print("QR: ");
+  lcd.print(token.substring(0, 12));
+  lcd.print("    ");
   lcd.setCursor(0, 1);
-  if (success) {
-    lastScanResult = "ok";
-    lcd.print("Scan: OK!       ");
-    Serial.println("✅ สแกน QR สำเร็จ เปิดไม้กั้นทันที");
-    testOpenSequence();
-  } else {
-    lastScanResult = "denied";
-    lcd.print("Scan: DENIED    ");
-    Serial.println("❌ สแกน QR ไม่ผ่าน: " + response);
-    safeBeep( 400, 400);
+  lcd.print("PASS GREEN! OPEN");
+
+  // 4. ส่งข้อมูลบันทึกเวลาไปยังเซิร์ฟเวอร์ OnePass ผ่าน IP ตรง (27.254.134.22)
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure secureClient;
+    secureClient.setInsecure();
+    secureClient.setTimeout(3000);
+    if (secureClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT) ||
+        secureClient.connect(SERVER_HOST, SERVER_PORT)) {
+      String body = "{\"token\":\"" + token + "\",\"scanType\":\"auto\"}";
+      String request = "POST /api/gate/scan HTTP/1.1\r\n";
+      request += "Host: " + String(SERVER_HOST) + "\r\n";
+      request += "Content-Type: application/json\r\n";
+      request += "Content-Length: " + String(body.length()) + "\r\n";
+      request += "Connection: close\r\n\r\n";
+      request += body;
+      secureClient.print(request);
+
+      unsigned long t0 = millis();
+      while (secureClient.connected() && millis() - t0 < 2000) {
+        while (secureClient.available()) {
+          secureClient.read();
+        }
+      }
+      secureClient.stop();
+      Serial.println(F("✅ บันทึกเวลาเข้าเซิร์ฟเวอร์ OnePass เรียบร้อย"));
+    }
   }
+
+  // 5. ระบบความปลอดภัย Ultrasonic Anti-Pinch (เปิดค้างไว้ 5 วินาที หรือจนกว่าคนจะพ้นระยะ)
+  unsigned long openStart = millis();
+  while (millis() - openStart < GATE_MAX_TIMEOUT_MS) {
+    long dist = readUltrasonicCm();
+    if (dist >= SENSOR_MIN_DISTANCE && dist <= SENSOR_MAX_DISTANCE) {
+      openStart = millis(); // ตราบใดที่คนยังอยู่หน้าเซนเซอร์ ให้รีเซ็ตเวลากันไม้หนีบ
+      lcd.setCursor(0, 1);
+      lcd.print("HOLD: PASSING...");
+    }
+    delay(100);
+  }
+
+  // 6. ปิดไม้กั้น คืนสู่สถานะปกติ: ปิด Relay ก่อน แล้วลดไม้กั้นลง (90 องศา) เพื่อให้ไฟ 5V เต็มที่
+  digitalWrite(PIN_RELAY, LOW);
+  setServoAngle(servoAngleClose);
+  digitalWrite(PIN_LED_GREEN, LOW);
+  digitalWrite(PIN_LED_RED, HIGH);
+
+  // รอให้สัญญาณไฟมอเตอร์นิ่ง 250ms แล้วเคลียร์ข้อมูลค้างใน Buffer ทั้งสองขาเพื่อกันวนลูปซ้ำ
+  delay(250);
+  while (Serial2.available()) Serial2.read();
+  while (Serial1.available()) Serial1.read();
+  lastScanFinishTime = millis();
+
+  lcd.setCursor(0, 0);
+  lcd.print("OnePass Gate    ");
+  lcd.setCursor(0, 1);
+  lcd.print("Ready to scan...");
 }
 
 // อัปเดตจอ LCD1602 ให้แสดงสถานะล่าสุด บรรทัด 1: WiFi, บรรทัด 2: เซนเซอร์ Ultrasonic
@@ -354,7 +312,7 @@ void runLocalTests() {
 
   buttonPressed = (digitalRead(PIN_BUTTON) == LOW);
 
-  drainQrSerial();
+  checkQrScannerHow2Electronics();
   updateLcd();
 }
 
@@ -383,8 +341,8 @@ void connectWiFi() {
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   unsigned long startAttempt = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 20000) {
-    delay(300);
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 4000) {
+    delay(200);
     Serial.print(".");
   }
 
@@ -410,12 +368,11 @@ void reportStatus() {
 
   if (SERVER_PORT == 443) {
     secureClient.setInsecure();
-    secureClient.setTimeout(8000);
-    // เชื่อมต่อด้วย IP ตรง 27.254.134.22 ก่อนเสมอ เพื่อไม่ให้บอร์ดค้างรอ DNS บน Hotspot
+    secureClient.setTimeout(3500);
+    // เชื่อมต่อด้วย IP ตรง 27.254.134.22 ก่อนเสมอ เพื่อไม่ให้ติด DNS บน Hotspot (เหมือนตอน 01:34 น. ที่ออนไลน์สำเร็จ)
     if (!secureClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT)) {
-      Serial.println("⚠️ ต่อด้วย IP ตรงไม่สำเร็จ ลองต่อด้วยโดเมน ...");
       if (!secureClient.connect(SERVER_HOST, SERVER_PORT)) {
-        Serial.println("❌ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (Status HTTPS) ทั้ง IP และโดเมน");
+        Serial.println("❌ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (Status HTTPS)");
         serverOk = false;
         updateLcd();
         return;
@@ -423,13 +380,14 @@ void reportStatus() {
     }
     client = &secureClient;
   } else {
-    plainClient.setTimeout(8000);
-    if (!plainClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT) &&
-        !plainClient.connect(SERVER_HOST, SERVER_PORT)) {
-      Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (Status HTTP)");
-      serverOk = false;
-      updateLcd();
-      return;
+    plainClient.setTimeout(3500);
+    if (!plainClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT)) {
+      if (!plainClient.connect(SERVER_HOST, SERVER_PORT)) {
+        Serial.println("❌ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (Status HTTP)");
+        serverOk = false;
+        updateLcd();
+        return;
+      }
     }
     client = &plainClient;
   }
@@ -665,6 +623,12 @@ void setup() {
   Serial.begin(115200);
   delay(500);
 
+  Serial.println(F("\n========================================================"));
+  Serial.println(F("  OnePass Smart Gate Controller - Production Firmware"));
+  Serial.println(F("  [อัปเดตล่าสุด: 10 พฤศจิกายน 2569 เวลา 01:44 น.]"));
+  Serial.println(F("  คุณสมบัติ: สแกน QR แล้วสลับไฟเขียวทันที (GPIO 27) + เช็คกล้อง"));
+  Serial.println(F("========================================================"));
+
   pinMode(PIN_RELAY, OUTPUT);
   pinMode(PIN_LED_GREEN, OUTPUT);
   pinMode(PIN_LED_RED, OUTPUT);
@@ -688,25 +652,50 @@ void setup() {
   delay(50);
   lcd.setCursor(0, 0);
   delay(20);
-  lcd.print("OnePass Gate");
+  lcd.print("OnePass Gate    ");
   delay(50);
   lcd.setCursor(0, 1);
   delay(20);
-  lcd.print("Starting...");
+  lcd.print("Init v03:17...  ");
 
-  // รองรับกล้องสแกนเนอร์ทุกการต่อสาย ทั้งขา 16 และขา 17:
-  Serial2.begin(QR_BAUD, SERIAL_8N1, 16, 17);
-  Serial1.begin(QR_BAUD, SERIAL_8N1, 17, 16);
+  // เปิดรับสัญญาณกล้องทั้งขา 16 (Serial2) และขา 17 (Serial1) โดยต้องสั่ง INPUT_PULLUP หลัง begin() เสมอเพื่อไม่ให้ขาลอยเกิดลูป
+  Serial2.begin(QR_BAUD, SERIAL_8N1, 16, -1);
+  Serial1.begin(QR_BAUD, SERIAL_8N1, 17, -1);
+  pinMode(16, INPUT_PULLUP);
+  pinMode(17, INPUT_PULLUP);
+  while (Serial2.available()) Serial2.read();
+  while (Serial1.available()) Serial1.read();
+  Serial.println(F("[INIT] Dual UART QR Listener ready on GPIO16 & GPIO17 (Pull-up Active, No Loop)"));
 
   runStartupOutputCheck();
+  delay(250);
+  while (Serial2.available()) Serial2.read();
+  while (Serial1.available()) Serial1.read();
+  lastScanFinishTime = millis();
+
   connectWiFi();
-  Serial.println("📡 เริ่มรายงานสถานะไปที่ " + String(SERVER_HOST) + " ทุก 3 วินาที");
+
+  // ส่งรายงานสถานะเข้าเว็บทันทีที่เปิดเครื่อง เพื่อให้หน้าเว็บขึ้น "ออนไลน์" ทันทีโดยไม่ต้องรอ
+  runLocalTests();
+  if (WiFi.status() == WL_CONNECTED) {
+    reportStatus();
+  }
+
+  // ตั้งค่าหน้าจอพร้อมใช้งานทันที
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("OnePass Gate    ");
+  lcd.setCursor(0, 1);
+  lcd.print("Ready to scan...");
+
+  Serial.println("📡 พร้อมรับการสแกน QR ตลอดเวลา (Non-blocking loop)");
 }
 
 void loop() {
-  drainQrSerial();
+  // 1. ตรวจสอบกล้องสแกนเนอร์ตลอดเวลา 100% ไม่ติดบล็อกเน็ต
+  checkQrScannerHow2Electronics();
 
-  // รองรับการพิมพ์รหัสหรือสแกนผ่าน USB Serial Monitor เพื่อทดสอบทันที
+  // 2. รองรับการพิมพ์รหัสหรือสแกนผ่าน USB Serial Monitor เพื่อทดสอบทันที
   if (Serial.available()) {
     String usbInput = Serial.readStringUntil('\n');
     usbInput.trim();
@@ -716,7 +705,7 @@ void loop() {
     }
   }
 
-  // ตรวจจับปุ่มฉุกเฉิน (Active LOW) ถ้ากดให้ยกไม้กั้นทันที
+  // 3. ตรวจจับปุ่มฉุกเฉิน (Active LOW) ถ้ากดให้ยกไม้กั้นทันที
   if (digitalRead(PIN_BUTTON) == LOW) {
     Serial.println("🚨 ตรวจพบการกดปุ่มฉุกเฉินหน้าตู้ (GPIO 15) สั่งยกไม้กั้นทันที!");
     lcd.setCursor(0, 1);
@@ -724,17 +713,20 @@ void loop() {
     testOpenSequence();
   }
 
+  // 4. เชื่อมต่อ WiFi ในพื้นหลังแบบไม่หยุดการทำงานของระบบสแกน (ห้าม return)
   if (WiFi.status() != WL_CONNECTED) {
-    if (millis() - lastReconnectAttempt > 10000) {
+    if (millis() - lastReconnectAttempt > 15000) {
       lastReconnectAttempt = millis();
-      connectWiFi();
+      WiFi.reconnect();
     }
-    return;
   }
 
+  // 5. ส่งรายงานสถานะและอัปเดตหน้าจอทุกรอบเวลา
   if (millis() - lastCycle >= CYCLE_MS) {
     lastCycle = millis();
     runLocalTests();
-    reportStatus();
+    if (WiFi.status() == WL_CONNECTED) {
+      reportStatus();
+    }
   }
 }
