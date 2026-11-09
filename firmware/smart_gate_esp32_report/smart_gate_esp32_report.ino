@@ -110,11 +110,13 @@ long readUltrasonicCm() {
 }
 
 String qrBuffer = "";
+unsigned long lastQrByteTime = 0;
 
 void drainQrSerial() {
   while (QrSerial.available()) {
     char c = (char)QrSerial.read();
     qrEverConnected = true;
+    lastQrByteTime = millis();
 
     if (c == '\r' || c == '\n') {
       qrBuffer.trim();
@@ -126,6 +128,17 @@ void drainQrSerial() {
     } else {
       qrBuffer += c;
       if (qrBuffer.length() > 200) qrBuffer = ""; // กันบัฟเฟอร์บวมถ้าโมดูลส่งขยะไม่มีบรรทัดจบ
+    }
+  }
+
+  // รองรับโมดูล QR บางรุ่นที่ไม่ส่ง \r หรือ \n ปิดท้าย:
+  // ถ้ามีข้อความค้างในบัฟเฟอร์ และไม่มีข้อมูลใหม่เข้ามาเกิน 250ms ให้ส่งตรวจสอบทันที
+  if (qrBuffer.length() > 5 && millis() - lastQrByteTime > 250) {
+    qrBuffer.trim();
+    if (qrBuffer.length() > 0) {
+      String scanned = qrBuffer;
+      qrBuffer = "";
+      submitQrScan(scanned);
     }
   }
 }

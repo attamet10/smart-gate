@@ -1010,6 +1010,10 @@ app.post('/api/gate/check-out', async (req, res) => {
       VALUES (?, ?, 'gate_staff', 'gate_exit', ?)
     `, [requestId, guardUserId || 1, `บันทึกเวลาออกนอกสถานศึกษา: ${now.toLocaleTimeString('th-TH')} ${notes ? '(' + notes + ')' : ''}`]);
 
+    // สั่งยกไม้กั้นอัตโนมัติไปยังบอร์ด ESP32 เมื่อเวรประตูบันทึกเวลาออก
+    pendingDeviceCommand = 'OPEN_TEST';
+    console.log(`[Gate Check-Out] Queued OPEN_TEST command to ESP32 for request #${requestId}`);
+
     // Send Telegram Notification to Student
     (async () => {
       try {
@@ -1047,6 +1051,10 @@ app.post('/api/gate/check-in', async (req, res) => {
       INSERT INTO onepass_logs (request_id, user_id, role_acted, action, comment)
       VALUES (?, ?, 'gate_staff', 'gate_return', ?)
     `, [requestId, guardUserId || 1, `บันทึกเวลากลับเข้าสถานศึกษา: ${now.toLocaleTimeString('th-TH')} ${notes ? '(' + notes + ')' : ''}`]);
+
+    // สั่งยกไม้กั้นอัตโนมัติไปยังบอร์ด ESP32 เมื่อเวรประตูบันทึกเวลากลับ
+    pendingDeviceCommand = 'OPEN_TEST';
+    console.log(`[Gate Check-In] Queued OPEN_TEST command to ESP32 for request #${requestId}`);
 
     // Send Telegram Notification to Student
     (async () => {
