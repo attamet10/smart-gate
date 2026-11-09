@@ -84,6 +84,28 @@ Servo gateServo;
 HardwareSerial QrSerial(2);
 LiquidCrystal_I2C lcd(LCD_I2C_ADDR, 16, 2);
 
+// ฟังก์ชันสั่ง Servo ที่รับประกันว่า attach ถูกต้องเสมอ
+void setServoAngle(int angle) {
+  if (!gateServo.attached()) {
+    gateServo.setPeriodHertz(50);
+    gateServo.attach(PIN_SERVO, 500, 2400);
+  }
+  gateServo.write(angle);
+}
+
+// ฟังก์ชันส่งเสียงบี๊บที่ไม่ใช้ PWM Timer (ไม่ไปกวนการทำงานของ Servo เด็ดขาด)
+void safeBeep(int freq = 1500, int durationMs = 100) {
+  if (freq <= 0 || durationMs <= 0) return;
+  long halfPeriodUs = 1000000L / (freq * 2L);
+  long cycles = (long)freq * durationMs / 1000L;
+  for (long i = 0; i < cycles; i++) {
+    digitalWrite(PIN_SPEAKER, HIGH);
+    delayMicroseconds(halfPeriodUs);
+    digitalWrite(PIN_SPEAKER, LOW);
+    delayMicroseconds(halfPeriodUs);
+  }
+}
+
 bool ultrasonicConnected = false;
 long ultrasonicDistance = -1;
 bool buttonPressed = false;
@@ -117,6 +139,7 @@ unsigned long lastQrByteTime = 0;
 void drainQrSerial() {
   while (QrSerial.available()) {
     char c = (char)QrSerial.read();
+    Serial.write(c); // แสดงตัวอักษรที่กล้องส่งมาใน Serial Monitor ทันที
     qrEverConnected = true;
     lastQrByteTime = millis();
 
@@ -125,21 +148,22 @@ void drainQrSerial() {
       if (qrBuffer.length() > 0) {
         String scanned = qrBuffer;
         qrBuffer = "";
+        Serial.println("\n[QR RECEIVED] " + scanned);
         submitQrScan(scanned);
       }
     } else {
       qrBuffer += c;
-      if (qrBuffer.length() > 200) qrBuffer = ""; // กันบัฟเฟอร์บวมถ้าโมดูลส่งขยะไม่มีบรรทัดจบ
+      if (qrBuffer.length() > 200) qrBuffer = "";
     }
   }
 
   // รองรับโมดูล QR บางรุ่นที่ไม่ส่ง \r หรือ \n ปิดท้าย:
-  // ถ้ามีข้อความค้างในบัฟเฟอร์ และไม่มีข้อมูลใหม่เข้ามาเกิน 250ms ให้ส่งตรวจสอบทันที
-  if (qrBuffer.length() > 5 && millis() - lastQrByteTime > 250) {
+  if (qrBuffer.length() > 4 && millis() - lastQrByteTime > 250) {
     qrBuffer.trim();
     if (qrBuffer.length() > 0) {
       String scanned = qrBuffer;
       qrBuffer = "";
+      Serial.println("\n[QR TIMEOUT] " + scanned);
       submitQrScan(scanned);
     }
   }
@@ -165,7 +189,7 @@ void submitQrScan(const String& rawToken) {
   if (token.length() < 3) return;
 
   // ส่งเสียงติ๊ดสั้นทันทีที่บอร์ดรับรหัสจากกล้องได้ (ยืนยันว่ากล้องส่งข้อมูลถึงบอร์ดแล้ว)
-  tone(PIN_SPEAKER, 1500, 80);
+  safeBeep( 1500, 80);
 
   lcd.setCursor(0, 1);
   lcd.print("Checking pass...");
@@ -174,7 +198,7 @@ void submitQrScan(const String& rawToken) {
     Serial.println("❌ ไม่สามารถส่งรหัสได้: WiFi ไม่ได้เชื่อมต่อ");
     lcd.setCursor(0, 1);
     lcd.print("WiFi not ready! ");
-    tone(PIN_SPEAKER, 400, 300);
+    safeBeep( 400, 300);
     return;
   }
 
@@ -190,7 +214,7 @@ void submitQrScan(const String& rawToken) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan HTTPS)");
       lcd.setCursor(0, 1);
       lcd.print("HTTPS Conn Error");
-      tone(PIN_SPEAKER, 400, 300);
+      safeBeep( 400, 300);
       return;
     }
     client = &secureClient;
@@ -200,7 +224,7 @@ void submitQrScan(const String& rawToken) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan HTTP)");
       lcd.setCursor(0, 1);
       lcd.print("HTTP Conn Error ");
-      tone(PIN_SPEAKER, 400, 300);
+      safeBeep( 400, 300);
       return;
     }
     client = &plainClient;
@@ -239,7 +263,7 @@ void submitQrScan(const String& rawToken) {
   } else {
     lcd.print("Scan: DENIED    ");
     Serial.println("❌ สแกน QR ไม่ผ่าน: " + response);
-    tone(PIN_SPEAKER, 400, 400);
+    safeBeep( 400, 400);
   }
 }
 
@@ -281,14 +305,14 @@ void runLocalTests() {
 // สั่งงาน Servo/LED/Relay/บัซเซอร์ครั้งเดียวตอนบูต เพื่อยืนยันว่าสายต่อถูก (ไม่วนซ้ำทุกรอบ
 // เพราะถ้าต่อกับประตูจริงจะทำให้ไม้กั้น/กลอนขยับเองทุก 3 วิ ซึ่งไม่ต้องการ)
 void runStartupOutputCheck() {
-  gateServo.write(SERVO_ANGLE_OPEN);
+  setServoAngle(SERVO_ANGLE_OPEN);
   digitalWrite(PIN_LED_GREEN, HIGH);
   digitalWrite(PIN_LED_RED, LOW);
   digitalWrite(PIN_RELAY, HIGH);
-  tone(PIN_SPEAKER, 1200, 120);
+  safeBeep( 1200, 120);
   delay(500);
 
-  gateServo.write(SERVO_ANGLE_CLOSE);
+  setServoAngle(SERVO_ANGLE_CLOSE);
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_RED, HIGH);
   digitalWrite(PIN_RELAY, LOW);
@@ -427,11 +451,11 @@ void reportStatus() {
 // ============================================================================
 void openGateWithUltrasonicSafety() {
   // 1. สั่งยกไม้กั้นขึ้น
-  gateServo.write(SERVO_ANGLE_OPEN);
+  setServoAngle(SERVO_ANGLE_OPEN);
   digitalWrite(PIN_RELAY, HIGH);
   digitalWrite(PIN_LED_GREEN, HIGH);
   digitalWrite(PIN_LED_RED, LOW);
-  tone(PIN_SPEAKER, 1500, 200);
+  safeBeep( 1500, 200);
 
   Serial.println("🚪 [GATE] ยกไม้กั้นขึ้น (0°): เปิดทางให้นักเรียนผ่าน...");
   lcd.setCursor(0, 1);
@@ -495,7 +519,7 @@ void openGateWithUltrasonicSafety() {
   }
 
   // 2. สั่งลดไม้กั้นลงปิด (SERVO_ANGLE_CLOSE = 90 องศา)
-  gateServo.write(SERVO_ANGLE_CLOSE);
+  setServoAngle(SERVO_ANGLE_CLOSE);
   digitalWrite(PIN_RELAY, LOW);
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_RED, HIGH);
@@ -507,11 +531,11 @@ void openGateWithUltrasonicSafety() {
 
 // คำสั่งทดสอบเปิดไม้กั้นค้างไว้จากหน้าเว็บ (OPEN_TEST)
 void testOpenCommand() {
-  gateServo.write(SERVO_ANGLE_OPEN);
+  setServoAngle(SERVO_ANGLE_OPEN);
   digitalWrite(PIN_RELAY, HIGH);
   digitalWrite(PIN_LED_GREEN, HIGH);
   digitalWrite(PIN_LED_RED, LOW);
-  tone(PIN_SPEAKER, 1500, 200);
+  safeBeep( 1500, 200);
   Serial.println("🚪 [GATE] ยกไม้กั้นขึ้นเปิดทาง (คำสั่ง OPEN_TEST ค้างไว้รอสั่งปิด)");
   lcd.setCursor(0, 1);
   lcd.print("GATE OPEN (CMD) ");
@@ -519,11 +543,11 @@ void testOpenCommand() {
 
 // คำสั่งทดสอบลดไม้กั้นลงปิดจากหน้าเว็บ (CLOSE_TEST)
 void testCloseCommand() {
-  gateServo.write(SERVO_ANGLE_CLOSE);
+  setServoAngle(SERVO_ANGLE_CLOSE);
   digitalWrite(PIN_RELAY, LOW);
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_RED, HIGH);
-  tone(PIN_SPEAKER, 800, 250);
+  safeBeep( 800, 250);
   Serial.println("🔒 [GATE] ลดไม้กั้นลงปิดทาง (คำสั่ง CLOSE_TEST)");
   lcd.setCursor(0, 1);
   lcd.print("GATE CLOSED(CMD)");
@@ -535,9 +559,9 @@ void testOpenSequence() {
 
 // ทดสอบอุปกรณ์ทีละชิ้น (ปุ่มแยกในหน้าแอดมิน) - สั่งงานสั้นๆ ให้เห็น/ได้ยินผลแล้วคืนค่าเดิม
 void testServoOnly() {
-  gateServo.write(SERVO_ANGLE_OPEN);
+  setServoAngle(SERVO_ANGLE_OPEN);
   delay(800);
-  gateServo.write(SERVO_ANGLE_CLOSE);
+  setServoAngle(SERVO_ANGLE_CLOSE);
   Serial.println("✅ ทดสอบ Servo เสร็จสิ้น");
 }
 
@@ -558,7 +582,7 @@ void testRelayOnly() {
 }
 
 void testBuzzerOnly() {
-  tone(PIN_SPEAKER, 1500, 400);
+  safeBeep( 1500, 400);
   delay(400);
   Serial.println("✅ ทดสอบบัซเซอร์เสร็จสิ้น");
 }
@@ -575,9 +599,14 @@ void setup() {
   pinMode(PIN_ECHO, INPUT);
   pinMode(PIN_SPEAKER, OUTPUT);
 
+  // จัดสรร PWM Timer ให้ ESP32Servo ครบทุก Channel เพื่อให้ Servo หมุนได้ 100%
+  ESP32PWM::allocateTimer(0);
+  ESP32PWM::allocateTimer(1);
+  ESP32PWM::allocateTimer(2);
+  ESP32PWM::allocateTimer(3);
   gateServo.setPeriodHertz(50);
   gateServo.attach(PIN_SERVO, 500, 2400);
-  gateServo.write(SERVO_ANGLE_CLOSE);
+  setServoAngle(SERVO_ANGLE_CLOSE);
 
   Wire.begin(21, 22); // SDA=GPIO21, SCL=GPIO22
   Wire.setClock(50000); // ลดความเร็ว I2C ลงเหลือ 50kHz กันจอตัวอักษรขาดหาย
