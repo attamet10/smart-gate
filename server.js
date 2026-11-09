@@ -1122,7 +1122,8 @@ app.post('/api/device/status', (req, res) => {
 
 // Get Hardware Status (For Web UI / Admin / Gate Duty)
 app.get('/api/device/status', (req, res) => {
-  const isOnline = Boolean(deviceHardwareState.lastSeen && (Date.now() - new Date(deviceHardwareState.lastSeen).getTime() < 12000));
+  // ขยาย timeout เป็น 45 วินาที เพื่อรองรับรอบส่ง 15 วิ และความหน่วงเน็ตมือถือ
+  const isOnline = Boolean(deviceHardwareState.lastSeen && (Date.now() - new Date(deviceHardwareState.lastSeen).getTime() < 45000));
   res.json({
     success: true,
     device: {

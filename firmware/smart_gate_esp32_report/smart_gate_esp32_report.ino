@@ -91,7 +91,7 @@ bool outputCycleState = false;
 bool qrEverConnected = false; // true ถาวรตั้งแต่ครั้งแรกที่มีข้อมูลเข้ามาจากโมดูล QR
 
 unsigned long lastCycle = 0;
-const unsigned long CYCLE_MS = 3000;
+const unsigned long CYCLE_MS = 15000; // ส่งสถานะทุก 15 วินาที (ป้องกัน ESP32 แรมรั่ว/ค้าง/แย่งช่องทาง UART)
 unsigned long lastReconnectAttempt = 0;
 
 long readUltrasonicCm() {
@@ -162,6 +162,9 @@ void submitQrScan(const String& rawToken) {
 
   if (token.length() < 3) return;
 
+  // ส่งเสียงติ๊ดสั้นทันทีที่บอร์ดรับรหัสจากกล้องได้ (ยืนยันว่ากล้องส่งข้อมูลถึงบอร์ดแล้ว)
+  tone(PIN_SPEAKER, 1500, 80);
+
   lcd.setCursor(0, 1);
   lcd.print("Checking pass...");
 
@@ -179,7 +182,7 @@ void submitQrScan(const String& rawToken) {
 
   if (SERVER_PORT == 443) {
     secureClient.setInsecure();
-    secureClient.setTimeout(8000);
+    secureClient.setTimeout(5000);
     if (!secureClient.connect(SERVER_HOST, SERVER_PORT)) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan HTTPS)");
       lcd.setCursor(0, 1);
@@ -189,7 +192,7 @@ void submitQrScan(const String& rawToken) {
     }
     client = &secureClient;
   } else {
-    plainClient.setTimeout(8000);
+    plainClient.setTimeout(5000);
     if (!plainClient.connect(SERVER_HOST, SERVER_PORT)) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan HTTP)");
       lcd.setCursor(0, 1);
@@ -313,20 +316,27 @@ void connectWiFi() {
 void reportStatus() {
   if (WiFi.status() != WL_CONNECTED) return;
 
+  // ป้องกัน ESP32 แรมรั่วจากการต่อ HTTPS บ่อยๆ จนค้าง
+  if (ESP.getFreeHeap() < 25000) {
+    Serial.println("⚠️ แรมระบบเหลือน้อย สั่งรีสตาร์ท ESP32 ป้องกันเครื่องค้าง...");
+    ESP.restart();
+    return;
+  }
+
   WiFiClientSecure secureClient;
   WiFiClient plainClient;
   WiFiClient* client = nullptr;
 
   if (SERVER_PORT == 443) {
     secureClient.setInsecure();
-    secureClient.setTimeout(8000);
+    secureClient.setTimeout(4000);
     if (!secureClient.connect(SERVER_HOST, SERVER_PORT)) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (Status HTTPS)");
       return;
     }
     client = &secureClient;
   } else {
-    plainClient.setTimeout(8000);
+    plainClient.setTimeout(4000);
     if (!plainClient.connect(SERVER_HOST, SERVER_PORT)) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (Status HTTP)");
       return;
