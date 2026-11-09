@@ -89,9 +89,11 @@ long ultrasonicDistance = -1;
 bool buttonPressed = false;
 bool outputCycleState = false;
 bool qrEverConnected = false; // true ถาวรตั้งแต่ครั้งแรกที่มีข้อมูลเข้ามาจากโมดูล QR
+bool serverOk = false;        // true เมื่อส่งสถานะเข้าเว็บสำเร็จจริง (HTTP 200)
+void updateLcd();
 
 unsigned long lastCycle = 0;
-const unsigned long CYCLE_MS = 15000; // ส่งสถานะทุก 15 วินาที (ป้องกัน ESP32 แรมรั่ว/ค้าง/แย่งช่องทาง UART)
+const unsigned long CYCLE_MS = 5000; // ส่งสถานะทุก 5 วินาที
 unsigned long lastReconnectAttempt = 0;
 
 long readUltrasonicCm() {
@@ -182,8 +184,9 @@ void submitQrScan(const String& rawToken) {
 
   if (SERVER_PORT == 443) {
     secureClient.setInsecure();
-    secureClient.setTimeout(5000);
-    if (!secureClient.connect(SERVER_HOST, SERVER_PORT)) {
+    secureClient.setTimeout(12000);
+    if (!secureClient.connect(SERVER_HOST, SERVER_PORT) &&
+        !secureClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT)) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan HTTPS)");
       lcd.setCursor(0, 1);
       lcd.print("HTTPS Conn Error");
@@ -192,7 +195,7 @@ void submitQrScan(const String& rawToken) {
     }
     client = &secureClient;
   } else {
-    plainClient.setTimeout(5000);
+    plainClient.setTimeout(12000);
     if (!plainClient.connect(SERVER_HOST, SERVER_PORT)) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan HTTP)");
       lcd.setCursor(0, 1);
@@ -243,12 +246,14 @@ void submitQrScan(const String& rawToken) {
 // อัปเดตจอ LCD1602 ให้แสดงสถานะล่าสุด บรรทัด 1: WiFi, บรรทัด 2: เซนเซอร์ Ultrasonic
 void updateLcd() {
   lcd.setCursor(0, 0);
-  lcd.print("WiFi:");
-  lcd.print(WiFi.status() == WL_CONNECTED ? "OK  " : "--  ");
+  lcd.print("W:");
+  lcd.print(WiFi.status() == WL_CONNECTED ? "OK " : "-- ");
+  lcd.print("S:");
+  lcd.print(serverOk ? "OK " : "-- ");
   delay(5);
-  lcd.setCursor(9, 0);
+  lcd.setCursor(10, 0);
   lcd.print("QR:");
-  lcd.print(qrEverConnected ? "OK" : "--");
+  lcd.print(qrEverConnected ? "OK " : "-- ");
   delay(5);
 
   lcd.setCursor(0, 1);
@@ -316,12 +321,8 @@ void connectWiFi() {
 void reportStatus() {
   if (WiFi.status() != WL_CONNECTED) return;
 
-  // ป้องกัน ESP32 แรมรั่วจากการต่อ HTTPS บ่อยๆ จนค้าง
-  if (ESP.getFreeHeap() < 25000) {
-    Serial.println("⚠️ แรมระบบเหลือน้อย สั่งรีสตาร์ท ESP32 ป้องกันเครื่องค้าง...");
-    ESP.restart();
-    return;
-  }
+  Serial.print("[NET] Free heap: ");
+  Serial.println(ESP.getFreeHeap());
 
   WiFiClientSecure secureClient;
   WiFiClient plainClient;
@@ -329,16 +330,23 @@ void reportStatus() {
 
   if (SERVER_PORT == 443) {
     secureClient.setInsecure();
-    secureClient.setTimeout(4000);
+    secureClient.setTimeout(12000);
     if (!secureClient.connect(SERVER_HOST, SERVER_PORT)) {
-      Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (Status HTTPS)");
-      return;
+      Serial.println("⚠️ ต่อด้วยชื่อโดเมนไม่สำเร็จ ลองต่อด้วย IP ตรง 27.254.134.22 ...");
+      if (!secureClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT)) {
+        Serial.println("❌ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (Status HTTPS) ทั้งโดเมนและ IP");
+        serverOk = false;
+        updateLcd();
+        return;
+      }
     }
     client = &secureClient;
   } else {
-    plainClient.setTimeout(4000);
+    plainClient.setTimeout(12000);
     if (!plainClient.connect(SERVER_HOST, SERVER_PORT)) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (Status HTTP)");
+      serverOk = false;
+      updateLcd();
       return;
     }
     client = &plainClient;
@@ -378,7 +386,12 @@ void reportStatus() {
 
   if (response.indexOf("200 OK") >= 0) {
     Serial.println("✅ รายงานสถานะสำเร็จ");
+    serverOk = true;
+  } else {
+    Serial.println("❌ เซิร์ฟเวอร์ไม่ตอบ 200 OK: " + response.substring(0, 120));
+    serverOk = false;
   }
+  updateLcd();
 
   if (response.indexOf("CLOSE_TEST") >= 0) {
     Serial.println("🛑 ได้รับคำสั่งทดสอบลดไม้กั้น/ปิดทางจากแอดมิน");
