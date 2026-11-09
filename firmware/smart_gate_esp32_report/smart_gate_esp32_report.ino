@@ -144,11 +144,34 @@ void drainQrSerial() {
 }
 
 // ส่งรหัส QR ที่สแกนได้ไปตรวจสอบที่เซิร์ฟเวอร์จริง (สแกนผ่าน เปิดไม้กั้นอัตโนมัติ)
-void submitQrScan(const String& token) {
-  Serial.print("[QR SCAN] ");
+void submitQrScan(const String& rawToken) {
+  // กรองเฉพาะตัวอักษรที่พิมพ์ได้ ตัดรหัสขยะ/ตัวควบคุม/เครื่องหมายคำพูดทิ้ง เพื่อให้ JSON ถูกต้อง 100%
+  String token = "";
+  for (int i = 0; i < rawToken.length(); i++) {
+    char ch = rawToken.charAt(i);
+    if (ch >= 32 && ch <= 126 && ch != '"' && ch != '\\') {
+      token += ch;
+    }
+  }
+  token.trim();
+
+  Serial.print("[QR SCAN] Raw: ");
+  Serial.print(rawToken);
+  Serial.print(" -> Clean: ");
   Serial.println(token);
 
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (token.length() < 3) return;
+
+  lcd.setCursor(0, 1);
+  lcd.print("Checking pass...");
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("❌ ไม่สามารถส่งรหัสได้: WiFi ไม่ได้เชื่อมต่อ");
+    lcd.setCursor(0, 1);
+    lcd.print("WiFi not ready! ");
+    tone(PIN_SPEAKER, 400, 300);
+    return;
+  }
 
   WiFiClientSecure secureClient;
   WiFiClient plainClient;
@@ -159,6 +182,9 @@ void submitQrScan(const String& token) {
     secureClient.setTimeout(8000);
     if (!secureClient.connect(SERVER_HOST, SERVER_PORT)) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan HTTPS)");
+      lcd.setCursor(0, 1);
+      lcd.print("HTTPS Conn Error");
+      tone(PIN_SPEAKER, 400, 300);
       return;
     }
     client = &secureClient;
@@ -166,6 +192,9 @@ void submitQrScan(const String& token) {
     plainClient.setTimeout(8000);
     if (!plainClient.connect(SERVER_HOST, SERVER_PORT)) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan HTTP)");
+      lcd.setCursor(0, 1);
+      lcd.print("HTTP Conn Error ");
+      tone(PIN_SPEAKER, 400, 300);
       return;
     }
     client = &plainClient;
@@ -192,17 +221,19 @@ void submitQrScan(const String& token) {
   }
   client->stop();
 
+  Serial.println("[SERVER RESPONSE] " + response);
+
   bool success = response.indexOf("\"success\":true") >= 0;
 
   lcd.setCursor(0, 1);
   if (success) {
     lcd.print("Scan: OK!       ");
-    Serial.println("✅ สแกน QR สำเร็จ เปิดไม้กั้น");
+    Serial.println("✅ สแกน QR สำเร็จ เปิดไม้กั้นทันที");
     testOpenSequence();
   } else {
     lcd.print("Scan: DENIED    ");
     Serial.println("❌ สแกน QR ไม่ผ่าน: " + response);
-    tone(PIN_SPEAKER, 400, 300);
+    tone(PIN_SPEAKER, 400, 400);
   }
 }
 
