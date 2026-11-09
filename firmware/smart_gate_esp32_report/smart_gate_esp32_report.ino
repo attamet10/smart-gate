@@ -43,9 +43,9 @@
 #include "secrets.h"
 
 #define PIN_SERVO        18
-// กำหนดองศา Servo ไม้กั้น: 0° = ยกขึ้นเปิดทาง, 90° = แนวนอนปิดกั้น
-#define SERVO_ANGLE_OPEN    0     // ยกไม้กั้นขึ้น (เปิดทาง) = 0 องศา
-#define SERVO_ANGLE_CLOSE   90    // ลดไม้กั้นลง (ปิดกั้นทาง แนวนอน) = 90 องศา
+// กำหนดองศา Servo ไม้กั้น (หลบระยะล็อกเฟือง 0° เพื่อไม่ให้เฟืองขัด): 15° = ยกขึ้นเปิดทาง, 100° = แนวนอนปิดกั้น
+#define SERVO_ANGLE_OPEN    15    // ยกไม้กั้นขึ้น (เปิดทาง) = 15 องศา (ไม่ชนขอบล็อก 0°)
+#define SERVO_ANGLE_CLOSE   100   // ลดไม้กั้นลง (ปิดกั้นทาง แนวนอน) = 100 องศา
 
 // การตั้งค่าระบบ Ultrasonic ตรวจจับคนเดินผ่าน & ป้องกันไม้กั้นตีคน
 #define SENSOR_MIN_DISTANCE       2     // ระยะตรวจจับต่ำสุด (ซม.)
@@ -88,7 +88,7 @@ LiquidCrystal_I2C lcd(LCD_I2C_ADDR, 16, 2);
 void setServoAngle(int angle) {
   if (!gateServo.attached()) {
     gateServo.setPeriodHertz(50);
-    gateServo.attach(PIN_SERVO, 500, 2400);
+    gateServo.attach(PIN_SERVO, 544, 2400);
   }
   gateServo.write(angle);
   delay(450); // ให้เวลาและกระแสไฟ 5V แก่ Servo เต็มที่จนหมุนสุดองศาก่อนสั่ง Relay/Buzzer
@@ -621,7 +621,7 @@ void setup() {
   ESP32PWM::allocateTimer(2);
   ESP32PWM::allocateTimer(3);
   gateServo.setPeriodHertz(50);
-  gateServo.attach(PIN_SERVO, 500, 2400);
+  gateServo.attach(PIN_SERVO, 544, 2400);
   setServoAngle(SERVO_ANGLE_CLOSE);
 
   Wire.begin(21, 22); // SDA=GPIO21, SCL=GPIO22
