@@ -1120,6 +1120,31 @@ app.post('/api/gate/check-in', async (req, res) => {
 });
 
 // ==========================================
+// 5.4 TELEGRAM WEBHOOK ENDPOINT (Realtime Instant Responses)
+// ==========================================
+app.post('/api/telegram/webhook', async (req, res) => {
+  // Always return 200 OK immediately to Telegram
+  res.status(200).json({ ok: true });
+
+  const update = req.body;
+  if (!update) return;
+
+  try {
+    if (update.callback_query) {
+      telegram.handleTelegramCallbackQuery(update.callback_query).catch(err => {
+        console.error('[Webhook Callback Error]:', err.message);
+      });
+    } else if (update.message) {
+      telegram.handleTelegramMessage(update.message).catch(err => {
+        console.error('[Webhook Message Error]:', err.message);
+      });
+    }
+  } catch (err) {
+    console.error('[Telegram Webhook Handler Error]:', err.message);
+  }
+});
+
+// ==========================================
 // 5.5 ESP32 SMART GATE HARDWARE ENDPOINTS
 // ==========================================
 

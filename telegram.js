@@ -977,5 +977,7 @@ module.exports = {
   notifyRequestCreated,
   notifyApprovalAction,
   notifyGateRecord,
+  handleTelegramCallbackQuery,
+  handleTelegramMessage,
   startTelegramPolling
 };
