@@ -17,21 +17,8 @@ const state = {
 document.addEventListener('DOMContentLoaded', () => {
   initEventListeners();
   initBottomNav();
-  updateMobileClock();
-  setInterval(updateMobileClock, 30000);
   checkSavedSession();
 });
-
-/**
- * Update real-time clock on the simulated mobile top bar
- */
-function updateMobileClock() {
-  const el = document.getElementById('mobile-clock');
-  if (!el) return;
-  const now = new Date();
-  const pad = n => String(n).padStart(2, '0');
-  el.textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
-}
 
 /**
  * Initialize all Event Listeners

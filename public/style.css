@@ -146,40 +146,13 @@ body.has-bottom-nav {
   margin: -12px -16px;
 }
 
-/* Simulated Phone Notch / Top Bar */
-.mobile-top-bar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 24px 0;
-  color: #ffffff;
-  font-size: 0.95rem;
-  font-weight: 600;
-  z-index: 10;
-}
-
-.mobile-notch-pill {
-  width: 90px;
-  height: 24px;
-  background: #000000;
-  border-radius: 20px;
-  margin: 0 auto;
-}
-
-.mobile-top-icons {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.85rem;
-}
-
 /* Center Hero Branding */
 .login-hero-center {
   display: flex;
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding: 40px 20px 20px;
+  padding: max(48px, env(safe-area-inset-top, 40px)) 20px 20px;
   z-index: 5;
 }
 
