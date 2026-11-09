@@ -27,8 +27,14 @@
 #define PIN_BUTTON       15    // ปุ่มเปิดฉุกเฉินแบบปุ่มกด (Active LOW)
 
 // กำหนดองศา Servo ไม้กั้น (ปรับทิศทางตามการติดตั้งจริง: 0° = ยกขึ้นเปิดทาง, 90° = ยกลงปิดทาง)
-#define SERVO_ANGLE_OPEN    0     // ยกไม้กั้นขึ้น (เปิดทาง)
-#define SERVO_ANGLE_CLOSE   90    // ลดไม้กั้นลง (ปิดกั้นทาง)
+#define SERVO_ANGLE_OPEN    0     // ยกไม้กั้นขึ้น (เปิดทาง) = 0 องศา
+#define SERVO_ANGLE_CLOSE   90    // ลดไม้กั้นลง (ปิดกั้นทาง) = 90 องศา
+
+// การตั้งค่าระบบ Ultrasonic ตรวจจับคนเดินผ่าน & ป้องกันไม้กั้นตีคน
+#define SENSOR_MIN_DISTANCE       2     // ระยะตรวจจับต่ำสุด (ซม.)
+#define SENSOR_MAX_DISTANCE       30    // ระยะตรวจจับคนเดินผ่าน (ซม.) 2 - 30 ซม.
+#define CLEAR_CONFIRM_DELAY_MS    5000  // หน่วงเวลารอให้พ้นตัว 5 วินาทีก่อนปิด (ป้องกันไม้กั้นเฉี่ยวหลัง)
+#define GATE_MAX_TIMEOUT_MS       30000 // หมดเวลาเปิดทิ้งไว้ 30 วินาที (ถ้าสแกนแล้วไม่ยอมเดินผ่าน)
 
 // Ultrasonic HC-SR04 (เซนเซอร์ตรวจจับคน/รถผ่าน)
 #define PIN_TRIG         5
@@ -40,12 +46,12 @@ Servo gateServo;
 // ตัวแปรสถานะ
 bool isGateOpen = false;
 unsigned long gateOpenTime = 0;
-unsigned long gateHoldDuration = 30000; // ค่าเริ่มต้นเปิดค้าง 30 วินาที
+unsigned long gateHoldDuration = GATE_MAX_TIMEOUT_MS; // ค่าเริ่มต้นเปิดค้าง 30 วินาที
 String currentRequestId = "";
 
 // ตรวจจับ Ultrasonic
 bool objectPassed = false;
-unsigned long objectDetectTime = 0;
+unsigned long personClearedTime = 0;
 
 // ฟังก์ชันวัดระยะ Ultrasonic (cm)
 long readUltrasonicCm() {
@@ -167,27 +173,40 @@ void loop() {
     }
   }
 
-  // 3. จัดการขณะไม้กั้นกำลังเปิดอยู่
+  // 3. จัดการขณะไม้กั้นกำลังเปิดอยู่ (Smart Ultrasonic Anti-Pinch & Auto-Close)
   if (isGateOpen) {
-    unsigned long elapsed = millis() - gateOpenTime;
-
-    // ตรวจจับ Ultrasonic (ถ้ารถ/คนเข้ามาใกล้ 5-30cm แล้วพ้นออกไป > 40cm จะปิดทันที)
     long dist = readUltrasonicCm();
-    if (dist >= 5 && dist <= 30) {
-      objectPassed = true;
-      objectDetectTime = millis();
-    }
-    if (objectPassed && (millis() - objectDetectTime >= 800)) {
-      if (dist > 45 || dist == 999) {
-        closeGate("SENSOR_PASSED");
-        return;
-      }
-    }
+    bool isPersonInFront = (dist >= SENSOR_MIN_DISTANCE && dist <= SENSOR_MAX_DISTANCE);
 
-    // ครบกำหนดเวลา 30 วินาที ปิดอัตโนมัติ
-    if (elapsed >= gateHoldDuration) {
-      closeGate("TIMEOUT_30S");
-      return;
+    if (isPersonInFront) {
+      // ตรวจพบคนอยู่ในระยะ 2 - 30 ซม.
+      if (!objectPassed) {
+        objectPassed = true;
+        Serial.print("[ULTRASONIC] ตรวจพบคนเดินเข้าเซ็นเซอร์ ระยะ: ");
+        Serial.print(dist);
+        Serial.println(" cm");
+      }
+      // **ระบบความปลอดภัย (Anti-Pinch):** คนยังอยู่หน้าเซนเซอร์ ยังไม่ออกไป -> ค้างไม้กั้นไว้บนตลอดเวลา!
+      personClearedTime = 0;
+    } else {
+      // ไม่มีคนบังหน้าเซ็นเซอร์
+      if (objectPassed) {
+        // คนเคยเดินเข้ามาแล้ว และตอนนี้เริ่มเดินพ้นระยะเซ็นเซอร์ออกไปแล้ว
+        if (personClearedTime == 0) {
+          personClearedTime = millis();
+          Serial.println("[ULTRASONIC] คนพ้นระยะเซ็นเซอร์แล้ว เริ่มนับถอยหลัง 5 วินาทีก่อนปิด...");
+        } else if (millis() - personClearedTime >= CLEAR_CONFIRM_DELAY_MS) {
+          closeGate("PERSON_PASSED_CLEARED_5S");
+          return;
+        }
+      } else {
+        // ยังไม่มีคนเดินเข้ามาเลย ตรวจสอบว่าหมดเวลาเปิดทิ้งไว้ 30 วินาทีหรือไม่
+        unsigned long elapsed = millis() - gateOpenTime;
+        if (elapsed >= gateHoldDuration) {
+          closeGate("TIMEOUT_30S");
+          return;
+        }
+      }
     }
   }
 }

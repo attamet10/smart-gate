@@ -11,15 +11,14 @@
     - แอดมินดูผลได้จากเว็บไซต์หลัก หน้า "สถานะฮาร์ดแวร์ประตู" ในเมนูแอดมิน
 
   การเชื่อมต่อขาพิน:
-    - Servo ไม้กั้น            : GPIO 18
-    - LED เขียว                : GPIO 27
-    - LED แดง                  : GPIO 33
-    - LED เหลือง                : GPIO 25
+    - Servo ไม้กั้น            : GPIO 18 (0° = ยกขึ้นเปิด, 90° = ยกลงปิด)
+    - LED เขียว                : GPIO 27 (อนุญาตผ่าน)
+    - LED แดง                  : GPIO 33 (รอสแกน / ปิด)
     - Relay กลอน/ไม้กั้น        : GPIO 26
     - ปุ่มฉุกเฉิน                : GPIO 15 (Active LOW)
-    - Ultrasonic Trig / Echo   : GPIO 5 / GPIO 19
+    - Ultrasonic Trig / Echo   : GPIO 5 / GPIO 19 (ตรวจจับคน 2 - 30 cm)
     - ลำโพง/บัซเซอร์            : GPIO 14
-    - โมดูลสแกน QR (UART2)     : RX2=GPIO 16 (รับจากโมดูล) / TX2=GPIO 17 (ส่งไปโมดูล)
+    - โมดูลสแกน QR (UART2)     : RX2=GPIO 16 / TX2=GPIO 17
       ปรับ QR_BAUD ด้านล่างให้ตรงกับสเปกโมดูลที่ใช้จริง (ค่าเริ่มต้น 9600 เป็นค่ายอดนิยม)
 
   ข้อจำกัดที่ควรรู้:
@@ -45,11 +44,17 @@
 
 #define PIN_SERVO        18
 // กำหนดองศา Servo ไม้กั้น (ปรับทิศทางตามการติดตั้งจริง: 0° = ยกขึ้นเปิดทาง, 90° = ยกลงปิดทาง)
-#define SERVO_ANGLE_OPEN    0     // ยกไม้กั้นขึ้น (เปิดทาง)
-#define SERVO_ANGLE_CLOSE   90    // ลดไม้กั้นลง (ปิดกั้นทาง)
+#define SERVO_ANGLE_OPEN    0     // ยกไม้กั้นขึ้น (เปิดทาง) = 0 องศา
+#define SERVO_ANGLE_CLOSE   90    // ลดไม้กั้นลง (ปิดกั้นทาง) = 90 องศา
+
+// การตั้งค่าระบบ Ultrasonic ตรวจจับคนเดินผ่าน & ป้องกันไม้กั้นตีคน
+#define SENSOR_MIN_DISTANCE       2     // ระยะตรวจจับต่ำสุด (ซม.)
+#define SENSOR_MAX_DISTANCE       30    // ระยะตรวจจับคนเดินผ่าน (ซม.) 2 - 30 ซม.
+#define CLEAR_CONFIRM_DELAY_MS    5000  // หน่วงเวลารอให้พ้นตัว 5 วินาทีก่อนปิด (ป้องกันไม้กั้นเฉี่ยวหลัง)
+#define GATE_MAX_TIMEOUT_MS       30000 // หมดเวลาเปิดทิ้งไว้ 30 วินาที (ถ้าสแกนแล้วไม่ยอมเดินผ่าน)
+
 #define PIN_LED_GREEN    27
 #define PIN_LED_RED      33
-#define PIN_LED_YELLOW   25
 #define PIN_RELAY        26
 #define PIN_BUTTON       15
 #define PIN_TRIG         5
@@ -227,7 +232,6 @@ void runStartupOutputCheck() {
   gateServo.write(SERVO_ANGLE_OPEN);
   digitalWrite(PIN_LED_GREEN, HIGH);
   digitalWrite(PIN_LED_RED, LOW);
-  digitalWrite(PIN_LED_YELLOW, HIGH);
   digitalWrite(PIN_RELAY, HIGH);
   tone(PIN_SPEAKER, 1200, 120);
   delay(500);
@@ -235,7 +239,6 @@ void runStartupOutputCheck() {
   gateServo.write(SERVO_ANGLE_CLOSE);
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_RED, HIGH);
-  digitalWrite(PIN_LED_YELLOW, LOW);
   digitalWrite(PIN_RELAY, LOW);
 
   outputCycleState = true; // ยืนยันแล้วว่าสั่งงานได้ตอนบูต ไม่ต้องวนซ้ำอีก
@@ -335,9 +338,6 @@ void reportStatus() {
   } else if (response.indexOf("\"command\":\"TEST_LED_RED\"") >= 0) {
     Serial.println("🔔 ได้รับคำสั่งทดสอบ LED แดงจากแอดมิน");
     testLedOnly(PIN_LED_RED, "แดง");
-  } else if (response.indexOf("\"command\":\"TEST_LED_YELLOW\"") >= 0) {
-    Serial.println("🔔 ได้รับคำสั่งทดสอบ LED เหลืองจากแอดมิน");
-    testLedOnly(PIN_LED_YELLOW, "เหลือง");
   } else if (response.indexOf("\"command\":\"TEST_RELAY\"") >= 0) {
     Serial.println("🔔 ได้รับคำสั่งทดสอบ Relay จากแอดมิน");
     testRelayOnly();
@@ -347,22 +347,97 @@ void reportStatus() {
   }
 }
 
-// ทดสอบเปิดไม้กั้นค้างไว้สักครู่ตามคำสั่งจากหน้าแอดมิน (ปุ่ม "ทดสอบเปิด")
-void testOpenSequence() {
+// ============================================================================
+// ฟังก์ชันควบคุมไม้กั้นอัจฉริยะ (Smart Ultrasonic Anti-Pinch & Auto-Close)
+//   1. ยกไม้กั้นขึ้น (SERVO_ANGLE_OPEN = 0 องศา), Relay ON, ไฟเขียวติด, ไฟแดงดับ
+//   2. ตรวจจับคนเดินผ่านด้วย Ultrasonic ในระยะ 2 - 30 ซม.
+//   3. ถ้ามีคนอยู่ในระยะเซ็นเซอร์ (ยังไม่ออกไป) -> ค้างไม้กั้นไว้ด้านบนตลอดเวลา (Anti-Pinch)
+//   4. เมื่อคนเดินพ้นระยะเซ็นเซอร์ต่อเนื่องครบ 5 วินาที -> ปิดไม้กั้นลงอัตโนมัติ (ป้องกันไม้กั้นเฉี่ยวหลัง)
+//   5. หมดเวลา 30 วินาทีถ้าไม่มีคนเดินผ่านเลย -> ปิดไม้กั้นอัตโนมัติ
+// ============================================================================
+void openGateWithUltrasonicSafety() {
+  // 1. สั่งยกไม้กั้นขึ้น
   gateServo.write(SERVO_ANGLE_OPEN);
   digitalWrite(PIN_RELAY, HIGH);
   digitalWrite(PIN_LED_GREEN, HIGH);
   digitalWrite(PIN_LED_RED, LOW);
-  digitalWrite(PIN_LED_YELLOW, LOW);
   tone(PIN_SPEAKER, 1500, 200);
 
-  delay(4000); // เปิดค้างไว้ 4 วินาทีให้เห็นผลชัดเจน
+  Serial.println("🚪 [GATE] ยกไม้กั้นขึ้น (0°): เปิดทางให้นักเรียนผ่าน...");
+  lcd.setCursor(0, 1);
+  lcd.print("GATE OPEN: PASS ");
 
+  unsigned long openStartTime = millis();
+  bool personDetected = false;
+  unsigned long personClearedTime = 0;
+
+  while (true) {
+    // อ่านระยะทางจากเซ็นเซอร์ Ultrasonic (ซม.)
+    long dist = readUltrasonicCm();
+    bool isPersonInFront = (dist >= SENSOR_MIN_DISTANCE && dist <= SENSOR_MAX_DISTANCE);
+
+    if (isPersonInFront) {
+      // ตรวจพบคนอยู่ในระยะ 2 - 30 ซม.
+      if (!personDetected) {
+        personDetected = true;
+        Serial.print("🚶 [ULTRASONIC] ตรวจพบคนเดินเข้าเซ็นเซอร์ ระยะ: ");
+        Serial.print(dist);
+        Serial.println(" cm");
+      }
+
+      // **ระบบความปลอดภัยสูงสุด (Anti-Pinch):**
+      // ตราบใดที่คนยังอยู่ในระยะเซ็นเซอร์ (ยังไม่ออกไป) ไม้กั้นจะค้างอยู่ด้านบนตลอดเวลา ไม่ปิดเด็ดขาด!
+      personClearedTime = 0; // รีเซ็ตตัวนับเวลา เพราะคนยังอยู่ตรงเซ็นเซอร์
+      lcd.setCursor(0, 1);
+      lcd.print("HOLD: PASSING...");
+    } else {
+      // ไม่มีคนบังหน้าเซ็นเซอร์ในขณะนี้
+      if (personDetected) {
+        // คนเคยเดินเข้ามาแล้ว และตอนนี้เริ่มเดินพ้นระยะเซ็นเซอร์ออกไปแล้ว
+        if (personClearedTime == 0) {
+          personClearedTime = millis();
+          Serial.println("⏳ [ULTRASONIC] คนพ้นระยะเซ็นเซอร์แล้ว เริ่มนับถอยหลัง 5 วินาทีก่อนปิด...");
+        } else {
+          unsigned long elapsed = millis() - personClearedTime;
+          if (elapsed < CLEAR_CONFIRM_DELAY_MS) {
+            int remainingSec = (int)((CLEAR_CONFIRM_DELAY_MS - elapsed) / 1000) + 1;
+            lcd.setCursor(0, 1);
+            lcd.print("CLOSING IN ");
+            lcd.print(remainingSec);
+            lcd.print("s  ");
+          } else {
+            // พ้นระยะต่อเนื่องครบ 5 วินาทีแล้ว สั่งปิดไม้กั้นทันที
+            Serial.println("✅ [GATE] คนพ้นระยะต่อเนื่องครบ 5 วินาทีแล้ว -> สั่งปิดไม้กั้น");
+            break;
+          }
+        }
+      } else {
+        // ยังไม่มีคนเดินเข้ามาเลย ตรวจสอบว่าหมดเวลาเปิดทิ้งไว้ 30 วินาทีหรือไม่
+        unsigned long elapsedWait = millis() - openStartTime;
+        if (elapsedWait >= GATE_MAX_TIMEOUT_MS) {
+          Serial.println("⏱️ [GATE] หมดเวลาเปิดทิ้งไว้ 30 วินาที (ไม่มีคนเดินผ่าน) -> สั่งปิดไม้กั้นอัตโนมัติ");
+          break;
+        }
+      }
+    }
+
+    delay(80); // หน่วงเวลาอ่านค่าเซนเซอร์ทุกๆ 80ms รวดเร็ว แม่นยำ และปลอดภัย
+  }
+
+  // 2. สั่งลดไม้กั้นลงปิด (SERVO_ANGLE_CLOSE = 90 องศา)
   gateServo.write(SERVO_ANGLE_CLOSE);
   digitalWrite(PIN_RELAY, LOW);
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_RED, HIGH);
-  Serial.println("✅ ทดสอบเปิด-ปิดไม้กั้นเสร็จสิ้น");
+  Serial.println("🔒 [GATE] ลดไม้กั้นลงปิด (90°) เรียบร้อยแล้ว");
+  lcd.setCursor(0, 1);
+  lcd.print("GATE CLOSED     ");
+  delay(500);
+}
+
+// Alias สำหรับคำสั่งทดสอบจากแอดมินเดิม
+void testOpenSequence() {
+  openGateWithUltrasonicSafety();
 }
 
 // ทดสอบอุปกรณ์ทีละชิ้น (ปุ่มแยกในหน้าแอดมิน) - สั่งงานสั้นๆ ให้เห็น/ได้ยินผลแล้วคืนค่าเดิม
@@ -402,7 +477,6 @@ void setup() {
   pinMode(PIN_RELAY, OUTPUT);
   pinMode(PIN_LED_GREEN, OUTPUT);
   pinMode(PIN_LED_RED, OUTPUT);
-  pinMode(PIN_LED_YELLOW, OUTPUT);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_TRIG, OUTPUT);
   pinMode(PIN_ECHO, INPUT);
