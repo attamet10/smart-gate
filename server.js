@@ -1081,6 +1081,7 @@ app.post('/api/gate/check-in', async (req, res) => {
 // 5.5 ESP32 SMART GATE HARDWARE ENDPOINTS
 // ==========================================
 
+const espStateFile = path.join(__dirname, 'tmp', 'esp32_state.json');
 let deviceHardwareState = {
   online: false,
   lastSeen: null,
@@ -1092,6 +1093,11 @@ let deviceHardwareState = {
   output_cycle: false,
   qr_connected: false
 };
+try {
+  if (fs.existsSync(espStateFile)) {
+    deviceHardwareState = JSON.parse(fs.readFileSync(espStateFile, 'utf8'));
+  }
+} catch (e) {}
 let pendingDeviceCommand = null;
 
 // ESP32 Hardware Status Report (Called by smart_gate_esp32_report.ino every 3 seconds)
@@ -1109,6 +1115,9 @@ app.post('/api/device/status', (req, res) => {
     output_cycle: Boolean(output_cycle),
     qr_connected: Boolean(qr_connected)
   };
+  try {
+    fs.writeFileSync(espStateFile, JSON.stringify(deviceHardwareState));
+  } catch (e) {}
 
   const responseObj = { success: true };
   if (pendingDeviceCommand) {
@@ -1122,6 +1131,11 @@ app.post('/api/device/status', (req, res) => {
 
 // Get Hardware Status (For Web UI / Admin / Gate Duty)
 app.get('/api/device/status', (req, res) => {
+  try {
+    if (fs.existsSync(espStateFile)) {
+      deviceHardwareState = JSON.parse(fs.readFileSync(espStateFile, 'utf8'));
+    }
+  } catch (e) {}
   // ขยาย timeout เป็น 45 วินาที เพื่อรองรับรอบส่ง 15 วิ และความหน่วงเน็ตมือถือ
   const isOnline = Boolean(deviceHardwareState.lastSeen && (Date.now() - new Date(deviceHardwareState.lastSeen).getTime() < 45000));
   res.json({

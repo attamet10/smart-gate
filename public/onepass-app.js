@@ -328,16 +328,22 @@ function switchView(viewName) {
     updateBottomNav(viewName);
 
     if (viewName === 'student') {
+      if (window.esp32AutoPoll) { clearInterval(window.esp32AutoPoll); window.esp32AutoPoll = null; }
       document.getElementById('student-view').style.display = 'block';
       loadStudentDashboard();
     } else if (viewName === 'teacher') {
+      if (window.esp32AutoPoll) { clearInterval(window.esp32AutoPoll); window.esp32AutoPoll = null; }
       document.getElementById('teacher-view').style.display = 'block';
       loadTeacherDashboard();
     } else if (viewName === 'gate') {
       document.getElementById('gate-view').style.display = 'block';
       document.getElementById('gate-token-input').focus();
       loadEsp32Status();
+      if (!window.esp32AutoPoll) {
+        window.esp32AutoPoll = setInterval(loadEsp32Status, 3000);
+      }
     } else if (viewName === 'admin') {
+      if (window.esp32AutoPoll) { clearInterval(window.esp32AutoPoll); window.esp32AutoPoll = null; }
       document.getElementById('admin-view').style.display = 'block';
       loadAdminDashboard();
     }
