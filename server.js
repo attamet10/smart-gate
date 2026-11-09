@@ -906,6 +906,7 @@ app.post('/api/approvals/:id', async (req, res) => {
 // ==========================================
 // 5. GATE DUTY & SCANNER ROUTES
 // ==========================================
+let pendingDeviceCommand = null;
 
 // Verify pass by QR token or Request No
 app.get('/api/gate/verify/:token', async (req, res) => {
@@ -949,6 +950,12 @@ app.get('/api/gate/verify/:token', async (req, res) => {
     }
 
     const isApproved = pass.status === 'approved' || pass.status === 'completed';
+
+    // Auto-trigger ESP32 gate open when a valid pass is verified by guard/staff
+    if (isApproved) {
+      pendingDeviceCommand = 'OPEN_TEST';
+      console.log(`[Gate Verify] Valid pass verified: ${pass.request_no}. Auto-queued OPEN_TEST to ESP32!`);
+    }
 
     let qrDataUrl = null;
     if (pass.qr_token) {
@@ -1098,7 +1105,6 @@ try {
     deviceHardwareState = JSON.parse(fs.readFileSync(espStateFile, 'utf8'));
   }
 } catch (e) {}
-let pendingDeviceCommand = null;
 
 // ESP32 Hardware Status Report (Called by smart_gate_esp32_report.ino every 3 seconds)
 app.post('/api/device/status', (req, res) => {
@@ -1296,7 +1302,10 @@ app.post('/api/gate/scan', async (req, res) => {
       if (stdUser.length > 0) {
         telegram.notifyGateRecord(pass, stdUser[0], 'exit', now);
       }
-    } else if (!pass.gate_in_at && !pass.is_not_returning) {
+    }
+
+    pendingDeviceCommand = 'OPEN_TEST';
+    console.log(`[Gate Check-Out] Exit recorded. Auto-queued OPEN_TEST to ESP32!`); else if (!pass.gate_in_at && !pass.is_not_returning) {
       // Record return (ขากลับเข้า)
       await query(`
         UPDATE onepass_requests

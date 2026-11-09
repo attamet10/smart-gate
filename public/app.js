@@ -1261,6 +1261,12 @@ async function handleVerifyGateToken() {
     if (data.valid) {
       banner.className = 'gate-banner valid';
       banner.textContent = `✅ บัตรผ่านถูกต้อง ได้รับอนุมัติเรียบร้อย (สถานะ: ${pass.status === 'completed' ? 'สิ้นสุดแล้ว' : 'อนุญาตให้ออกได้'})`;
+      // สั่งเปิดไม้กั้น ESP32 อัตโนมัติทันทีที่ตรวจสอบผ่าน
+      fetch('/api/device/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'OPEN_TEST' })
+      }).catch(e => console.error('Auto open gate error:', e));
     } else {
       banner.className = 'gate-banner invalid';
       banner.textContent = `⚠️ บัตรผ่านยังไม่ได้รับอนุมัติสมบูรณ์ (สถานะ: ${pass.status})`;
