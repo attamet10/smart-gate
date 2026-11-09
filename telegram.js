@@ -923,7 +923,7 @@ async function startTelegramPolling() {
 
       const url = `https://api.telegram.org/bot${config.botToken}/getUpdates?offset=${lastUpdateId + 1}&timeout=20`;
 
-      https.get(url, (res) => {
+      const req = https.get(url, (res) => {
         let rawData = '';
         res.on('data', chunk => rawData += chunk);
         res.on('end', async () => {
@@ -935,20 +935,30 @@ async function startTelegramPolling() {
 
                 // Handle button click (callback_query)
                 if (update.callback_query) {
-                  await handleTelegramCallbackQuery(update.callback_query);
+                  handleTelegramCallbackQuery(update.callback_query).catch(err => {
+                    console.error('[Telegram Callback Error]:', err.message);
+                  });
                 }
 
-                // Handle text message (/start)
+                // Handle text message (/start or chat with Gemini)
                 if (update.message) {
-                  await handleTelegramMessage(update.message);
+                  handleTelegramMessage(update.message).catch(err => {
+                    console.error('[Telegram Message Error]:', err.message);
+                  });
                 }
               }
             }
           } catch (e) {}
-          setTimeout(poll, 1000);
+          setTimeout(poll, 500);
         });
-      }).on('error', (err) => {
+      });
+
+      req.on('error', (err) => {
         setTimeout(poll, 3000);
+      });
+      req.setTimeout(25000, () => {
+        req.destroy();
+        setTimeout(poll, 1000);
       });
     } catch (err) {
       setTimeout(poll, 5000);
