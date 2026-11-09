@@ -84,13 +84,14 @@ Servo gateServo;
 HardwareSerial QrSerial(2);
 LiquidCrystal_I2C lcd(LCD_I2C_ADDR, 16, 2);
 
-// ฟังก์ชันสั่ง Servo ที่รับประกันว่า attach ถูกต้องเสมอ
+// ฟังก์ชันสั่ง Servo ที่รับประกันว่า attach ถูกต้องเสมอ และหน่วงเวลาให้หมุนสุดองศาก่อนสั่งอุปกรณ์อื่น
 void setServoAngle(int angle) {
   if (!gateServo.attached()) {
     gateServo.setPeriodHertz(50);
     gateServo.attach(PIN_SERVO, 500, 2400);
   }
   gateServo.write(angle);
+  delay(450); // ให้เวลาและกระแสไฟ 5V แก่ Servo เต็มที่จนหมุนสุดองศาก่อนสั่ง Relay/Buzzer
 }
 
 // ฟังก์ชันส่งเสียงบี๊บที่ไม่ใช้ PWM Timer (ไม่ไปกวนการทำงานของ Servo เด็ดขาด)
@@ -135,6 +136,8 @@ long readUltrasonicCm() {
 
 String qrBuffer = "";
 unsigned long lastQrByteTime = 0;
+String lastScannedToken = "";
+String lastScanResult = "none";
 
 void drainQrSerial() {
   while (QrSerial.available()) {
@@ -187,6 +190,7 @@ void submitQrScan(const String& rawToken) {
   Serial.println(token);
 
   if (token.length() < 3) return;
+  lastScannedToken = token;
 
   // ส่งเสียงติ๊ดสั้นทันทีที่บอร์ดรับรหัสจากกล้องได้ (ยืนยันว่ากล้องส่งข้อมูลถึงบอร์ดแล้ว)
   safeBeep( 1500, 80);
@@ -198,6 +202,7 @@ void submitQrScan(const String& rawToken) {
     Serial.println("❌ ไม่สามารถส่งรหัสได้: WiFi ไม่ได้เชื่อมต่อ");
     lcd.setCursor(0, 1);
     lcd.print("WiFi not ready! ");
+    lastScanResult = "wifi_err";
     safeBeep( 400, 300);
     return;
   }
@@ -208,22 +213,26 @@ void submitQrScan(const String& rawToken) {
 
   if (SERVER_PORT == 443) {
     secureClient.setInsecure();
-    secureClient.setTimeout(12000);
-    if (!secureClient.connect(SERVER_HOST, SERVER_PORT) &&
-        !secureClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT)) {
+    secureClient.setTimeout(10000);
+    // เชื่อมต่อด้วย IP ตรง 27.254.134.22 ก่อนเสมอ เพื่อข้ามปัญหา DNS ช้าบน Hotspot มือถือ
+    if (!secureClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT) &&
+        !secureClient.connect(SERVER_HOST, SERVER_PORT)) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan HTTPS)");
       lcd.setCursor(0, 1);
       lcd.print("HTTPS Conn Error");
+      lastScanResult = "https_err";
       safeBeep( 400, 300);
       return;
     }
     client = &secureClient;
   } else {
-    plainClient.setTimeout(12000);
-    if (!plainClient.connect(SERVER_HOST, SERVER_PORT)) {
+    plainClient.setTimeout(10000);
+    if (!plainClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT) &&
+        !plainClient.connect(SERVER_HOST, SERVER_PORT)) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan HTTP)");
       lcd.setCursor(0, 1);
       lcd.print("HTTP Conn Error ");
+      lastScanResult = "http_err";
       safeBeep( 400, 300);
       return;
     }
@@ -257,10 +266,12 @@ void submitQrScan(const String& rawToken) {
 
   lcd.setCursor(0, 1);
   if (success) {
+    lastScanResult = "ok";
     lcd.print("Scan: OK!       ");
     Serial.println("✅ สแกน QR สำเร็จ เปิดไม้กั้นทันที");
     testOpenSequence();
   } else {
+    lastScanResult = "denied";
     lcd.print("Scan: DENIED    ");
     Serial.println("❌ สแกน QR ไม่ผ่าน: " + response);
     safeBeep( 400, 400);
@@ -354,11 +365,12 @@ void reportStatus() {
 
   if (SERVER_PORT == 443) {
     secureClient.setInsecure();
-    secureClient.setTimeout(12000);
-    if (!secureClient.connect(SERVER_HOST, SERVER_PORT)) {
-      Serial.println("⚠️ ต่อด้วยชื่อโดเมนไม่สำเร็จ ลองต่อด้วย IP ตรง 27.254.134.22 ...");
-      if (!secureClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT)) {
-        Serial.println("❌ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (Status HTTPS) ทั้งโดเมนและ IP");
+    secureClient.setTimeout(10000);
+    // เชื่อมต่อด้วย IP ตรง 27.254.134.22 ก่อนเสมอ เพื่อไม่ให้บอร์ดค้างรอ DNS บน Hotspot
+    if (!secureClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT)) {
+      Serial.println("⚠️ ต่อด้วย IP ตรงไม่สำเร็จ ลองต่อด้วยโดเมน ...");
+      if (!secureClient.connect(SERVER_HOST, SERVER_PORT)) {
+        Serial.println("❌ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (Status HTTPS) ทั้ง IP และโดเมน");
         serverOk = false;
         updateLcd();
         return;
@@ -366,8 +378,9 @@ void reportStatus() {
     }
     client = &secureClient;
   } else {
-    plainClient.setTimeout(12000);
-    if (!plainClient.connect(SERVER_HOST, SERVER_PORT)) {
+    plainClient.setTimeout(10000);
+    if (!plainClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT) &&
+        !plainClient.connect(SERVER_HOST, SERVER_PORT)) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (Status HTTP)");
       serverOk = false;
       updateLcd();
@@ -377,13 +390,16 @@ void reportStatus() {
   }
 
   String body = "{";
+  body += "\"fw_ver\":\"v20261109_fix2\",";
   body += "\"wifi\":true,";
   body += "\"wifi_ip\":\"" + WiFi.localIP().toString() + "\",";
   body += "\"ultrasonic\":" + String(ultrasonicConnected ? "true" : "false") + ",";
   body += "\"ultrasonic_distance\":" + String(ultrasonicDistance) + ",";
   body += "\"button_pressed\":" + String(buttonPressed ? "true" : "false") + ",";
   body += "\"output_cycle\":" + String(outputCycleState ? "true" : "false") + ",";
-  body += "\"qr_connected\":" + String(qrEverConnected ? "true" : "false");
+  body += "\"qr_connected\":" + String(qrEverConnected ? "true" : "false") + ",";
+  body += "\"last_qr\":\"" + lastScannedToken + "\",";
+  body += "\"last_scan_res\":\"" + lastScanResult + "\"";
   body += "}";
 
   String request = "";

@@ -1102,18 +1102,21 @@ let pendingDeviceCommand = null;
 
 // ESP32 Hardware Status Report (Called by smart_gate_esp32_report.ino every 3 seconds)
 app.post('/api/device/status', (req, res) => {
-  const { wifi, wifi_ip, ultrasonic, ultrasonic_distance, button_pressed, output_cycle, qr_connected } = req.body;
+  const { fw_ver, wifi, wifi_ip, ultrasonic, ultrasonic_distance, button_pressed, output_cycle, qr_connected, last_qr, last_scan_res } = req.body;
 
   deviceHardwareState = {
     online: true,
     lastSeen: new Date(),
+    fw_ver: fw_ver || 'legacy',
     wifi: Boolean(wifi),
     wifi_ip: wifi_ip || null,
     ultrasonic: Boolean(ultrasonic),
     ultrasonic_distance: ultrasonic_distance != null ? ultrasonic_distance : -1,
     button_pressed: Boolean(button_pressed),
     output_cycle: Boolean(output_cycle),
-    qr_connected: Boolean(qr_connected)
+    qr_connected: Boolean(qr_connected),
+    last_qr: last_qr || null,
+    last_scan_res: last_scan_res || null
   };
   try {
     fs.writeFileSync(espStateFile, JSON.stringify(deviceHardwareState));
