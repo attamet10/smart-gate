@@ -1179,16 +1179,16 @@ app.post('/api/gate/scan', async (req, res) => {
 
     console.log(`[Gate Scan] Incoming token: "${token}" -> parsed: "${baseToken}"`);
 
-    // Special Master Demo Token for Testing, Competition Presentation, and Infinite Scanning
-    if (baseToken === 'OP-DEMO' || baseToken === 'OP-DEMO-2026' || baseToken.includes('DEMO')) {
-      console.log(`[Gate Scan] MASTER DEMO TOKEN SCANNED: ${baseToken}`);
+    // Special Master Demo Token for Testing, Competition Presentation, and Infinite Scanning (supports PromptPay / Bank QR as demo too)
+    if (baseToken === 'OP-DEMO' || baseToken === 'OP-DEMO-2026' || baseToken.includes('DEMO') || baseToken.startsWith('000201') || cleanToken.startsWith('000201')) {
+      console.log(`[Gate Scan] MASTER DEMO / BANK PASS SCANNED: ${baseToken}`);
       return res.json({
         success: true,
         action: 'demo',
         message: '✅ [DEMO PASS] สแกนผ่านสำเร็จ เปิดไม้กั้นอัตโนมัติ (โหมดนำเสนอ/แข่งขัน)',
         openDuration: 4,
         student: {
-          name: 'นายทดสอบ ระบบวันพาส (สาธิตแข่งขัน)',
+          name: 'นายอดิศร วันพาส (สาธิตระบบ)',
           code: '67219100099',
           level: 'ปวช.3',
           major: 'เทคโนโลยีธุรกิจดิจิทัล'
