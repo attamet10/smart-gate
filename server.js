@@ -1807,6 +1807,24 @@ app.post('/api/admin/settings/gate-duty', async (req, res) => {
 });
 
 // Settings: Update Telegram Settings & Test Send
+app.get('/api/db-check', async (req, res) => {
+  try {
+    const [dbInfo] = await query('SELECT DATABASE() AS current_db, USER() AS current_user, VERSION() AS db_version');
+    const [tables] = await query('SHOW TABLES');
+    res.json({
+      success: true,
+      info: dbInfo[0],
+      table_count: tables.length,
+      tables: tables.map(t => Object.values(t)[0])
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
 app.post('/api/admin/settings/telegram', async (req, res) => {
   try {
     const { bot_token, chat_id, test_send } = req.body;
