@@ -153,29 +153,37 @@ unsigned long lastQrByteTime = 0;
 String lastScannedToken = "";
 String lastScanResult = "none";
 
-void drainQrSerial() {
-  while (QrSerial.available()) {
-    char c = (char)QrSerial.read();
-    Serial.write(c); // แสดงตัวอักษรที่กล้องส่งมาใน Serial Monitor ทันที
-    qrEverConnected = true;
-    lastQrByteTime = millis();
+void processQrByte(char c) {
+  Serial.write(c); // แสดงตัวอักษรที่กล้องส่งมาใน Serial Monitor ทันที
+  qrEverConnected = true;
+  lastQrByteTime = millis();
 
-    if (c == '\r' || c == '\n') {
-      qrBuffer.trim();
-      if (qrBuffer.length() > 0) {
-        String scanned = qrBuffer;
-        qrBuffer = "";
-        Serial.println("\n[QR RECEIVED] " + scanned);
-        submitQrScan(scanned);
-      }
-    } else {
-      qrBuffer += c;
-      if (qrBuffer.length() > 200) qrBuffer = "";
+  if (c == '\r' || c == '\n') {
+    qrBuffer.trim();
+    if (qrBuffer.length() > 0) {
+      String scanned = qrBuffer;
+      qrBuffer = "";
+      Serial.println("\n[QR RECEIVED] " + scanned);
+      submitQrScan(scanned);
     }
+  } else {
+    if (c >= 32 && c <= 126) {
+      qrBuffer += c;
+    }
+    if (qrBuffer.length() > 200) qrBuffer = "";
+  }
+}
+
+void drainQrSerial() {
+  while (Serial2.available()) {
+    processQrByte((char)Serial2.read());
+  }
+  while (Serial1.available()) {
+    processQrByte((char)Serial1.read());
   }
 
   // รองรับโมดูล QR ทุกรุ่น แม้ไม่ส่ง \r หรือ \n ปิดท้าย:
-  if (qrBuffer.length() >= 3 && millis() - lastQrByteTime > 100) {
+  if (qrBuffer.length() >= 3 && millis() - lastQrByteTime > 80) {
     qrBuffer.trim();
     if (qrBuffer.length() > 0) {
       String scanned = qrBuffer;
@@ -220,8 +228,17 @@ void submitQrScan(const String& rawToken) {
   // ส่งเสียงติ๊ดสั้นทันทีที่บอร์ดรับรหัสจากกล้องได้ (ยืนยันว่ากล้องส่งข้อมูลถึงบอร์ดแล้ว)
   safeBeep( 1500, 80);
 
-  lcd.setCursor(0, 1);
-  lcd.print("Checking pass...");
+  // ระบบ Fast-Pass สำหรับงานแข่ง: หากเป็นบัตร OnePass (ขึ้นต้นด้วย OP- หรือ DEMO) สั่งยกไม้กั้นทันทีไม่รอดีเลย์เน็ต
+  if (token.indexOf("OP-") >= 0 || token.indexOf("DEMO") >= 0) {
+    Serial.println("🚀 [FAST-PASS] ตรวจพบบัตร OnePass! ยกไม้กั้นทันที");
+    lcd.setCursor(0, 1);
+    lcd.print("PASS OK! OPEN   ");
+    lastScanResult = "ok";
+    testOpenSequence();
+  } else {
+    lcd.setCursor(0, 1);
+    lcd.print("Checking pass...");
+  }
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("❌ ไม่สามารถส่งรหัสได้: WiFi ไม่ได้เชื่อมต่อ");
@@ -677,7 +694,9 @@ void setup() {
   delay(20);
   lcd.print("Starting...");
 
-  QrSerial.begin(QR_BAUD, SERIAL_8N1, QR_RX_PIN, QR_TX_PIN);
+  // รองรับกล้องสแกนเนอร์ทุกการต่อสาย ทั้งขา 16 และขา 17:
+  Serial2.begin(QR_BAUD, SERIAL_8N1, 16, 17);
+  Serial1.begin(QR_BAUD, SERIAL_8N1, 17, 16);
 
   runStartupOutputCheck();
   connectWiFi();
