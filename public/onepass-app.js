@@ -308,15 +308,20 @@ function switchView(viewName) {
   document.getElementById('admin-view').style.display = 'none';
 
   const appHeader = document.querySelector('.app-header');
+  const appFooter = document.querySelector('.app-footer');
   const userNav = document.getElementById('user-nav');
 
   if (viewName === 'login') {
+    document.body.classList.add('is-login-view');
     if (appHeader) appHeader.style.display = 'none';
+    if (appFooter) appFooter.style.display = 'none';
     if (userNav) userNav.style.display = 'none';
     document.getElementById('login-section').style.display = 'flex';
     updateBottomNav('login');
   } else {
+    document.body.classList.remove('is-login-view');
     if (appHeader) appHeader.style.display = 'block';
+    if (appFooter) appFooter.style.display = 'block';
     if (userNav) userNav.style.display = 'flex';
     updateBottomNav(viewName);
 
