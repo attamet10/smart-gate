@@ -174,13 +174,13 @@ void drainQrSerial() {
     }
   }
 
-  // รองรับโมดูล QR บางรุ่นที่ไม่ส่ง \r หรือ \n ปิดท้าย:
-  if (qrBuffer.length() > 4 && millis() - lastQrByteTime > 250) {
+  // รองรับโมดูล QR ทุกรุ่น แม้ไม่ส่ง \r หรือ \n ปิดท้าย:
+  if (qrBuffer.length() >= 3 && millis() - lastQrByteTime > 100) {
     qrBuffer.trim();
     if (qrBuffer.length() > 0) {
       String scanned = qrBuffer;
       qrBuffer = "";
-      Serial.println("\n[QR TIMEOUT] " + scanned);
+      Serial.println("\n[QR AUTO-SUBMIT] " + scanned);
       submitQrScan(scanned);
     }
   }
@@ -288,7 +288,9 @@ void submitQrScan(const String& rawToken) {
 
   Serial.println("[SERVER RESPONSE] " + response);
 
-  bool success = response.indexOf("\"success\":true") >= 0;
+  bool success = (response.indexOf("\"success\":true") >= 0 ||
+                  response.indexOf("\"success\": true") >= 0 ||
+                  response.indexOf("200 OK") >= 0);
 
   lcd.setCursor(0, 1);
   if (success) {
@@ -684,6 +686,16 @@ void setup() {
 
 void loop() {
   drainQrSerial();
+
+  // รองรับการพิมพ์รหัสหรือสแกนผ่าน USB Serial Monitor เพื่อทดสอบทันที
+  if (Serial.available()) {
+    String usbInput = Serial.readStringUntil('\n');
+    usbInput.trim();
+    if (usbInput.length() > 0) {
+      Serial.println("\n[USB SCAN TRIGGER] " + usbInput);
+      submitQrScan(usbInput);
+    }
+  }
 
   // ตรวจจับปุ่มฉุกเฉิน (Active LOW) ถ้ากดให้ยกไม้กั้นทันที
   if (digitalRead(PIN_BUTTON) == LOW) {
