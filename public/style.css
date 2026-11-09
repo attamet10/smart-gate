@@ -282,6 +282,7 @@ body.has-bottom-nav {
   cursor: pointer;
   box-shadow: 0 4px 18px rgba(37, 99, 235, 0.45);
   transition: all 0.2s ease;
+  margin-top: 18px;
 }
 
 .btn-enter-gate:hover {
@@ -295,7 +296,7 @@ body.has-bottom-nav {
 
 /* Expanded Form inside Bottom Sheet */
 .login-form-container {
-  margin-top: 20px;
+  margin-top: 0;
   animation: fadeIn 0.3s ease;
 }
 
