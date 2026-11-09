@@ -1,1 +1,1 @@
-restart at 2026-11-09 20:01 - add close_test button
+restart at 2026-11-09 20:42 - robust QR token parsing for scanners

@@ -1153,11 +1153,15 @@ app.post('/api/gate/scan', async (req, res) => {
       return res.status(400).json({ success: false, message: 'กรุณาระบุรหัส QR Token' });
     }
 
+    // Sanitize token: remove non-printable characters and extract OP-... token pattern if present
     const cleanToken = token.trim();
-    // In case token contains rotating TOTP part (e.g. BASE_TOKEN.TOTP)
-    const baseToken = cleanToken.includes('.') ? cleanToken.split('.')[0] : cleanToken;
+    const tokenMatch = cleanToken.match(/OP-[A-Z0-9\-]+/i);
+    const candidateToken = tokenMatch ? tokenMatch[0].toUpperCase() : cleanToken.replace(/[^a-zA-Z0-9\-_.]/g, '');
+    const baseToken = candidateToken.includes('.') ? candidateToken.split('.')[0] : candidateToken;
 
-    // Look up leave request in MySQL
+    console.log(`[Gate Scan] Incoming token: "${token}" -> parsed: "${baseToken}"`);
+
+    // Look up leave request in MySQL (match qr_token, request_no, or substring)
     const [rows] = await query(`
       SELECT r.*, u.full_name AS student_name, u.username AS student_code,
              l.name AS level_name, m.name AS major_name, s.room
@@ -1166,9 +1170,12 @@ app.post('/api/gate/scan', async (req, res) => {
       JOIN students s ON r.student_id = s.id
       LEFT JOIN levels l ON s.level_id = l.id
       LEFT JOIN majors m ON s.major_id = m.id
-      WHERE r.qr_token = ?
+      WHERE r.qr_token = ? 
+         OR r.request_no = ?
+         OR ? LIKE CONCAT('%', r.qr_token, '%')
+         OR ? LIKE CONCAT('%', r.request_no, '%')
       LIMIT 1
-    `, [baseToken]);
+    `, [baseToken, baseToken, cleanToken, cleanToken]);
 
     if (rows.length === 0) {
       console.warn(`[Gate Scan] QR Token not found: ${cleanToken}`);
