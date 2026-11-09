@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OnePass - ระบบขออนุญาตออกนอกสถานศึกษา ด้วยระบบ QR Code</title>
-  <link rel="stylesheet" href="style.css?v=20261109_mobile03">
+  <link rel="stylesheet" href="style.css?v=20261109_v06">
 </head>
 <body>
 
@@ -85,12 +85,15 @@
         </button>
 
         <div class="login-form-container" id="login-form-container">
-          <form id="login-form">
+          <!-- Notification Alert Box for Login -->
+          <div id="login-alert-box" class="alert" style="display: none; margin-bottom: 12px; font-size: 0.95rem; text-align: center;"></div>
+
+          <form id="login-form" onsubmit="event.preventDefault(); handleLoginSubmit(event);">
             <div class="mobile-input-group">
               <label for="login-username">รหัสผู้ใช้งาน / รหัสประจำตัว (Username):</label>
               <div class="mobile-input-wrap">
                 <span class="input-icon">👤</span>
-                <input type="text" id="login-username" required placeholder="รหัสนักเรียน (69...) / ครู (tc...) / รองฯ (KT)">
+                <input type="text" id="login-username" name="username" required autocomplete="username" placeholder="รหัสนักเรียน (69...) / ครู (tc...) / รองฯ (KT) / admin">
               </div>
             </div>
 
@@ -98,11 +101,11 @@
               <label for="login-password">รหัสผ่าน (Password):</label>
               <div class="mobile-input-wrap">
                 <span class="input-icon">🔒</span>
-                <input type="password" id="login-password" required value="123456" placeholder="รหัสผ่านเริ่มต้น 123456">
+                <input type="password" id="login-password" name="password" required autocomplete="current-password" value="123456" placeholder="รหัสผ่าน (เริ่มต้น 123456)">
               </div>
             </div>
 
-            <button type="submit" class="btn-submit-mobile">เข้าสู่ระบบ</button>
+            <button type="submit" class="btn-submit-mobile" id="btn-login-submit">เข้าสู่ระบบ</button>
           </form>
 
           <!-- Quick Test Roles Section -->
@@ -1051,6 +1054,6 @@
   </footer>
 
   <!-- Vanilla JS Script (Versioned to bust browser cache) -->
-  <script src="app.js?v=20261109_mobile03"></script>
+  <script src="app.js?v=20261109_v06"></script>
 </body>
 </html>

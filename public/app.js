@@ -288,6 +288,17 @@ function checkSavedSession() {
  * Alert Box Notification
  */
 function showAlert(message, type = 'info') {
+  // Show in login alert box if present
+  const loginBox = document.getElementById('login-alert-box');
+  if (loginBox) {
+    loginBox.className = `alert alert-${type}`;
+    loginBox.textContent = message;
+    loginBox.style.display = 'block';
+    setTimeout(() => {
+      loginBox.style.display = 'none';
+    }, 6000);
+  }
+
   const box = document.getElementById('alert-box');
   if (!box) return;
   box.className = `alert alert-${type}`;
