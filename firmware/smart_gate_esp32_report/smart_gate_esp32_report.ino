@@ -37,15 +37,15 @@
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include <ESP32Servo.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include "secrets.h"
 
 #define PIN_SERVO        18
-// กำหนดองศา Servo ไม้กั้น: 0° = ยกขึ้นเปิดทาง (สุดแนวตั้ง), 90° = ลดลงปิดกั้นทาง (สุดแนวนอน)
-#define SERVO_ANGLE_OPEN    0     // ยกไม้กั้นขึ้น (เปิดทาง) = 0 องศา (สุดแนวตั้ง)
-#define SERVO_ANGLE_CLOSE   90    // ลดไม้กั้นลง (ปิดกั้นทาง แนวนอน) = 90 องศา (สุดแนวนอน)
+// กำหนดองศา Servo ไม้กั้น (Hardware LEDC PWM Native):
+// 90° = ยกขึ้นเปิดทาง (แนวตั้ง), 0° = ลดลงปิดกั้นทาง (แนวนอน)
+int servoAngleOpen  = 90;  // ยกไม้กั้นขึ้น (เปิดทาง) = 90 องศา (แนวตั้ง)
+int servoAngleClose = 0;   // ลดไม้กั้นลง (ปิดกั้นทาง) = 0 องศา (แนวนอน)
 
 // การตั้งค่าระบบ Ultrasonic ตรวจจับคนเดินผ่าน & ป้องกันไม้กั้นตีคน
 #define SENSOR_MIN_DISTANCE       2     // ระยะตรวจจับต่ำสุด (ซม.)
@@ -80,18 +80,32 @@
 #define DEVICE_STATUS_KEY ""
 #endif
 
-Servo gateServo;
 HardwareSerial QrSerial(2);
 LiquidCrystal_I2C lcd(LCD_I2C_ADDR, 16, 2);
 
-// ฟังก์ชันสั่ง Servo ที่รับประกันว่า attach ถูกต้องเสมอ และหน่วงเวลาให้หมุนสุดองศาก่อนสั่งอุปกรณ์อื่น
+// ฟังก์ชันตั้งค่า Servo ด้วย Hardware LEDC PWM แท้ของ ESP32 (แม่นยำ 100% ไม่ชนกับ Core 3.x)
+void setupServo() {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttach(PIN_SERVO, 50, 16);
+#else
+  ledcSetup(0, 50, 16);
+  ledcAttachPin(PIN_SERVO, 0);
+#endif
+}
+
+// ฟังก์ชันสั่ง Servo ที่ทำงานผ่าน LEDC PWM โดยตรง (สวิงเต็ม 0° - 180° ไม่มีสะดุด)
 void setServoAngle(int angle) {
-  if (!gateServo.attached()) {
-    gateServo.setPeriodHertz(50);
-    gateServo.attach(PIN_SERVO, 500, 2400);
-  }
-  gateServo.write(angle);
-  delay(450); // ให้เวลาและกระแสไฟ 5V แก่ Servo เต็มที่จนหมุนสุดองศาก่อนสั่ง Relay/Buzzer
+  if (angle < 0) angle = 0;
+  if (angle > 180) angle = 180;
+  // 50Hz = 20ms period, 16-bit = 65535 counts
+  // 500us (0°) = 1638 counts, 2400us (180°) = 7864 counts
+  uint32_t duty = map(angle, 0, 180, 1638, 7864);
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWrite(PIN_SERVO, duty);
+#else
+  ledcWrite(0, duty);
+#endif
+  delay(450); // ให้เวลาและกระแสไฟ 5V แก่ Servo เต็มที่จนหมุนสุดองศา
 }
 
 // ฟังก์ชันส่งเสียงบี๊บที่ไม่ใช้ PWM Timer (ไม่ไปกวนการทำงานของ Servo เด็ดขาด)
@@ -328,14 +342,14 @@ void runLocalTests() {
 // สั่งงาน Servo/LED/Relay/บัซเซอร์ครั้งเดียวตอนบูต เพื่อยืนยันว่าสายต่อถูก (ไม่วนซ้ำทุกรอบ
 // เพราะถ้าต่อกับประตูจริงจะทำให้ไม้กั้น/กลอนขยับเองทุก 3 วิ ซึ่งไม่ต้องการ)
 void runStartupOutputCheck() {
-  setServoAngle(SERVO_ANGLE_OPEN);
+  setServoAngle(servoAngleOpen);
   digitalWrite(PIN_LED_GREEN, HIGH);
   digitalWrite(PIN_LED_RED, LOW);
   digitalWrite(PIN_RELAY, HIGH);
   safeBeep( 1200, 120);
   delay(500);
 
-  setServoAngle(SERVO_ANGLE_CLOSE);
+  setServoAngle(servoAngleClose);
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_RED, HIGH);
   digitalWrite(PIN_RELAY, LOW);
@@ -455,6 +469,18 @@ void reportStatus() {
   } else if (response.indexOf("TEST_SERVO") >= 0) {
     Serial.println("🔔 ได้รับคำสั่งทดสอบ Servo จากแอดมิน");
     testServoOnly();
+  } else if (response.indexOf("SERVO_REV") >= 0) {
+    servoAngleOpen = 0; servoAngleClose = 90;
+    setServoAngle(servoAngleClose);
+    Serial.println("🔄 ปรับมุม Servo: OPEN=0°, CLOSE=90°");
+  } else if (response.indexOf("SERVO_180") >= 0) {
+    servoAngleOpen = 90; servoAngleClose = 180;
+    setServoAngle(servoAngleClose);
+    Serial.println("🔄 ปรับมุม Servo: OPEN=90°, CLOSE=180°");
+  } else if (response.indexOf("SERVO_0") >= 0) {
+    servoAngleOpen = 90; servoAngleClose = 0;
+    setServoAngle(servoAngleClose);
+    Serial.println("🔄 ปรับมุม Servo: OPEN=90°, CLOSE=0°");
   } else if (response.indexOf("TEST_LED_GREEN") >= 0) {
     Serial.println("🔔 ได้รับคำสั่งทดสอบ LED เขียวจากแอดมิน");
     testLedOnly(PIN_LED_GREEN, "เขียว");
@@ -480,13 +506,13 @@ void reportStatus() {
 // ============================================================================
 void openGateWithUltrasonicSafety() {
   // 1. สั่งยกไม้กั้นขึ้น
-  setServoAngle(SERVO_ANGLE_OPEN);
+  setServoAngle(servoAngleOpen);
   digitalWrite(PIN_RELAY, HIGH);
   digitalWrite(PIN_LED_GREEN, HIGH);
   digitalWrite(PIN_LED_RED, LOW);
   safeBeep( 1500, 200);
 
-  Serial.println("🚪 [GATE] ยกไม้กั้นขึ้น (0°): เปิดทางให้นักเรียนผ่าน...");
+  Serial.println("🚪 [GATE] ยกไม้กั้นขึ้น: เปิดทางให้นักเรียนผ่าน...");
   lcd.setCursor(0, 1);
   lcd.print("GATE OPEN: PASS ");
 
@@ -547,12 +573,12 @@ void openGateWithUltrasonicSafety() {
     delay(80); // หน่วงเวลาอ่านค่าเซนเซอร์ทุกๆ 80ms รวดเร็ว แม่นยำ และปลอดภัย
   }
 
-  // 2. สั่งลดไม้กั้นลงปิด (SERVO_ANGLE_CLOSE = 90 องศา)
-  setServoAngle(SERVO_ANGLE_CLOSE);
+  // 2. สั่งลดไม้กั้นลงปิด
+  setServoAngle(servoAngleClose);
   digitalWrite(PIN_RELAY, LOW);
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_RED, HIGH);
-  Serial.println("🔒 [GATE] ลดไม้กั้นลงปิด (90°) เรียบร้อยแล้ว");
+  Serial.println("🔒 [GATE] ลดไม้กั้นลงปิดเรียบร้อยแล้ว");
   lcd.setCursor(0, 1);
   lcd.print("GATE CLOSED     ");
   delay(500);
@@ -560,7 +586,7 @@ void openGateWithUltrasonicSafety() {
 
 // คำสั่งทดสอบเปิดไม้กั้นค้างไว้จากหน้าเว็บ (OPEN_TEST)
 void testOpenCommand() {
-  setServoAngle(SERVO_ANGLE_OPEN);
+  setServoAngle(servoAngleOpen);
   digitalWrite(PIN_RELAY, HIGH);
   digitalWrite(PIN_LED_GREEN, HIGH);
   digitalWrite(PIN_LED_RED, LOW);
@@ -572,7 +598,7 @@ void testOpenCommand() {
 
 // คำสั่งทดสอบลดไม้กั้นลงปิดจากหน้าเว็บ (CLOSE_TEST)
 void testCloseCommand() {
-  setServoAngle(SERVO_ANGLE_CLOSE);
+  setServoAngle(servoAngleClose);
   digitalWrite(PIN_RELAY, LOW);
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_RED, HIGH);
@@ -588,9 +614,9 @@ void testOpenSequence() {
 
 // ทดสอบอุปกรณ์ทีละชิ้น (ปุ่มแยกในหน้าแอดมิน) - สั่งงานสั้นๆ ให้เห็น/ได้ยินผลแล้วคืนค่าเดิม
 void testServoOnly() {
-  setServoAngle(SERVO_ANGLE_OPEN);
+  setServoAngle(servoAngleOpen);
   delay(800);
-  setServoAngle(SERVO_ANGLE_CLOSE);
+  setServoAngle(servoAngleClose);
   Serial.println("✅ ทดสอบ Servo เสร็จสิ้น");
 }
 
@@ -628,14 +654,9 @@ void setup() {
   pinMode(PIN_ECHO, INPUT);
   pinMode(PIN_SPEAKER, OUTPUT);
 
-  // จัดสรร PWM Timer ให้ ESP32Servo ครบทุก Channel เพื่อให้ Servo หมุนได้ 100%
-  ESP32PWM::allocateTimer(0);
-  ESP32PWM::allocateTimer(1);
-  ESP32PWM::allocateTimer(2);
-  ESP32PWM::allocateTimer(3);
-  gateServo.setPeriodHertz(50);
-  gateServo.attach(PIN_SERVO, 500, 2400);
-  setServoAngle(SERVO_ANGLE_CLOSE);
+  // ตั้งค่า Hardware LEDC PWM แท้ของ ESP32 (แม่นยำ 100% ไม่ชน Core 3.x)
+  setupServo();
+  setServoAngle(servoAngleClose);
 
   Wire.begin(21, 22); // SDA=GPIO21, SCL=GPIO22
   Wire.setClock(50000); // ลดความเร็ว I2C ลงเหลือ 50kHz กันจอตัวอักษรขาดหาย

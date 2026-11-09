@@ -3,148 +3,123 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OnePass Smart Gate - บัตรผ่านสำหรับทดสอบและแข่งขัน</title>
+  <title>OnePass QR - สำหรับกล้องสแกนเนอร์</title>
   <style>
+    * { box-sizing: border-box; }
     body {
-      background: #0f172a;
-      color: #f8fafc;
-      font-family: 'Segoe UI', Tahoma, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: #ffffff;
+      color: #000000;
+      font-family: Arial, Tahoma, sans-serif;
       margin: 0;
       padding: 20px;
       display: flex;
       flex-direction: column;
       align-items: center;
       min-height: 100vh;
-      box-sizing: border-box;
     }
-    .header {
+    h1 {
+      margin: 0 0 4px 0;
+      font-size: 24px;
+      color: #0f172a;
       text-align: center;
-      margin-bottom: 25px;
     }
-    .header h1 {
-      margin: 0 0 8px 0;
-      font-size: 26px;
-      color: #38bdf8;
-    }
-    .header p {
-      margin: 0;
-      color: #94a3b8;
+    p.sub {
+      margin: 0 0 20px 0;
+      color: #475569;
       font-size: 15px;
+      text-align: center;
     }
     .grid {
       display: flex;
       flex-wrap: wrap;
-      gap: 24px;
+      gap: 30px;
       justify-content: center;
-      max-width: 900px;
       width: 100%;
+      max-width: 900px;
     }
     .card {
-      background: #1e293b;
-      border: 2px solid #334155;
-      border-radius: 20px;
-      padding: 24px 28px;
+      background: #ffffff;
+      border: 3px solid #0284c7;
+      border-radius: 16px;
+      padding: 20px;
       text-align: center;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.4);
-      flex: 1 1 360px;
-      max-width: 420px;
-    }
-    .card.primary {
-      border-color: #38bdf8;
-      box-shadow: 0 0 25px rgba(56, 189, 248, 0.2);
+      width: 420px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.08);
     }
     .badge {
       display: inline-block;
-      padding: 5px 14px;
-      border-radius: 9999px;
+      padding: 6px 16px;
+      border-radius: 20px;
       font-weight: bold;
-      font-size: 14px;
-      margin-bottom: 12px;
-    }
-    .badge-demo {
+      font-size: 15px;
+      margin-bottom: 10px;
       background: #0284c7;
       color: #ffffff;
     }
-    .badge-approved {
-      background: #15803d;
+    .badge-pass {
+      background: #16a34a;
       color: #ffffff;
     }
-    h2 {
-      margin: 0 0 6px 0;
+    .token-text {
+      font-family: monospace;
       font-size: 20px;
-      color: #f8fafc;
-    }
-    .token-box {
-      background: #0f172a;
-      border: 1px dashed #475569;
-      border-radius: 10px;
-      padding: 10px;
-      margin: 12px 0 16px 0;
-      font-family: 'Consolas', monospace;
-      font-size: 16px;
       font-weight: bold;
-      color: #38bdf8;
-      letter-spacing: 1px;
+      color: #0f172a;
+      background: #f1f5f9;
+      padding: 8px 12px;
+      border-radius: 8px;
+      margin: 10px 0;
+      letter-spacing: 2px;
     }
-    .qr-wrap {
+    .qr-container {
       background: #ffffff;
-      padding: 14px;
-      border-radius: 16px;
+      padding: 10px;
       display: inline-block;
-      margin-bottom: 12px;
-      box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+      margin: 8px 0;
     }
-    .qr-wrap img {
+    img.qr-img {
       display: block;
-      border-radius: 6px;
+      width: 320px;
+      height: 320px;
+      image-rendering: pixelated;
     }
-    .desc {
-      color: #94a3b8;
+    .instructions {
+      color: #334155;
       font-size: 14px;
       line-height: 1.5;
-      margin: 8px 0 0 0;
+      margin-top: 10px;
     }
   </style>
 </head>
 <body>
-  <div class="header">
-    <h1>ระบบ OnePass Smart Gate - บัตรผ่านสำหรับแข่งขัน</h1>
-    <p>วิทยาลัยการอาชีพองครักษ์ | ใช้หน้าจอนี้ หรือเปิดในมือถือแล้วสแกนที่กล้อง</p>
-  </div>
+  <h1>OnePass Smart Gate - บัตรผ่านสำหรับแข่งขัน</h1>
+  <p class="sub">จ่อกล้องสแกนเนอร์ที่ QR Code ด้านล่างนี้ (ระยะ 10 - 20 ซม.)</p>
 
   <div class="grid">
-    <!-- MASTER DEMO CARD -->
-    <div class="card primary">
-      <div class="badge badge-demo">⭐ บัตรมาสเตอร์สาธิต (ไม่จำกัดครั้ง)</div>
-      <h2>บัตรผ่านโหมดสาธิต / แข่งขัน</h2>
-      <div class="token-box">
-        Token: OP-DEMO-2026
+    <!-- DEMO PASS -->
+    <div class="card">
+      <div class="badge">⭐ บัตรสาธิต / แข่งขัน (แนะนำ)</div>
+      <div class="token-text">OP-DEMO-2026</div>
+      <div class="qr-container">
+        <img class="qr-img" src="data:image/png;base64,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" alt="QR OP-DEMO-2026">
       </div>
-      <div class="qr-wrap">
-        <img src="https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=OP-DEMO-2026&margin=30&ecc=M" width="260" height="260" alt="Master Demo QR">
-      </div>
-      <p class="desc">
+      <div class="instructions">
         ✅ สแกนผ่าน 100% ตลอดเวลา<br>
-        ✅ ไม่หมดอายุ สแกนซ้ำกี่รอบก็ได้ ไม่มีวันล็อก<br>
-        🎯 <strong>เหมาะที่สุดสำหรับใช้สาธิตต่อหน้ากรรมการ!</strong>
-      </p>
+        ✅ ไม่หมดอายุ สแกนได้ไม่จำกัดรอบ
+      </div>
     </div>
 
-    <!-- STUDENT PASS REQUEST 8 -->
-    <div class="card">
-      <div class="badge badge-approved">✅ คำขอจริงในฐานข้อมูล (อนุมัติแล้ว)</div>
-      <h2>คำขอนักเรียน: น.ส.กัญญาภัค มูลศรี</h2>
-      <div class="token-box">
-        คำขอ: OP-20261109-0008<br>
-        Token: OP-6823EF982309
+    <!-- STUDENT PASS -->
+    <div class="card" style="border-color: #16a34a;">
+      <div class="badge badge-pass">คำขอนักเรียนจริง #8</div>
+      <div class="token-text">OP-6823EF982309</div>
+      <div class="qr-container">
+        <img class="qr-img" src="data:image/png;base64,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" alt="QR OP-6823EF982309">
       </div>
-      <div class="qr-wrap">
-        <img src="https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=OP-6823EF982309&margin=30&ecc=M" width="260" height="260" alt="Student QR Pass">
+      <div class="instructions">
+        คำขอ OP-20261109-0008 (อนุมัติแล้ว)<br>
+        บันทึกเวลาจริง และออโต้รีเซ็ตทุกรอบ
       </div>
-      <p class="desc">
-        บันทึกเวลาออก/กลับจริงเข้าฐานข้อมูล<br>
-        ระบบตั้งค่าให้ออโต้รีเซ็ตทุกรอบ สแกนได้ไม่จำกัด
-      </p>
     </div>
   </div>
 </body>
