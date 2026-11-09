@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OnePass Smart Gate - บัตรผ่านสำหรับทดสอบและแข่งขัน</title>
+  <style>
+    body {
+      background: #0f172a;
+      color: #f8fafc;
+      font-family: 'Segoe UI', Tahoma, -apple-system, BlinkMacSystemFont, sans-serif;
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      box-sizing: border-box;
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 25px;
+    }
+    .header h1 {
+      margin: 0 0 8px 0;
+      font-size: 26px;
+      color: #38bdf8;
+    }
+    .header p {
+      margin: 0;
+      color: #94a3b8;
+      font-size: 15px;
+    }
+    .grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 24px;
+      justify-content: center;
+      max-width: 900px;
+      width: 100%;
+    }
+    .card {
+      background: #1e293b;
+      border: 2px solid #334155;
+      border-radius: 20px;
+      padding: 24px 28px;
+      text-align: center;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.4);
+      flex: 1 1 360px;
+      max-width: 420px;
+    }
+    .card.primary {
+      border-color: #38bdf8;
+      box-shadow: 0 0 25px rgba(56, 189, 248, 0.2);
+    }
+    .badge {
+      display: inline-block;
+      padding: 5px 14px;
+      border-radius: 9999px;
+      font-weight: bold;
+      font-size: 14px;
+      margin-bottom: 12px;
+    }
+    .badge-demo {
+      background: #0284c7;
+      color: #ffffff;
+    }
+    .badge-approved {
+      background: #15803d;
+      color: #ffffff;
+    }
+    h2 {
+      margin: 0 0 6px 0;
+      font-size: 20px;
+      color: #f8fafc;
+    }
+    .token-box {
+      background: #0f172a;
+      border: 1px dashed #475569;
+      border-radius: 10px;
+      padding: 10px;
+      margin: 12px 0 16px 0;
+      font-family: 'Consolas', monospace;
+      font-size: 16px;
+      font-weight: bold;
+      color: #38bdf8;
+      letter-spacing: 1px;
+    }
+    .qr-wrap {
+      background: #ffffff;
+      padding: 14px;
+      border-radius: 16px;
+      display: inline-block;
+      margin-bottom: 12px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    }
+    .qr-wrap img {
+      display: block;
+      border-radius: 6px;
+    }
+    .desc {
+      color: #94a3b8;
+      font-size: 14px;
+      line-height: 1.5;
+      margin: 8px 0 0 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>ระบบ OnePass Smart Gate - บัตรผ่านสำหรับแข่งขัน</h1>
+    <p>วิทยาลัยการอาชีพองครักษ์ | ใช้หน้าจอนี้ หรือเปิดในมือถือแล้วสแกนที่กล้อง</p>
+  </div>
+
+  <div class="grid">
+    <!-- MASTER DEMO CARD -->
+    <div class="card primary">
+      <div class="badge badge-demo">⭐ บัตรมาสเตอร์สาธิต (ไม่จำกัดครั้ง)</div>
+      <h2>บัตรผ่านโหมดสาธิต / แข่งขัน</h2>
+      <div class="token-box">
+        Token: OP-DEMO-2026
+      </div>
+      <div class="qr-wrap">
+        <img src="https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=OP-DEMO-2026&margin=30&ecc=M" width="260" height="260" alt="Master Demo QR">
+      </div>
+      <p class="desc">
+        ✅ สแกนผ่าน 100% ตลอดเวลา<br>
+        ✅ ไม่หมดอายุ สแกนซ้ำกี่รอบก็ได้ ไม่มีวันล็อก<br>
+        🎯 <strong>เหมาะที่สุดสำหรับใช้สาธิตต่อหน้ากรรมการ!</strong>
+      </p>
+    </div>
+
+    <!-- STUDENT PASS REQUEST 8 -->
+    <div class="card">
+      <div class="badge badge-approved">✅ คำขอจริงในฐานข้อมูล (อนุมัติแล้ว)</div>
+      <h2>คำขอนักเรียน: น.ส.กัญญาภัค มูลศรี</h2>
+      <div class="token-box">
+        คำขอ: OP-20261109-0008<br>
+        Token: OP-6823EF982309
+      </div>
+      <div class="qr-wrap">
+        <img src="https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=OP-6823EF982309&margin=30&ecc=M" width="260" height="260" alt="Student QR Pass">
+      </div>
+      <p class="desc">
+        บันทึกเวลาออก/กลับจริงเข้าฐานข้อมูล<br>
+        ระบบตั้งค่าให้ออโต้รีเซ็ตทุกรอบ สแกนได้ไม่จำกัด
+      </p>
+    </div>
+  </div>
+</body>
+</html>

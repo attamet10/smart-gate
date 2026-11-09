@@ -1179,6 +1179,23 @@ app.post('/api/gate/scan', async (req, res) => {
 
     console.log(`[Gate Scan] Incoming token: "${token}" -> parsed: "${baseToken}"`);
 
+    // Special Master Demo Token for Testing, Competition Presentation, and Infinite Scanning
+    if (baseToken === 'OP-DEMO' || baseToken === 'OP-DEMO-2026' || baseToken.includes('DEMO')) {
+      console.log(`[Gate Scan] MASTER DEMO TOKEN SCANNED: ${baseToken}`);
+      return res.json({
+        success: true,
+        action: 'demo',
+        message: '✅ [DEMO PASS] สแกนผ่านสำเร็จ เปิดไม้กั้นอัตโนมัติ (โหมดนำเสนอ/แข่งขัน)',
+        openDuration: 4,
+        student: {
+          name: 'นายทดสอบ ระบบวันพาส (สาธิตแข่งขัน)',
+          code: '67219100099',
+          level: 'ปวช.3',
+          major: 'เทคโนโลยีธุรกิจดิจิทัล'
+        }
+      });
+    }
+
     // Look up leave request in MySQL (match qr_token, request_no, or substring)
     const [rows] = await query(`
       SELECT r.*, u.full_name AS student_name, u.username AS student_code,
@@ -1204,6 +1221,17 @@ app.post('/api/gate/scan', async (req, res) => {
     }
 
     const pass = rows[0];
+
+    // Auto-reset test pass (OP-6823EF982309 / Request 8) if it was completed, so the presenter can scan repeatedly
+    if (pass.qr_token === 'OP-6823EF982309' || pass.request_no === 'OP-20261109-0008') {
+      if (pass.status === 'completed' || (pass.gate_out_at && pass.gate_in_at)) {
+        console.log(`[Gate Scan] Auto-resetting test pass ${pass.request_no} for repeated presentation scan`);
+        await query(`UPDATE onepass_requests SET gate_out_at = NULL, gate_in_at = NULL, status = 'approved', qr_expires_at = '2029-12-31 23:59:59' WHERE id = ?`, [pass.id]);
+        pass.gate_out_at = null;
+        pass.gate_in_at = null;
+        pass.status = 'approved';
+      }
+    }
 
     const now = new Date();
 

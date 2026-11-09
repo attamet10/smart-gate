@@ -43,15 +43,15 @@
 #include "secrets.h"
 
 #define PIN_SERVO        18
-// กำหนดองศา Servo ไม้กั้น (หลบระยะล็อกเฟือง 0° เพื่อไม่ให้เฟืองขัด): 15° = ยกขึ้นเปิดทาง, 100° = แนวนอนปิดกั้น
-#define SERVO_ANGLE_OPEN    15    // ยกไม้กั้นขึ้น (เปิดทาง) = 15 องศา (ไม่ชนขอบล็อก 0°)
-#define SERVO_ANGLE_CLOSE   100   // ลดไม้กั้นลง (ปิดกั้นทาง แนวนอน) = 100 องศา
+// กำหนดองศา Servo ไม้กั้น: 0° = ยกขึ้นเปิดทาง (สุดแนวตั้ง), 90° = ลดลงปิดกั้นทาง (สุดแนวนอน)
+#define SERVO_ANGLE_OPEN    0     // ยกไม้กั้นขึ้น (เปิดทาง) = 0 องศา (สุดแนวตั้ง)
+#define SERVO_ANGLE_CLOSE   90    // ลดไม้กั้นลง (ปิดกั้นทาง แนวนอน) = 90 องศา (สุดแนวนอน)
 
 // การตั้งค่าระบบ Ultrasonic ตรวจจับคนเดินผ่าน & ป้องกันไม้กั้นตีคน
 #define SENSOR_MIN_DISTANCE       2     // ระยะตรวจจับต่ำสุด (ซม.)
 #define SENSOR_MAX_DISTANCE       30    // ระยะตรวจจับคนเดินผ่าน (ซม.) 2 - 30 ซม.
-#define CLEAR_CONFIRM_DELAY_MS    5000  // หน่วงเวลารอให้พ้นตัว 5 วินาทีก่อนปิด (ป้องกันไม้กั้นเฉี่ยวหลัง)
-#define GATE_MAX_TIMEOUT_MS       30000 // หมดเวลาเปิดทิ้งไว้ 30 วินาที (ถ้าสแกนแล้วไม่ยอมเดินผ่าน)
+#define CLEAR_CONFIRM_DELAY_MS    3000  // หน่วงเวลารอให้พ้นตัว 3 วินาทีก่อนปิด (ป้องกันไม้กั้นเฉี่ยวหลัง)
+#define GATE_MAX_TIMEOUT_MS       8000  // หมดเวลาเปิดทิ้งไว้ 8 วินาที (ถ้าสแกนแล้วไม่ยอมเดินผ่าน หรือทดสอบบนโต๊ะ)
 
 #define PIN_LED_GREEN    27
 #define PIN_LED_RED      33
@@ -88,7 +88,7 @@ LiquidCrystal_I2C lcd(LCD_I2C_ADDR, 16, 2);
 void setServoAngle(int angle) {
   if (!gateServo.attached()) {
     gateServo.setPeriodHertz(50);
-    gateServo.attach(PIN_SERVO, 544, 2400);
+    gateServo.attach(PIN_SERVO, 500, 2400);
   }
   gateServo.write(angle);
   delay(450); // ให้เวลาและกระแสไฟ 5V แก่ Servo เต็มที่จนหมุนสุดองศาก่อนสั่ง Relay/Buzzer
@@ -116,7 +116,7 @@ bool serverOk = false;        // true เมื่อส่งสถานะเ
 void updateLcd();
 
 unsigned long lastCycle = 0;
-const unsigned long CYCLE_MS = 5000; // ส่งสถานะทุก 5 วินาที
+const unsigned long CYCLE_MS = 8000; // ส่งสถานะทุก 8 วินาที
 unsigned long lastReconnectAttempt = 0;
 
 long readUltrasonicCm() {
@@ -189,6 +189,17 @@ void submitQrScan(const String& rawToken) {
   Serial.print(" -> Clean: ");
   Serial.println(token);
 
+  // สกัดเอาเฉพาะ OP-XXXXX หากกล้องส่ง AIM code หรือข้อความอื่นแถมมา
+  int opIdx = token.indexOf("OP-");
+  if (opIdx >= 0) {
+    int endIdx = opIdx + 3;
+    while (endIdx < token.length() && (isalnum(token.charAt(endIdx)) || token.charAt(endIdx) == '-')) {
+      endIdx++;
+    }
+    token = token.substring(opIdx, endIdx);
+    Serial.println("[QR SCAN] Extracted OP token: " + token);
+  }
+
   if (token.length() < 3) return;
   lastScannedToken = token;
 
@@ -213,7 +224,8 @@ void submitQrScan(const String& rawToken) {
 
   if (SERVER_PORT == 443) {
     secureClient.setInsecure();
-    secureClient.setTimeout(10000);
+    secureClient.setBufferSizes(2048, 1024); // ลดการใช้ RAM ไม่ให้ mbedTLS heap เต็ม
+    secureClient.setTimeout(8000);
     // เชื่อมต่อด้วย IP ตรง 27.254.134.22 ก่อนเสมอ เพื่อข้ามปัญหา DNS ช้าบน Hotspot มือถือ
     if (!secureClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT) &&
         !secureClient.connect(SERVER_HOST, SERVER_PORT)) {
@@ -226,7 +238,7 @@ void submitQrScan(const String& rawToken) {
     }
     client = &secureClient;
   } else {
-    plainClient.setTimeout(10000);
+    plainClient.setTimeout(8000);
     if (!plainClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT) &&
         !plainClient.connect(SERVER_HOST, SERVER_PORT)) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (QR scan HTTP)");
@@ -253,9 +265,10 @@ void submitQrScan(const String& rawToken) {
 
   String response = "";
   unsigned long timeout = millis();
-  while (client->connected() && millis() - timeout < 8000) {
+  while ((client->connected() || client->available()) && millis() - timeout < 8000) {
     while (client->available()) {
       response += (char)client->read();
+      timeout = millis();
     }
   }
   client->stop();
@@ -365,7 +378,8 @@ void reportStatus() {
 
   if (SERVER_PORT == 443) {
     secureClient.setInsecure();
-    secureClient.setTimeout(10000);
+    secureClient.setBufferSizes(2048, 1024); // ป้องกัน Heap memory เต็ม
+    secureClient.setTimeout(8000);
     // เชื่อมต่อด้วย IP ตรง 27.254.134.22 ก่อนเสมอ เพื่อไม่ให้บอร์ดค้างรอ DNS บน Hotspot
     if (!secureClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT)) {
       Serial.println("⚠️ ต่อด้วย IP ตรงไม่สำเร็จ ลองต่อด้วยโดเมน ...");
@@ -378,7 +392,7 @@ void reportStatus() {
     }
     client = &secureClient;
   } else {
-    plainClient.setTimeout(10000);
+    plainClient.setTimeout(8000);
     if (!plainClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT) &&
         !plainClient.connect(SERVER_HOST, SERVER_PORT)) {
       Serial.println("⚠️ เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ (Status HTTP)");
@@ -417,9 +431,10 @@ void reportStatus() {
 
   String response = "";
   unsigned long timeout = millis();
-  while (client->connected() && millis() - timeout < 8000) {
+  while ((client->connected() || client->available()) && millis() - timeout < 8000) {
     while (client->available()) {
       response += (char)client->read();
+      timeout = millis();
     }
   }
   client->stop();
@@ -621,7 +636,7 @@ void setup() {
   ESP32PWM::allocateTimer(2);
   ESP32PWM::allocateTimer(3);
   gateServo.setPeriodHertz(50);
-  gateServo.attach(PIN_SERVO, 544, 2400);
+  gateServo.attach(PIN_SERVO, 500, 2400);
   setServoAngle(SERVO_ANGLE_CLOSE);
 
   Wire.begin(21, 22); // SDA=GPIO21, SCL=GPIO22
