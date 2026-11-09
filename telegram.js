@@ -69,6 +69,17 @@ async function getTelegramConfig() {
 }
 
 /**
+ * Helper to escape HTML special characters for Telegram HTML mode
+ */
+function escapeTelegramHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
  * Send Telegram message with optional Inline Keyboard
  */
 async function sendTelegramMessage(chatId, text, inlineKeyboard = null) {
@@ -115,6 +126,12 @@ async function sendTelegramMessage(chatId, text, inlineKeyboard = null) {
             resolve(json.result);
           } else {
             console.warn(`[Telegram] API error:`, json.description);
+            // Fallback: If Telegram rejected due to invalid HTML formatting, retry with Plain Text
+            if (json.description && json.description.includes('can\'t parse entities')) {
+              console.log('[Telegram] Retrying sendMessage as plain text...');
+              sendPlainTelegramMessage(targetChatId, text.replace(/<[^>]+>/g, ''), inlineKeyboard).then(resolve);
+              return;
+            }
             resolve(null);
           }
         } catch (e) {
@@ -128,6 +145,38 @@ async function sendTelegramMessage(chatId, text, inlineKeyboard = null) {
       resolve(null);
     });
 
+    req.write(payload);
+    req.end();
+  });
+}
+
+async function sendPlainTelegramMessage(targetChatId, plainText, inlineKeyboard = null) {
+  const config = await getTelegramConfig();
+  const payloadObj = {
+    chat_id: targetChatId,
+    text: plainText
+  };
+  if (inlineKeyboard && inlineKeyboard.length > 0) {
+    payloadObj.reply_markup = { inline_keyboard: inlineKeyboard };
+  }
+  const payload = JSON.stringify(payloadObj);
+  const options = {
+    hostname: 'api.telegram.org',
+    port: 443,
+    path: `/bot${config.botToken}/sendMessage`,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(payload)
+    }
+  };
+  return new Promise((resolve) => {
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => resolve(true));
+    });
+    req.on('error', () => resolve(null));
     req.write(payload);
     req.end();
   });
@@ -712,9 +761,18 @@ function getGeminiApiKey() {
   return p1 + p2 + p3;
 }
 
-async function askGeminiAI(userPrompt, senderName = 'ผู้ใช้งาน') {
+// Memory session store for multi-turn Gemini conversations per chat
+const conversationHistory = new Map();
+
+async function askGeminiAI(userPrompt, senderName = 'ผู้ใช้งาน', chatId = null) {
   const apiKey = getGeminiApiKey();
   if (!apiKey) return null;
+
+  // Retrieve user history (keep last 6 turns so it remembers context)
+  let history = [];
+  if (chatId && conversationHistory.has(chatId)) {
+    history = conversationHistory.get(chatId);
+  }
 
   const systemInstruction = 
 `คุณคือ 'OnePass AI Assistant' ผู้ช่วยอัจฉริยะประจำระบบ OnePass (ระบบขออนุญาตออกนอกสถานศึกษา ด้วยระบบ QR Code และไม้กั้น IoT อัจฉริยะ ของวิทยาลัยการอาชีพองครักษ์)
@@ -725,14 +783,20 @@ async function askGeminiAI(userPrompt, senderName = 'ผู้ใช้งาน
    - ผู้เรียนนำ QR ไปสแกนที่ตู้ไม้กั้นอัจฉริยะหน้าประตูเพื่อเปิดทางอัตโนมัติ
 2. ตอบคำถามทั่วไป ความรู้ การเรียน หรือช่วยตอบข้อสงสัยของผู้ใช้งาน (${senderName}) ได้อย่างสุภาพ เป็นมิตร ฉลาด และกระชับชัดเจน (ตอบเป็นภาษาไทย)`;
 
+  // Build contents array with conversation history
+  const contents = [
+    { role: 'user', parts: [{ text: systemInstruction }] },
+    { role: 'model', parts: [{ text: 'รับทราบครับ ผมคือ OnePass AI Assistant พร้อมช่วยเหลือและตอบคำถามทุกข้อสงสัยของคุณแล้วครับ!' }] }
+  ];
+
+  history.forEach(item => {
+    contents.push({ role: item.role, parts: [{ text: item.text }] });
+  });
+
+  contents.push({ role: 'user', parts: [{ text: userPrompt }] });
+
   const payload = JSON.stringify({
-    contents: [
-      {
-        parts: [
-          { text: systemInstruction + "\n\nคำถามจากผู้ใช้: " + userPrompt }
-        ]
-      }
-    ],
+    contents: contents,
     generationConfig: {
       temperature: 0.7,
       maxOutputTokens: 1000
@@ -758,7 +822,17 @@ async function askGeminiAI(userPrompt, senderName = 'ผู้ใช้งาน
         try {
           const json = JSON.parse(data);
           if (json.candidates && json.candidates[0] && json.candidates[0].content && json.candidates[0].content.parts) {
-            resolve(json.candidates[0].content.parts[0].text);
+            const replyText = json.candidates[0].content.parts[0].text;
+            
+            // Save to conversation history
+            if (chatId) {
+              history.push({ role: 'user', text: userPrompt });
+              history.push({ role: 'model', text: replyText });
+              if (history.length > 10) history = history.slice(history.length - 10);
+              conversationHistory.set(chatId, history);
+            }
+            
+            resolve(replyText);
           } else {
             console.warn('[Gemini AI] Unexpected response structure:', data);
             resolve(null);
@@ -791,6 +865,9 @@ async function handleTelegramMessage(msg) {
   if (!text) return;
 
   if (text === '/start') {
+    // Clear chat history on /start
+    conversationHistory.delete(chatId);
+
     const welcomeText = 
 `👋 <b>ยินดีต้อนรับสู่ OnePass Bot & Gemini AI</b>
 ระบบขออนุญาตออกนอกสถานศึกษา ด้วยระบบ QR Code
@@ -800,7 +877,7 @@ async function handleTelegramMessage(msg) {
 ℹ️ <b>บริการของบอท:</b>
 1. <b>รับการแจ้งเตือน & กดอนุมัติ:</b> นำ Chat ID ไปผูกที่ปุ่มโปรไฟล์ในเว็บ OnePass
 2. <b>รับบัตรผ่าน QR:</b> สแกนออกประตูอัตโนมัติ
-3. <b>ถาม-ตอบกับ Gemini AI:</b> พิมพ์ข้อความคำถามหรือคุยกับ AI ได้ทันทีในห้องแชตนี้!`;
+3. <b>ถาม-ตอบกับ Gemini AI:</b> พิมพ์ข้อความคำถามหรือคุยกับ AI ได้อย่างต่อเนื่องในห้องแชตนี้!`;
 
     await sendTelegramMessage(chatId, welcomeText);
     return;
@@ -817,9 +894,10 @@ async function handleTelegramMessage(msg) {
     }
   } catch (e) {}
 
-  const aiReply = await askGeminiAI(text, senderName);
+  const aiReply = await askGeminiAI(text, senderName, chatId);
   if (aiReply) {
-    const formattedReply = `🤖 <b>[OnePass AI]:</b>\n\n${aiReply}`;
+    const cleanReply = escapeTelegramHtml(aiReply);
+    const formattedReply = `🤖 <b>[OnePass AI]:</b>\n\n${cleanReply}`;
     await sendTelegramMessage(chatId, formattedReply);
   } else {
     await sendTelegramMessage(chatId, `ขออภัยครับ ขณะนี้ระบบประมวลผล Gemini AI ขัดข้องชั่วคราว กรุณาลองใหม่อีกครั้ง`);
