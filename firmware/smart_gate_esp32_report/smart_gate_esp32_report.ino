@@ -224,7 +224,6 @@ void submitQrScan(const String& rawToken) {
 
   if (SERVER_PORT == 443) {
     secureClient.setInsecure();
-    secureClient.setBufferSizes(2048, 1024); // ลดการใช้ RAM ไม่ให้ mbedTLS heap เต็ม
     secureClient.setTimeout(8000);
     // เชื่อมต่อด้วย IP ตรง 27.254.134.22 ก่อนเสมอ เพื่อข้ามปัญหา DNS ช้าบน Hotspot มือถือ
     if (!secureClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT) &&
@@ -378,7 +377,6 @@ void reportStatus() {
 
   if (SERVER_PORT == 443) {
     secureClient.setInsecure();
-    secureClient.setBufferSizes(2048, 1024); // ป้องกัน Heap memory เต็ม
     secureClient.setTimeout(8000);
     // เชื่อมต่อด้วย IP ตรง 27.254.134.22 ก่อนเสมอ เพื่อไม่ให้บอร์ดค้างรอ DNS บน Hotspot
     if (!secureClient.connect(IPAddress(27, 254, 134, 22), SERVER_PORT)) {
