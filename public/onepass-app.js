@@ -629,13 +629,15 @@ async function loadStudentDashboard() {
       state.studentInfo = data;
       const std = data.student;
       document.getElementById('student-profile-text').innerHTML = `
-        <strong>ชื่อ-สกุล:</strong> ${std.full_name} | 
-        <strong>รหัสประจำตัว:</strong> ${std.student_code} | 
-        <strong>ระดับชั้น:</strong> ${std.level_name || '-'} | 
-        <strong>แผนกวิชา:</strong> ${std.major_name || '-'} ${std.room ? '(' + std.room + ')' : ''}
+        <div class="profile-pills-wrap">
+          <span class="profile-pill pill-name">👤 <strong>${std.full_name}</strong></span>
+          <span class="profile-pill pill-code">🆔 รหัส: <strong>${std.student_code}</strong></span>
+          <span class="profile-pill pill-level">🎓 ${std.level_name || '-'}</span>
+          <span class="profile-pill pill-dept">🔧 ${std.major_name || '-'} ${std.room ? '(' + std.room + ')' : ''}</span>
+        </div>
       `;
 
-      // Approvers Info Banner
+      // Approvers Info Banner (Visual Step Timeline)
       const app = data.approvers;
       const advName = app.advisor ? app.advisor.full_name : 'ยังไม่ระบุในระบบ';
       const hmName = app.head_major ? app.head_major.full_name : 'ยังไม่ระบุในระบบ';
@@ -643,12 +645,50 @@ async function loadStudentDashboard() {
       const depName = app.deputy_director ? app.deputy_director.full_name : 'ฝ่ายกิจการนักเรียนฯ';
 
       document.getElementById('student-approvers-info').innerHTML = `
-        <strong>สายการพิจารณาอนุมัติของคุณ:</strong>
-        <span style="margin-left: 8px;">1. ครูรายวิชา (เลือกตามคาบเรียน) &rarr;</span>
-        <span>2. ครูที่ปรึกษา: <u>${advName}</u> &rarr;</span>
-        <span>3. หัวหน้าแผนก: <u>${hmName}</u> &rarr;</span>
-        <span>4. หัวหน้างานปกครอง: <u>${hdName}</u> &rarr;</span>
-        <span>5. รอง ผอ. ฝ่ายกิจการฯ: <u>${depName}</u></span>
+        <div class="approver-flow-header">
+          <span class="flow-icon">⚡</span> <strong>สายการพิจารณาอนุมัติคำขอ (5 ลำดับ):</strong>
+        </div>
+        <div class="approver-steps-grid">
+          <div class="approver-step-item">
+            <span class="step-num">1</span>
+            <div class="step-desc">
+              <span class="step-role">ครูรายวิชา</span>
+              <span class="step-name">เลือกตามคาบเรียน</span>
+            </div>
+          </div>
+          <div class="approver-step-arrow">&rarr;</div>
+          <div class="approver-step-item">
+            <span class="step-num">2</span>
+            <div class="step-desc">
+              <span class="step-role">ครูที่ปรึกษา</span>
+              <span class="step-name">${advName}</span>
+            </div>
+          </div>
+          <div class="approver-step-arrow">&rarr;</div>
+          <div class="approver-step-item">
+            <span class="step-num">3</span>
+            <div class="step-desc">
+              <span class="step-role">หัวหน้าแผนก</span>
+              <span class="step-name">${hmName}</span>
+            </div>
+          </div>
+          <div class="approver-step-arrow">&rarr;</div>
+          <div class="approver-step-item">
+            <span class="step-num">4</span>
+            <div class="step-desc">
+              <span class="step-role">หน.งานปกครอง</span>
+              <span class="step-name">${hdName}</span>
+            </div>
+          </div>
+          <div class="approver-step-arrow">&rarr;</div>
+          <div class="approver-step-item">
+            <span class="step-num">5</span>
+            <div class="step-desc">
+              <span class="step-role">รอง ผอ. กิจการฯ</span>
+              <span class="step-name">${depName}</span>
+            </div>
+          </div>
+        </div>
       `;
     }
 

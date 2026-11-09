@@ -44,7 +44,7 @@ body {
 }
 
 body.has-bottom-nav {
-  padding-bottom: calc(var(--bottom-nav-height) + 20px);
+  padding-bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom, 12px) + 24px);
 }
 
 .container {
@@ -82,19 +82,12 @@ body.has-bottom-nav {
 .brand {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 
-.brand-icon {
-  width: 32px;
-  height: 32px;
-  background: linear-gradient(135deg, #2563eb, #3b82f6);
-  border-radius: 9px;
+.brand-title-wrap {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  font-size: 1.1rem;
+  flex-direction: column;
 }
 
 .brand h1 {
@@ -103,13 +96,24 @@ body.has-bottom-nav {
   color: #ffffff;
   letter-spacing: -0.5px;
   margin: 0;
-  line-height: 1.2;
+  line-height: 1.1;
 }
 
-.brand .brand-sub {
-  font-size: 0.72rem;
+.brand-sub {
+  font-size: 0.65rem;
+  color: #60a5fa;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+}
+
+.brand .subtitle {
+  font-size: 0.78rem;
   color: #94a3b8;
-  display: block;
+  border-left: 1px solid #334155;
+  padding-left: 10px;
+  margin-left: 2px;
+  white-space: nowrap;
 }
 
 .user-nav {
@@ -966,7 +970,44 @@ body.is-login-view .container {
   color: #0f172a;
 }
 
-/* Approver Box */
+/* Profile Info Pills */
+.profile-pills-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.profile-pill {
+  display: inline-flex;
+  align-items: center;
+  background: #f1f5f9;
+  color: #334155;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  border: 1px solid #e2e8f0;
+}
+
+.profile-pill strong {
+  color: #0f172a;
+  margin-left: 4px;
+}
+
+.profile-pill.pill-name {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border-color: #bfdbfe;
+}
+
+.profile-pill.pill-code {
+  background: #f0fdf4;
+  color: #15803d;
+  border-color: #bbf7d0;
+}
+
+/* Approver Box & Step Timeline */
 .approver-info-box {
   background: #f8fafc;
   border: 1px solid #e2e8f0;
@@ -974,6 +1015,75 @@ body.is-login-view .container {
   padding: 14px;
   margin-top: 14px;
   font-size: 0.88rem;
+}
+
+.approver-flow-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #1e293b;
+  font-size: 0.88rem;
+  margin-bottom: 10px;
+}
+
+.approver-steps-grid {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.approver-step-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 6px 10px;
+  min-width: 130px;
+  flex-shrink: 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.approver-step-item .step-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #2563eb;
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.approver-step-item .step-desc {
+  display: flex;
+  flex-direction: column;
+}
+
+.approver-step-item .step-role {
+  font-size: 0.72rem;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.approver-step-item .step-name {
+  font-size: 0.78rem;
+  color: #0f172a;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.approver-step-arrow {
+  color: #94a3b8;
+  font-weight: bold;
+  flex-shrink: 0;
 }
 
 /* Workflow Step Indicators */
@@ -1105,13 +1215,87 @@ body.is-login-view .container {
    RESPONSIVE MOBILE BREAKPOINTS (< 768px)
    ======================================================== */
 @media (max-width: 768px) {
+  /* Header compact mobile styling */
+  .app-header {
+    padding: 8px 0;
+  }
+
+  .header-container {
+    padding: 0 12px;
+  }
+
+  /* CRITICAL FIX: Hide the long subtitle on mobile to prevent vertical word wrapping */
+  .app-header .subtitle {
+    display: none !important;
+  }
+
+  .brand h1 {
+    font-size: 1.15rem;
+  }
+
+  .brand-sub {
+    font-size: 0.6rem;
+    letter-spacing: 0.8px;
+  }
+
+  .user-badge {
+    max-width: clamp(120px, 40vw, 160px);
+    font-size: 0.75rem;
+    padding: 4px 10px;
+  }
+
   .container {
     padding: 10px 12px;
   }
 
   .card {
-    padding: 15px;
+    padding: 14px 12px;
     border-radius: var(--radius-md);
+  }
+
+  .card-header-flex {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+
+  .card-header-flex h2 {
+    font-size: 1.12rem;
+  }
+
+  #btn-open-request-modal {
+    width: 100%;
+    min-height: 44px;
+    font-size: 0.92rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 12px;
+  }
+
+  /* Approver steps grid on mobile */
+  .approver-steps-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 6px;
+    overflow-x: visible;
+  }
+
+  .approver-step-arrow {
+    display: none;
+  }
+
+  .approver-step-item {
+    min-width: 0;
+    width: 100%;
+    padding: 6px 8px;
+  }
+
+  .approver-step-item .step-name {
+    font-size: 0.75rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* Modals slide up like native mobile bottom-sheets */
@@ -1138,5 +1322,12 @@ body.is-login-view .container {
   #btn-open-gate,
   #btn-logout {
     display: none !important;
+  }
+
+  /* Ensure table scrolls smoothly without wrapping headers awkwardly */
+  .table th, .table td {
+    white-space: nowrap;
+    padding: 9px 10px;
+    font-size: 0.85rem;
   }
 }
