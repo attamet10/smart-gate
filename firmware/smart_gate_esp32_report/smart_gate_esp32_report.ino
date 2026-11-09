@@ -339,25 +339,25 @@ void reportStatus() {
     Serial.println("✅ รายงานสถานะสำเร็จ");
   }
 
-  if (response.indexOf("\"command\":\"OPEN_TEST\"") >= 0) {
-    Serial.println("🔔 ได้รับคำสั่งทดสอบเปิดไม้กั้นจากแอดมิน");
-    testOpenSequence();
-  } else if (response.indexOf("\"command\":\"CLOSE_TEST\"") >= 0) {
+  if (response.indexOf("CLOSE_TEST") >= 0) {
     Serial.println("🛑 ได้รับคำสั่งทดสอบลดไม้กั้น/ปิดทางจากแอดมิน");
-    testCloseSequence();
-  } else if (response.indexOf("\"command\":\"TEST_SERVO\"") >= 0) {
+    testCloseCommand();
+  } else if (response.indexOf("OPEN_TEST") >= 0) {
+    Serial.println("🔔 ได้รับคำสั่งทดสอบเปิดไม้กั้นจากแอดมิน");
+    testOpenCommand();
+  } else if (response.indexOf("TEST_SERVO") >= 0) {
     Serial.println("🔔 ได้รับคำสั่งทดสอบ Servo จากแอดมิน");
     testServoOnly();
-  } else if (response.indexOf("\"command\":\"TEST_LED_GREEN\"") >= 0) {
+  } else if (response.indexOf("TEST_LED_GREEN") >= 0) {
     Serial.println("🔔 ได้รับคำสั่งทดสอบ LED เขียวจากแอดมิน");
     testLedOnly(PIN_LED_GREEN, "เขียว");
-  } else if (response.indexOf("\"command\":\"TEST_LED_RED\"") >= 0) {
+  } else if (response.indexOf("TEST_LED_RED") >= 0) {
     Serial.println("🔔 ได้รับคำสั่งทดสอบ LED แดงจากแอดมิน");
     testLedOnly(PIN_LED_RED, "แดง");
-  } else if (response.indexOf("\"command\":\"TEST_RELAY\"") >= 0) {
+  } else if (response.indexOf("TEST_RELAY") >= 0) {
     Serial.println("🔔 ได้รับคำสั่งทดสอบ Relay จากแอดมิน");
     testRelayOnly();
-  } else if (response.indexOf("\"command\":\"TEST_BUZZER\"") >= 0) {
+  } else if (response.indexOf("TEST_BUZZER") >= 0) {
     Serial.println("🔔 ได้รับคำสั่งทดสอบบัซเซอร์จากแอดมิน");
     testBuzzerOnly();
   }
@@ -451,20 +451,32 @@ void openGateWithUltrasonicSafety() {
   delay(500);
 }
 
-// Alias สำหรับคำสั่งทดสอบจากแอดมินเดิม
-void testOpenSequence() {
-  openGateWithUltrasonicSafety();
+// คำสั่งทดสอบเปิดไม้กั้นค้างไว้จากหน้าเว็บ (OPEN_TEST)
+void testOpenCommand() {
+  gateServo.write(SERVO_ANGLE_OPEN);
+  digitalWrite(PIN_RELAY, HIGH);
+  digitalWrite(PIN_LED_GREEN, HIGH);
+  digitalWrite(PIN_LED_RED, LOW);
+  tone(PIN_SPEAKER, 1500, 200);
+  Serial.println("🚪 [GATE] ยกไม้กั้นขึ้นเปิดทาง (คำสั่ง OPEN_TEST ค้างไว้รอสั่งปิด)");
+  lcd.setCursor(0, 1);
+  lcd.print("GATE OPEN (CMD) ");
 }
 
-void testCloseSequence() {
+// คำสั่งทดสอบลดไม้กั้นลงปิดจากหน้าเว็บ (CLOSE_TEST)
+void testCloseCommand() {
   gateServo.write(SERVO_ANGLE_CLOSE);
   digitalWrite(PIN_RELAY, LOW);
   digitalWrite(PIN_LED_GREEN, LOW);
   digitalWrite(PIN_LED_RED, HIGH);
   tone(PIN_SPEAKER, 800, 250);
-  Serial.println("🔒 [GATE] ลดไม้กั้นลงปิด (คำสั่ง CLOSE_TEST)");
+  Serial.println("🔒 [GATE] ลดไม้กั้นลงปิดทาง (คำสั่ง CLOSE_TEST)");
   lcd.setCursor(0, 1);
   lcd.print("GATE CLOSED(CMD)");
+}
+
+void testOpenSequence() {
+  openGateWithUltrasonicSafety();
 }
 
 // ทดสอบอุปกรณ์ทีละชิ้น (ปุ่มแยกในหน้าแอดมิน) - สั่งงานสั้นๆ ให้เห็น/ได้ยินผลแล้วคืนค่าเดิม
