@@ -764,29 +764,81 @@ function getGeminiApiKey() {
 // Memory session store for multi-turn Gemini conversations per chat
 const conversationHistory = new Map();
 
+/**
+ * Fetch real-time system stats (excluding sensitive user credentials)
+ */
+async function getSystemBackendContext() {
+  try {
+    const [stats] = await query(`
+      SELECT 
+        COUNT(*) AS total_requests,
+        SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved_count,
+        SUM(CASE WHEN status LIKE 'pending_%' THEN 1 ELSE 0 END) AS pending_count,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+        SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected_count
+      FROM onepass_requests
+    `);
+
+    const [recent] = await query(`
+      SELECT request_no, leave_type, reason, status, created_at
+      FROM onepass_requests
+      ORDER BY id DESC LIMIT 5
+    `);
+
+    const [majors] = await query(`SELECT name FROM majors LIMIT 10`);
+
+    let summary = `\n[ข้อมูลสถานะหลังบ้านระบบ OnePass Real-time]:`;
+    if (stats.length > 0) {
+      const s = stats[0];
+      summary += `\n- คำขอทั้งหมดในระบบ: ${s.total_requests} รายการ`;
+      summary += `\n- รอพิจารณาอนุมัติ: ${s.pending_count || 0} รายการ`;
+      summary += `\n- อนุมัติแล้ว (ได้รับบัตรผ่าน): ${s.approved_count || 0} รายการ`;
+      summary += `\n- ผ่านประตูเสร็จสิ้นสมบูรณ์: ${s.completed_count || 0} รายการ`;
+      summary += `\n- ไม่อนุมัติ: ${s.rejected_count || 0} รายการ`;
+    }
+
+    if (recent.length > 0) {
+      summary += `\n- คำขอล่าสุด: ` + recent.map(r => `${r.request_no} (${r.reason} - สถานะ: ${r.status})`).join(', ');
+    }
+
+    if (majors.length > 0) {
+      summary += `\n- แผนกวิชาที่เปิดในวิทยาลัย: ` + majors.map(m => m.name).join(', ');
+    }
+
+    return summary;
+  } catch (err) {
+    return '';
+  }
+}
+
 async function askGeminiAI(userPrompt, senderName = 'ผู้ใช้งาน', chatId = null) {
   const apiKey = getGeminiApiKey();
   if (!apiKey) return null;
 
-  // Retrieve user history (keep last 6 turns so it remembers context)
+  // Retrieve user history (keep last 4 turns for lightning speed)
   let history = [];
   if (chatId && conversationHistory.has(chatId)) {
     history = conversationHistory.get(chatId);
   }
 
+  // Get live database context (strictly no passwords or personal credentials)
+  const backendStats = await getSystemBackendContext();
+
   const systemInstruction = 
-`คุณคือ 'OnePass AI Assistant' ผู้ช่วยอัจฉริยะประจำระบบ OnePass (ระบบขออนุญาตออกนอกสถานศึกษา ด้วยระบบ QR Code และไม้กั้น IoT อัจฉริยะ ของวิทยาลัยการอาชีพองครักษ์)
-หน้าที่ของคุณ:
-1. ตอบคำถามเกี่ยวกับขั้นตอนการขออนุญาตออกนอกสถานศึกษา:
-   - ผู้เรียนยื่นคำขอในระบบ -> ผ่านการอนุมัติ 5 ลำดับ (ครูรายวิชา -> ครูที่ปรึกษา -> หัวหน้าแผนก -> งานปกครอง -> รอง ผอ. ฝ่ายพัฒนากิจการฯ)
-   - เมื่ออนุมัติครบ จะได้ QR Code บัตรผ่านดิจิทัล (Digital Gate Pass) ทาง Telegram มีอายุ 30 นาที
-   - ผู้เรียนนำ QR ไปสแกนที่ตู้ไม้กั้นอัจฉริยะหน้าประตูเพื่อเปิดทางอัตโนมัติ
-2. ตอบคำถามทั่วไป ความรู้ การเรียน หรือช่วยตอบข้อสงสัยของผู้ใช้งาน (${senderName}) ได้อย่างสุภาพ เป็นมิตร ฉลาด และกระชับชัดเจน (ตอบเป็นภาษาไทย)`;
+`คุณคือ 'OnePass AI Assistant' ผู้ช่วยอัจฉริยะประจำระบบ OnePass ของวิทยาลัยการอาชีพองครักษ์
+คุณรอบรู้ข้อมูลระบบหลังบ้าน การทำงานของตู้ไม้กั้น และขั้นตอนการขออนุญาตทั้งหมด
+${backendStats}
+
+ข้อปฏิบัติในการตอบ:
+1. ตอบให้ 'กระชับ ชัดเจน รวดเร็ว และตรงประเด็น' (หลีกเลี่ยงการเกริ่นยาว เพื่อความเร็วในการตอบกลับ)
+2. ถ้าผู้ใช้ถามสถิติ ข้อมูลคำขอ หรือสถานะระบบหลังบ้าน ให้สรุปข้อมูลตัวเลขจริงด้านบนตอบได้ทันที
+3. กฎความปลอดภัยสูงสุด: ห้ามเปิดเผยหรือตอบรหัสผ่าน/บัญชีส่วนบุคคลเด็ดขาด
+4. ตอบเป็นภาษาไทยอย่างสุภาพและเป็นมิตร`;
 
   // Build contents array with conversation history
   const contents = [
     { role: 'user', parts: [{ text: systemInstruction }] },
-    { role: 'model', parts: [{ text: 'รับทราบครับ ผมคือ OnePass AI Assistant พร้อมช่วยเหลือและตอบคำถามทุกข้อสงสัยของคุณแล้วครับ!' }] }
+    { role: 'model', parts: [{ text: 'รับทราบครับ ผม OnePass AI พร้อมตอบข้อมูลระบบอย่างรวดเร็วและกระชับครับ!' }] }
   ];
 
   history.forEach(item => {
@@ -798,8 +850,8 @@ async function askGeminiAI(userPrompt, senderName = 'ผู้ใช้งาน
   const payload = JSON.stringify({
     contents: contents,
     generationConfig: {
-      temperature: 0.7,
-      maxOutputTokens: 1000
+      temperature: 0.5,
+      maxOutputTokens: 500 // ตอบกระชับขึ้นเพื่อความเร็วระดับสูงสุด
     }
   });
 
@@ -828,7 +880,7 @@ async function askGeminiAI(userPrompt, senderName = 'ผู้ใช้งาน
             if (chatId) {
               history.push({ role: 'user', text: userPrompt });
               history.push({ role: 'model', text: replyText });
-              if (history.length > 10) history = history.slice(history.length - 10);
+              if (history.length > 8) history = history.slice(history.length - 8);
               conversationHistory.set(chatId, history);
             }
             
@@ -848,6 +900,11 @@ async function askGeminiAI(userPrompt, senderName = 'ผู้ใช้งาน
       console.error('[Gemini AI] Network error:', err.message);
       resolve(null);
     });
+
+    req.write(payload);
+    req.end();
+  });
+}
 
     req.write(payload);
     req.end();
