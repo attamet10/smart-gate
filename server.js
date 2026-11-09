@@ -1302,10 +1302,8 @@ app.post('/api/gate/scan', async (req, res) => {
       if (stdUser.length > 0) {
         telegram.notifyGateRecord(pass, stdUser[0], 'exit', now);
       }
-    }
-
-    pendingDeviceCommand = 'OPEN_TEST';
-    console.log(`[Gate Check-Out] Exit recorded. Auto-queued OPEN_TEST to ESP32!`); else if (!pass.gate_in_at && !pass.is_not_returning) {
+      pendingDeviceCommand = 'OPEN_TEST';
+    } else if (!pass.gate_in_at && !pass.is_not_returning) {
       // Record return (ขากลับเข้า)
       await query(`
         UPDATE onepass_requests
