@@ -1136,7 +1136,7 @@ app.get('/api/device/status', (req, res) => {
 // Send Command to ESP32 (e.g. OPEN_TEST, TEST_SERVO from Web UI)
 app.post('/api/device/command', (req, res) => {
   const { command } = req.body;
-  const validCommands = ['OPEN_TEST', 'TEST_SERVO', 'TEST_LED_GREEN', 'TEST_LED_RED', 'TEST_LED_YELLOW', 'TEST_RELAY', 'TEST_BUZZER'];
+  const validCommands = ['OPEN_TEST', 'CLOSE_TEST', 'TEST_SERVO', 'TEST_LED_GREEN', 'TEST_LED_RED', 'TEST_LED_YELLOW', 'TEST_RELAY', 'TEST_BUZZER'];
   if (!validCommands.includes(command)) {
     return res.status(400).json({ success: false, message: 'คำสั่งไม่ถูกต้อง' });
   }

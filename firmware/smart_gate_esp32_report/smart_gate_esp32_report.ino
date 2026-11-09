@@ -342,6 +342,9 @@ void reportStatus() {
   if (response.indexOf("\"command\":\"OPEN_TEST\"") >= 0) {
     Serial.println("🔔 ได้รับคำสั่งทดสอบเปิดไม้กั้นจากแอดมิน");
     testOpenSequence();
+  } else if (response.indexOf("\"command\":\"CLOSE_TEST\"") >= 0) {
+    Serial.println("🛑 ได้รับคำสั่งทดสอบลดไม้กั้น/ปิดทางจากแอดมิน");
+    testCloseSequence();
   } else if (response.indexOf("\"command\":\"TEST_SERVO\"") >= 0) {
     Serial.println("🔔 ได้รับคำสั่งทดสอบ Servo จากแอดมิน");
     testServoOnly();
@@ -451,6 +454,17 @@ void openGateWithUltrasonicSafety() {
 // Alias สำหรับคำสั่งทดสอบจากแอดมินเดิม
 void testOpenSequence() {
   openGateWithUltrasonicSafety();
+}
+
+void testCloseSequence() {
+  gateServo.write(SERVO_ANGLE_CLOSE);
+  digitalWrite(PIN_RELAY, LOW);
+  digitalWrite(PIN_LED_GREEN, LOW);
+  digitalWrite(PIN_LED_RED, HIGH);
+  tone(PIN_SPEAKER, 800, 250);
+  Serial.println("🔒 [GATE] ลดไม้กั้นลงปิด (คำสั่ง CLOSE_TEST)");
+  lcd.setCursor(0, 1);
+  lcd.print("GATE CLOSED(CMD)");
 }
 
 // ทดสอบอุปกรณ์ทีละชิ้น (ปุ่มแยกในหน้าแอดมิน) - สั่งงานสั้นๆ ให้เห็น/ได้ยินผลแล้วคืนค่าเดิม

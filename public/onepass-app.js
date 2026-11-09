@@ -249,6 +249,8 @@ function initEventListeners() {
   // ESP32 Remote Gate Control Buttons
   const btnTriggerOpen = document.getElementById('btn-trigger-open-gate');
   if (btnTriggerOpen) btnTriggerOpen.addEventListener('click', handleTriggerOpenGate);
+  const btnTriggerClose = document.getElementById('btn-trigger-close-gate');
+  if (btnTriggerClose) btnTriggerClose.addEventListener('click', handleTriggerCloseGate);
   const btnRefreshEsp = document.getElementById('btn-refresh-esp32-status');
   if (btnRefreshEsp) btnRefreshEsp.addEventListener('click', loadEsp32Status);
 }
@@ -1441,6 +1443,22 @@ async function handleTriggerOpenGate() {
     });
     const data = await res.json();
     alert(data.message || 'ส่งคำสั่งเปิดไม้กั้นเรียบร้อยแล้ว');
+    loadEsp32Status();
+  } catch (err) {
+    alert('เกิดข้อผิดพลาดในการส่งคำสั่ง: ' + err.message);
+  }
+}
+
+async function handleTriggerCloseGate() {
+  if (!confirm('ยืนยันส่งคำสั่ง "ลดไม้กั้นลงปิด" (CLOSE_TEST) ไปยังบอร์ด ESP32 ที่ตู้ประตู?')) return;
+  try {
+    const res = await fetch('/api/device/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'CLOSE_TEST' })
+    });
+    const data = await res.json();
+    alert(data.message || 'ส่งคำสั่งลดไม้กั้นเรียบร้อยแล้ว');
     loadEsp32Status();
   } catch (err) {
     alert('เกิดข้อผิดพลาดในการส่งคำสั่ง: ' + err.message);
