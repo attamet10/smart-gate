@@ -115,12 +115,17 @@ function initEventListeners() {
       if (state.currentUser && inputUserTelegramChatId) {
         inputUserTelegramChatId.value = state.currentUser.telegram_chat_id || '';
       }
-      modalTelegram.style.display = 'block';
+      modalTelegram.style.display = 'flex';
     });
 
     const closeModal = () => { modalTelegram.style.display = 'none'; };
     if (btnCloseTelegramModal) btnCloseTelegramModal.addEventListener('click', closeModal);
     if (btnCancelTelegramModal) btnCancelTelegramModal.addEventListener('click', closeModal);
+
+    // Also close when clicking backdrop
+    modalTelegram.addEventListener('click', (e) => {
+      if (e.target === modalTelegram) closeModal();
+    });
 
     if (btnSaveUserTelegram) {
       btnSaveUserTelegram.addEventListener('click', async () => {
