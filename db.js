@@ -37,30 +37,15 @@ function checkPort(port) {
   });
 }
 
-function detectDefaultPort() {
-  if (process.env.DB_PORT) return parseInt(process.env.DB_PORT, 10);
-  if (process.platform !== 'win32') return 3306; // Linux / Plesk standard
-  try {
-    const iniPath = 'C:\\xampp\\mysql\\bin\\my.ini';
-    if (fs.existsSync(iniPath)) {
-      const content = fs.readFileSync(iniPath, 'utf8');
-      const match = content.match(/^port\s*=\s*(\d+)/m);
-      if (match) return parseInt(match[1], 10);
-    }
-  } catch (e) {}
-  return 3307;
-}
-
-let activePort = detectDefaultPort();
 let pool = null;
 
-function createPool(port) {
+function createPool(host, port) {
   return mysql.createPool({
-    host: process.env.DB_HOST || '127.0.0.1',
-    port: port,
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD !== undefined ? process.env.DB_PASSWORD : '',
-    database: process.env.DB_NAME || 'ongkharak_std',
+    host: host || process.env.DB_HOST || '127.0.0.1',
+    port: port || parseInt(process.env.DB_PORT || '3306', 10),
+    user: process.env.DB_USER || 'ongkharak_onepass',
+    password: process.env.DB_PASSWORD !== undefined ? process.env.DB_PASSWORD : 'onepass2026',
+    database: process.env.DB_NAME || 'ongkharak_onepass',
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
@@ -68,32 +53,47 @@ function createPool(port) {
   });
 }
 
-pool = createPool(activePort);
-
 async function getConnectedPool() {
+  if (pool) {
+    try {
+      const conn = await pool.getConnection();
+      conn.release();
+      return pool;
+    } catch (e) {
+      pool = null;
+    }
+  }
+
+  const defaultHost = process.env.DB_HOST || '127.0.0.1';
+  const defaultPort = parseInt(process.env.DB_PORT || '3306', 10);
+
+  // 1. Try configured / default connection
   try {
-    const conn = await pool.getConnection();
+    const testPool = createPool(defaultHost, defaultPort);
+    const conn = await testPool.getConnection();
     conn.release();
+    pool = testPool;
     return pool;
   } catch (err) {
-    // If port failed, try alternative ports
-    if (process.platform === 'win32') {
-      if (await checkPort(3307)) {
-        activePort = 3307;
-        pool = createPool(3307);
+    // 2. If localhost failed on 3306, try 3307 (common XAMPP alternate port)
+    if (['127.0.0.1', 'localhost'].includes(defaultHost)) {
+      try {
+        const p3307 = createPool(defaultHost, 3307);
+        const conn = await p3307.getConnection();
+        conn.release();
+        pool = p3307;
         return pool;
-      }
-      if (await checkPort(3306)) {
-        activePort = 3306;
-        pool = createPool(3306);
+      } catch (e) {}
+
+      // 3. Fallback: If local MySQL is not running on this PC, connect directly to production server onepass.ongkharak.ac.th
+      try {
+        const prodPool = createPool('onepass.ongkharak.ac.th', 3306);
+        const conn = await prodPool.getConnection();
+        conn.release();
+        console.log('[DB] Connected to remote MySQL on onepass.ongkharak.ac.th:3306');
+        pool = prodPool;
         return pool;
-      }
-    } else {
-      if (await checkPort(3306)) {
-        activePort = 3306;
-        pool = createPool(3306);
-        return pool;
-      }
+      } catch (e) {}
     }
     throw new Error(`ไม่สามารถเชื่อมต่อ MySQL ได้ (${err.message}) กรุณาตรวจสอบการตั้งค่าฐานข้อมูล`);
   }
@@ -105,7 +105,7 @@ async function getConnectedPool() {
 async function initDatabase() {
   try {
     const connection = await getConnectedPool();
-    console.log(`[DB] Connected successfully to MySQL (${process.env.DB_NAME || 'ongkharak_std'} on port ${activePort})`);
+    console.log(`[DB] Connected successfully to MySQL (${process.env.DB_NAME || 'ongkharak_onepass'})`);
 
     // 0. Ensure must_change_password column exists on users table
     try {
