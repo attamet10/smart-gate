@@ -849,35 +849,65 @@ async function askGeminiAI(userPrompt, senderName = 'ผู้ใช้งาน
 
         let extraWork = '';
         if (u.role === 'teacher') {
-          const [p] = await query(`
-            SELECT COUNT(*) AS cnt FROM onepass_requests 
-            WHERE (subject_teacher_id = ? AND status = 'pending_subject')
-               OR (advisor_teacher_id = ? AND status = 'pending_advisor')
-               OR (head_major_teacher_id = ? AND status = 'pending_head_major')
-               OR (head_discipline_user_id = ? AND status = 'pending_head_discipline')
-          `, [u.id, u.id, u.id, u.id]);
-          const cnt = p[0]?.cnt || 0;
-          if (cnt > 0) {
-            extraWork = `มีคำขอของนักเรียนที่รอให้คุณพิจารณาอนุมัติอยู่ ${cnt} รายการ`;
-          }
+          try {
+            const [p] = await query(`
+              SELECT COUNT(*) AS cnt FROM onepass_requests 
+              WHERE (subject_teacher_id = ? AND status = 'pending_subject')
+                 OR (advisor_teacher_id = ? AND status = 'pending_advisor')
+                 OR (head_major_teacher_id = ? AND status = 'pending_head_major')
+                 OR (head_discipline_user_id = ? AND status = 'pending_head_discipline')
+            `, [u.id, u.id, u.id, u.id]);
+            const cnt = p[0]?.cnt || 0;
+            if (cnt > 0) {
+              extraWork = `มีคำขอของนักเรียนที่รอให้คุณพิจารณาอนุมัติอยู่ ${cnt} รายการ`;
+            }
+          } catch (tErr) {}
         } else if (u.role === 'student') {
-          const [latestReq] = await query(`
-            SELECT request_no, status, destination FROM onepass_requests 
-            WHERE user_id = ? ORDER BY id DESC LIMIT 1
-          `, [u.id]);
-          if (latestReq && latestReq.length > 0) {
-            extraWork = `คำขอล่าสุดของคุณคือ ${latestReq[0].request_no} สถานะ: ${latestReq[0].status} (เหตุผล/ปลายทาง: ${latestReq[0].destination})`;
-          }
+          let stdDetail = '';
+          try {
+            const [stdInfo] = await query(`
+              SELECT s.student_code, s.department, l.name AS level_name, m.name AS major_name 
+              FROM students s 
+              LEFT JOIN levels l ON s.level_id = l.id 
+              LEFT JOIN majors m ON s.major_id = m.id 
+              WHERE s.user_id = ? LIMIT 1
+            `, [u.id]);
+            if (stdInfo && stdInfo.length > 0) {
+              const si = stdInfo[0];
+              stdDetail = `รหัสนักศึกษา: ${si.student_code || u.username}, ระดับชั้น: ${si.level_name || '-'}, แผนก: ${si.major_name || si.department || '-'}`;
+            }
+          } catch (sErr) {}
+
+          let reqDetail = '';
+          try {
+            const [latestReq] = await query(`
+              SELECT request_no, status, reason 
+              FROM onepass_requests 
+              WHERE user_id = ? ORDER BY id DESC LIMIT 1
+            `, [u.id]);
+            if (latestReq && latestReq.length > 0) {
+              const lr = latestReq[0];
+              reqDetail = `คำขอล่าสุด: ${lr.request_no} (สถานะ: ${lr.status}, เหตุผล: ${lr.reason})`;
+            }
+          } catch (rErr) {}
+
+          extraWork = [stdDetail, reqDetail].filter(Boolean).join(' | ');
         }
 
         userContext = `
-สถานะการเชื่อมต่อบัญชีของผู้สนทนาในขณะนี้:
-- สถานะ: 'เชื่อมต่อกับระบบ OnePass เรียบร้อยแล้ว'
-- ชื่อ-นามสกุลผู้ใช้: คุณ ${u.full_name}
-- รหัส/Username: @${u.username} (User ID: #${u.id})
-- บทบาทหน้าที่ในระบบ: ${roleThai} (${u.role})
-- ข้อมูลเฉพาะตัวของผู้ใช้: ${extraWork || 'ไม่มีรายการค้าง'}
-- Telegram Chat ID: ${chatId}`;
+[ข้อมูลบัญชีผู้สนทนาที่กำลังคุยด้วย (ดึงตรงจากฐานข้อมูลจริง OnePass)]:
+- สถานะ: 'เชื่อมต่อกับระบบ OnePass เรียบร้อยแล้ว (Active & Verified)'
+- ชื่อ-นามสกุล: ${u.full_name}
+- Username (ชื่อผู้ใช้ / รหัสนักศึกษา): ${u.username}
+- User ID ในระบบ: #${u.id}
+- บทบาทในระบบ: ${roleThai} (${u.role})
+- ข้อมูลเฉพาะตัว: ${extraWork || 'ไม่มีรายการค้าง'}
+- Telegram Chat ID: ${chatId}
+
+กฎสำคัญ:
+- ถ้าผู้ใช้ถาม "ฉันชื่ออะไร", "ชื่ออะไร", ให้ตอบว่า "คุณคือ ${u.full_name} ครับ"
+- ถ้าผู้ใช้ถาม "Username อะไร", "ยูเซอร์เนมคืออะไร", "รหัสประจำตัวอะไร", ให้ตอบว่า "Username / รหัสของคุณคือ ${u.username} ครับ"
+- ถ้าผู้ใช้ถามสถานะบัญชี ให้ยืนยันว่าเชื่อมต่อกับบัญชี OnePass เรียบร้อยแล้ว`;
       } else {
         userContext = `
 สถานะการเชื่อมต่อบัญชีของผู้สนทนาในขณะนี้:
@@ -897,9 +927,8 @@ ${userContext}
 
 ข้อปฏิบัติในการตอบ:
 1. ตอบให้ 'กระชับ ชัดเจน รวดเร็ว และตรงประเด็น' (หลีกเลี่ยงการเกริ่นยาว เพื่อความเร็วในการตอบกลับ)
-2. เมื่อผู้ใช้ทักทาย หรือถามเกี่ยวกับตัวตน การล็อกอิน หรือการเชื่อมต่อระบบ (เช่น "ฉันเป็นใคร", "ฉันคือใคร", "ฉันเชื่อมต่อหรือยัง", "ใครล็อกอินอยู่", "เช็กชื่อฉันซิ", "สถานะบัญชี"):
-   - ถ้าเชื่อมต่อแล้ว: ให้ตอบระบุตัวตนของผู้ใช้อย่างชัดเจนและอบอุ่น เช่น "สวัสดีครับคุณ [ชื่อ] (@username) ขณะนี้บัญชี Telegram ของคุณเชื่อมต่อกับระบบ OnePass ในบทบาท [บทบาท] เรียบร้อยแล้วครับ!" พร้อมบอกข้อมูลคำขอหรือสถานะถ้ามี
-   - ถ้ายังไม่เชื่อมต่อ: ให้แจ้งอย่างสุภาพว่า "ขณะนี้บัญชี Telegram นี้ยังไม่ได้เชื่อมต่อกับระบบ OnePass ครับ สามารถเข้าไปที่เว็บแล้วกดเชื่อมต่อผ่านรูปโปรไฟล์ได้ทันทีครับ"
+2. เมื่อผู้ใช้ถามเกี่ยวกับตัวตน การล็อกอิน หรือการเชื่อมต่อระบบ (เช่น "ฉันเป็นใคร", "ฉันคือใคร", "ชื่ออะไร", "Username อะไร", "รหัสอะไร", "ฉันเชื่อมต่อหรือยัง", "สถานะบัญชี"):
+   - ให้ตอบระบุข้อมูลจริงจาก [ข้อมูลบัญชีผู้สนทนาที่กำลังคุยด้วย] ด้านบนอย่างถูกต้อง 100% ห้ามเดาหรือบอกว่าไม่พบข้อมูลเด็ดขาด
 3. ถ้าผู้ใช้ถามสถิติ ข้อมูลคำขอ หรือสถานะระบบหลังบ้าน ให้สรุปข้อมูลตัวเลขจริงด้านบนตอบได้ทันที
 4. กฎความปลอดภัยสูงสุด: ห้ามเปิดเผยหรือตอบรหัสผ่าน/บัญชีส่วนบุคคลเด็ดขาด
 5. ตอบเป็นภาษาไทยอย่างสุภาพและเป็นมิตร`;
