@@ -251,16 +251,20 @@ async function sendTelegramPhoto(chatId, photoBuffer, caption = '') {
 /**
  * Edit an existing message in Telegram
  */
-async function editTelegramMessage(chatId, messageId, newText) {
+async function editTelegramMessage(chatId, messageId, newText, inlineKeyboard = null) {
   const config = await getTelegramConfig();
   if (!config.botToken || !chatId || !messageId) return;
 
-  const payload = JSON.stringify({
+  const payloadObj = {
     chat_id: chatId,
     message_id: messageId,
     text: newText,
     parse_mode: 'HTML'
-  });
+  };
+  if (inlineKeyboard && inlineKeyboard.length > 0) {
+    payloadObj.reply_markup = { inline_keyboard: inlineKeyboard };
+  }
+  const payload = JSON.stringify(payloadObj);
 
   const options = {
     hostname: 'api.telegram.org',
@@ -544,6 +548,399 @@ async function notifyGateRecord(request, studentUser, actionType, timestamp) {
 }
 
 // -------------------------------------------------------------
+// STUDENT LEAVE REQUEST WIZARD (INTERACTIVE BUTTON FLOW)
+// -------------------------------------------------------------
+
+const studentLeaveDrafts = new Map();
+
+const LEAVE_REASONS = {
+  'med': 'ไปพบแพทย์ / ป่วยกะทันหัน',
+  'home': 'มีธุระจำเป็นทางบ้าน',
+  'supplies': 'ซื้ออุปกรณ์การเรียน / โครงงาน',
+  'gov': 'ติดต่อหน่วยงานราชการ'
+};
+
+const LEAVE_TIME_MAP = {
+  '1130': '11:30',
+  '1330': '13:30',
+  '1500': '15:00',
+  '1630': '16:30'
+};
+
+/**
+ * Start Student Leave Request Wizard
+ */
+async function startStudentLeaveFlow(chatId, originMessageId = null) {
+  try {
+    const [users] = await query('SELECT id, full_name, username, role FROM users WHERE telegram_chat_id = ? LIMIT 1', [String(chatId)]);
+    if (!users || users.length === 0) {
+      const notBoundMsg =
+`⚠️ <b>บัญชี Telegram นี้ยังไม่ได้ผูกกับระบบ OnePass</b>
+━━━━━━━━━━━━━━━━━━━━
+กรุณาเปิดหน้าเว็บ OnePass แล้วกดที่รูปโปรไฟล์ด้านบนเพื่อผูกบัญชีใน 1 คลิกก่อนครับ`;
+      if (originMessageId) await editTelegramMessage(chatId, originMessageId, notBoundMsg);
+      else await sendTelegramMessage(chatId, notBoundMsg);
+      return;
+    }
+
+    const u = users[0];
+    if (u.role !== 'student') {
+      const roleNames = {
+        'teacher': 'ครูผู้สอน / ครูที่ปรึกษา',
+        'deputy_director': 'รองผู้อำนวยการ',
+        'admin': 'ผู้ดูแลระบบ (Admin)'
+      };
+      const roleText = roleNames[u.role] || u.role;
+      const notStudentMsg = `ℹ️ ขออภัยครับ บัญชีของคุณคือ <b>${escapeTelegramHtml(u.full_name)} (${roleText})</b>\nระบบขออนุญาตออกนอกสถานศึกษามีไว้สำหรับ <b>ผู้เรียน / นักศึกษา</b> เท่านั้นครับ`;
+      if (originMessageId) await editTelegramMessage(chatId, originMessageId, notStudentMsg);
+      else await sendTelegramMessage(chatId, notStudentMsg);
+      return;
+    }
+
+    // Get student details from students table
+    const [students] = await query(`
+      SELECT s.*, l.name AS level_name, m.name AS major_name 
+      FROM students s 
+      LEFT JOIN levels l ON s.level_id = l.id 
+      LEFT JOIN majors m ON s.major_id = m.id 
+      WHERE s.user_id = ? LIMIT 1
+    `, [u.id]);
+
+    if (!students || students.length === 0) {
+      await sendTelegramMessage(chatId, '⚠️ ไม่พบข้อมูลนักศึกษาของท่านในระบบ OnePass กรุณาติดต่อผู้ดูแลระบบ');
+      return;
+    }
+
+    const std = students[0];
+
+    // Initialize draft
+    studentLeaveDrafts.set(String(chatId), {
+      userId: u.id,
+      studentId: std.id,
+      studentName: u.full_name,
+      studentCode: std.student_code || u.username,
+      majorName: std.major_name || std.department || 'ไม่ระบุ',
+      levelName: std.level_name || 'ไม่ระบุ',
+      levelId: std.level_id,
+      majorId: std.major_id,
+      reason: null,
+      isNotReturning: 0,
+      expectedReturnTime: null,
+      teacherId: null,
+      teacherName: null,
+      page: 0
+    });
+
+    const step1Text =
+`📝 <b>[ยื่นขออนุญาตออกนอกสถานศึกษา]</b>
+👤 <b>ผู้เรียน:</b> ${escapeTelegramHtml(u.full_name)} (${escapeTelegramHtml(std.student_code || u.username)})
+🏫 <b>แผนก:</b> ${escapeTelegramHtml(std.major_name || std.department || '-')} (${escapeTelegramHtml(std.level_name || '-')})
+━━━━━━━━━━━━━━━━━━━━
+📌 <b>ขั้นตอนที่ 1/3:</b> กรุณากดเลือกเหตุผลในการขอออก:`;
+
+    const step1Keyboard = [
+      [{ text: '🏥 ไปพบแพทย์ / ป่วยกะทันหัน', callback_data: 'leave_r:med' }],
+      [{ text: '🏠 มีธุระจำเป็นทางบ้าน', callback_data: 'leave_r:home' }],
+      [{ text: '📦 ซื้ออุปกรณ์การเรียน / โครงงาน', callback_data: 'leave_r:supplies' }],
+      [{ text: '💼 ติดต่อหน่วยงานราชการ', callback_data: 'leave_r:gov' }],
+      [{ text: '❌ ยกเลิกคำขอ', callback_data: 'leave_cancel' }]
+    ];
+
+    if (originMessageId) {
+      await editTelegramMessage(chatId, originMessageId, step1Text, step1Keyboard);
+    } else {
+      await sendTelegramMessage(chatId, step1Text, step1Keyboard);
+    }
+  } catch (err) {
+    console.error('[Student Leave Flow Error]:', err.message);
+    await sendTelegramMessage(chatId, '⚠️ เกิดข้อผิดพลาดในการเริ่มยื่นคำขอ: ' + err.message);
+  }
+}
+
+/**
+ * Handle student leave wizard button taps
+ */
+async function handleStudentLeaveCallback(chatId, messageId, data, fromUser) {
+  const draft = studentLeaveDrafts.get(String(chatId));
+
+  // Cancel action
+  if (data === 'leave_cancel') {
+    studentLeaveDrafts.delete(String(chatId));
+    await editTelegramMessage(chatId, messageId, '❌ <b>ยกเลิกการยื่นคำขอเรียบร้อยแล้ว</b>\nหากต้องการยื่นขออนุญาตใหม่ พิมพ์ <code>ขอออกวิทยาลัย</code> ได้ตลอดเวลาครับ');
+    return;
+  }
+
+  // Start from button
+  if (data === 'leave_start') {
+    await startStudentLeaveFlow(chatId, messageId);
+    return;
+  }
+
+  if (data === 'leave_noop') {
+    return;
+  }
+
+  if (!draft) {
+    await editTelegramMessage(chatId, messageId, '⚠️ เซสชันการยื่นคำขอหมดอายุ กรุณาพิมพ์ <code>ขอออกวิทยาลัย</code> เพื่อเริ่มใหม่อีกครั้ง');
+    return;
+  }
+
+  // Step 1 -> Step 2: Reason Selected
+  if (data.startsWith('leave_r:')) {
+    const rKey = data.substring(8);
+    draft.reason = LEAVE_REASONS[rKey] || rKey;
+
+    const step2Text =
+`📝 <b>[ยื่นขออนุญาตออกนอกสถานศึกษา]</b>
+👤 <b>ผู้เรียน:</b> ${escapeTelegramHtml(draft.studentName)} (${escapeTelegramHtml(draft.studentCode)})
+📌 <b>เหตุผล:</b> ${escapeTelegramHtml(draft.reason)}
+━━━━━━━━━━━━━━━━━━━━
+🕒 <b>ขั้นตอนที่ 2/3:</b> คุณจะกลับเข้ามาในวิทยาลัยอีกหรือไม่ในวันนี้?`;
+
+    const step2Keyboard = [
+      [{ text: '🚪 ไม่กลับเข้ามาแล้ว (กลับบ้าน)', callback_data: 'leave_ret:none' }],
+      [{ text: '🔄 กลับเข้ามาก่อน 11:30 น.', callback_data: 'leave_ret:1130' }],
+      [{ text: '🔄 กลับเข้ามาก่อน 13:30 น.', callback_data: 'leave_ret:1330' }],
+      [{ text: '🔄 กลับเข้ามาก่อน 15:00 น.', callback_data: 'leave_ret:1500' }],
+      [{ text: '🔄 กลับเข้ามาก่อน 16:30 น.', callback_data: 'leave_ret:1630' }],
+      [{ text: '❌ ยกเลิกคำขอ', callback_data: 'leave_cancel' }]
+    ];
+
+    await editTelegramMessage(chatId, messageId, step2Text, step2Keyboard);
+    return;
+  }
+
+  // Step 2 -> Step 3: Return Time Selected (or page navigation)
+  if (data.startsWith('leave_ret:') || data.startsWith('leave_pg:')) {
+    if (data.startsWith('leave_ret:')) {
+      const retChoice = data.substring(10);
+      if (retChoice === 'none') {
+        draft.isNotReturning = 1;
+        draft.expectedReturnTime = null;
+      } else {
+        draft.isNotReturning = 0;
+        draft.expectedReturnTime = LEAVE_TIME_MAP[retChoice] || retChoice;
+      }
+      draft.page = 0;
+    } else if (data.startsWith('leave_pg:')) {
+      draft.page = parseInt(data.substring(9), 10) || 0;
+    }
+
+    // Fetch teachers list from DB
+    const [allTeachers] = await query('SELECT id, username, full_name FROM users WHERE role = "teacher" ORDER BY full_name ASC');
+    
+    // Find advisor teacher if assigned
+    let advisorTeacherId = null;
+    let advisorName = null;
+    try {
+      const [adv] = await query('SELECT u.id, u.full_name FROM advisor_assignments aa JOIN users u ON aa.teacher_id = u.id WHERE aa.level_id = ? AND aa.major_id = ? LIMIT 1', [draft.levelId, draft.majorId]);
+      if (adv.length > 0) {
+        advisorTeacherId = adv[0].id;
+        advisorName = adv[0].full_name;
+      }
+    } catch (e) {}
+
+    const pageSize = 6;
+    const totalPages = Math.max(1, Math.ceil(allTeachers.length / pageSize));
+    if (draft.page < 0) draft.page = 0;
+    if (draft.page >= totalPages) draft.page = totalPages - 1;
+
+    const pageTeachers = allTeachers.slice(draft.page * pageSize, (draft.page + 1) * pageSize);
+
+    const step3Text =
+`📝 <b>[ยื่นขออนุญาตออกนอกสถานศึกษา]</b>
+👤 <b>ผู้เรียน:</b> ${escapeTelegramHtml(draft.studentName)} (${escapeTelegramHtml(draft.studentCode)})
+📌 <b>เหตุผล:</b> ${escapeTelegramHtml(draft.reason)}
+🕒 <b>การกลับ:</b> ${draft.isNotReturning ? 'ไม่กลับเข้ามาแล้ว' : 'กลับเข้ามาก่อน ' + draft.expectedReturnTime + ' น.'}
+━━━━━━━━━━━━━━━━━━━━
+👨‍🏫 <b>ขั้นตอนที่ 3/3:</b> เลือกครูผู้สอนในคาบนี้ (ลำดับที่ 1):`;
+
+    const step3Keyboard = [];
+
+    // If student has an assigned advisor, put as primary button on page 0
+    if (advisorTeacherId && advisorName && draft.page === 0) {
+      step3Keyboard.push([
+        { text: `⭐ ครูที่ปรึกษา: ${advisorName}`, callback_data: `leave_tch:${advisorTeacherId}` }
+      ]);
+    }
+
+    // Add teachers buttons (2 columns)
+    for (let i = 0; i < pageTeachers.length; i += 2) {
+      const row = [];
+      row.push({ text: `👨‍🏫 ${pageTeachers[i].full_name}`, callback_data: `leave_tch:${pageTeachers[i].id}` });
+      if (i + 1 < pageTeachers.length) {
+        row.push({ text: `👨‍🏫 ${pageTeachers[i + 1].full_name}`, callback_data: `leave_tch:${pageTeachers[i + 1].id}` });
+      }
+      step3Keyboard.push(row);
+    }
+
+    // Pagination buttons
+    const navRow = [];
+    if (draft.page > 0) {
+      navRow.push({ text: '⬅️ ก่อนหน้า', callback_data: `leave_pg:${draft.page - 1}` });
+    }
+    navRow.push({ text: `📄 หน้า ${draft.page + 1}/${totalPages}`, callback_data: 'leave_noop' });
+    if (draft.page < totalPages - 1) {
+      navRow.push({ text: 'ถัดไป ➡️', callback_data: `leave_pg:${draft.page + 1}` });
+    }
+    step3Keyboard.push(navRow);
+    step3Keyboard.push([{ text: '❌ ยกเลิกคำขอ', callback_data: 'leave_cancel' }]);
+
+    await editTelegramMessage(chatId, messageId, step3Text, step3Keyboard);
+    return;
+  }
+
+  // Step 3 -> Step 4: Teacher Selected -> Review & Confirm
+  if (data.startsWith('leave_tch:')) {
+    const teacherId = parseInt(data.substring(10), 10);
+    const [tRows] = await query('SELECT id, full_name, username FROM users WHERE id = ? LIMIT 1', [teacherId]);
+    if (!tRows || tRows.length === 0) {
+      await answerCallbackQuery(fromUser.id, 'ไม่พบข้อมูลครูท่านนี้');
+      return;
+    }
+
+    draft.teacherId = teacherId;
+    draft.teacherName = tRows[0].full_name;
+
+    const returnDisplay = draft.isNotReturning
+      ? '🚪 <b>ไม่กลับเข้ามาแล้ว (กลับบ้าน)</b>'
+      : `🔄 <b>มีกำหนดเวลากลับ (ก่อน ${draft.expectedReturnTime} น.)</b>`;
+
+    const summaryText =
+`📋 <b>[สรุปข้อมูลคำขอออกนอกสถานศึกษา]</b>
+━━━━━━━━━━━━━━━━━━━━
+👤 <b>ผู้เรียน:</b> ${escapeTelegramHtml(draft.studentName)} (${escapeTelegramHtml(draft.studentCode)})
+🏫 <b>แผนกวิชา:</b> ${escapeTelegramHtml(draft.majorName)} (${escapeTelegramHtml(draft.levelName)})
+📌 <b>เหตุผล:</b> ${escapeTelegramHtml(draft.reason)}
+🕒 <b>การกลับเข้า:</b> ${returnDisplay}
+👨‍🏫 <b>ครูรายวิชา (ผู้พิจารณาลำดับที่ 1):</b> ${escapeTelegramHtml(draft.teacherName)}
+━━━━━━━━━━━━━━━━━━━━
+⚠️ <i>เมื่อกดยืนยัน ระบบจะส่งคำขอไปให้ครูผู้สอนพิจารณาอนุมัติผ่าน Telegram ทันที</i>`;
+
+    const summaryKeyboard = [
+      [{ text: '🚀 ยืนยันยื่นคำขอทันที', callback_data: 'leave_submit' }],
+      [{ text: '❌ ยกเลิกคำขอ', callback_data: 'leave_cancel' }]
+    ];
+
+    await editTelegramMessage(chatId, messageId, summaryText, summaryKeyboard);
+    return;
+  }
+
+  // Step 4: Submission
+  if (data === 'leave_submit') {
+    try {
+      const now = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      const datePrefix = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+      const leaveTime = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+      const leaveDate = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+
+      // Sequence number
+      const [seq] = await query('SELECT COUNT(*) AS total FROM onepass_requests WHERE request_no LIKE ?', [`OP-${datePrefix}-%`]);
+      const seqNum = (seq[0]?.total || 0) + 1;
+      const requestNo = `OP-${datePrefix}-${String(seqNum).padStart(4, '0')}`;
+
+      // Auto-detect approvers
+      let advisorId = draft.teacherId;
+      let headMajorId = draft.teacherId;
+      let headDisciplineId = draft.teacherId;
+      let deputyDirectorId = draft.teacherId;
+
+      try {
+        const [adv] = await query('SELECT teacher_id FROM advisor_assignments WHERE level_id = ? AND major_id = ? LIMIT 1', [draft.levelId, draft.majorId]);
+        if (adv.length > 0) advisorId = adv[0].teacher_id;
+      } catch (e) {}
+
+      try {
+        const [hm] = await query('SELECT head_teacher_id FROM majors WHERE id = ? LIMIT 1', [draft.majorId]);
+        if (hm.length > 0) headMajorId = hm[0].head_teacher_id;
+      } catch (e) {}
+
+      try {
+        const [gd] = await query('SELECT head_of_discipline_user_id, deputy_director_user_id FROM gate_duty_assignments WHERE id = 1 LIMIT 1');
+        if (gd.length > 0) {
+          if (gd[0].head_of_discipline_user_id) headDisciplineId = gd[0].head_of_discipline_user_id;
+          if (gd[0].deputy_director_user_id) deputyDirectorId = gd[0].deputy_director_user_id;
+        }
+      } catch (e) {}
+
+      // Insert into onepass_requests
+      const [insResult] = await query(`
+        INSERT INTO onepass_requests (
+          request_no, student_id, user_id, leave_date, leave_time, expected_return_time,
+          is_not_returning, leave_type, reason, reason_detail,
+          subject_teacher_id, advisor_teacher_id, head_major_teacher_id, head_discipline_user_id, deputy_director_user_id,
+          status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_subject')
+      `, [
+        requestNo,
+        draft.studentId,
+        draft.userId,
+        leaveDate,
+        leaveTime,
+        draft.expectedReturnTime || null,
+        draft.isNotReturning ? 1 : 0,
+        draft.isNotReturning ? 'leave_school' : 'temporary',
+        draft.reason,
+        'ยื่นผ่าน Telegram Bot อัตโนมัติ',
+        draft.teacherId,
+        advisorId,
+        headMajorId,
+        headDisciplineId,
+        deputyDirectorId
+      ]);
+
+      const requestId = insResult.insertId;
+
+      // Log creation
+      await query(`
+        INSERT INTO onepass_logs (request_id, user_id, role_acted, action, comment)
+        VALUES (?, ?, 'student', 'created', ?)
+      `, [requestId, draft.userId, `ยื่นคำขอผ่าน Telegram รหัส ${requestNo}`]);
+
+      // Edit original message to confirmed state
+      const confirmedText =
+`🎉 <b>[ยื่นคำขอออกนอกสถานศึกษาสำเร็จ!]</b>
+━━━━━━━━━━━━━━━━━━━━
+📌 <b>เลขที่คำขอ:</b> <code>${requestNo}</code>
+👤 <b>ผู้เรียน:</b> ${escapeTelegramHtml(draft.studentName)}
+📅 <b>วัน-เวลา:</b> วันนี้ เวลา ${leaveTime} น.
+💡 <b>เหตุผล:</b> ${escapeTelegramHtml(draft.reason)}
+⏳ <b>สถานะ:</b> ส่งคำขอไปยัง <b>${escapeTelegramHtml(draft.teacherName)}</b> (ครูรายวิชา - ลำดับที่ 1/5) เรียบร้อยแล้ว
+━━━━━━━━━━━━━━━━━━━━
+🔔 เมื่อคุณครูและผู้มีอำนาจอนุมัติครบ ระบบจะส่ง <b>QR Code บัตรผ่าน</b> กลับมาให้ในแชตนี้ทันทีครับ 🚀`;
+
+      await editTelegramMessage(chatId, messageId, confirmedText);
+
+      // Trigger Telegram notifications to Student and Teacher
+      try {
+        const [studentRows] = await query('SELECT * FROM users WHERE id = ? LIMIT 1', [draft.userId]);
+        const [teacherRows] = await query('SELECT * FROM users WHERE id = ? LIMIT 1', [draft.teacherId]);
+        if (studentRows.length > 0 && teacherRows.length > 0) {
+          const reqData = {
+            id: requestId,
+            request_no: requestNo,
+            leave_date: leaveDate,
+            leave_time: leaveTime,
+            is_not_returning: draft.isNotReturning ? 1 : 0,
+            reason: draft.reason,
+            reason_detail: 'ยื่นผ่าน Telegram Bot'
+          };
+          await notifyRequestCreated(reqData, studentRows[0], teacherRows[0]);
+        }
+      } catch (notifErr) {
+        console.error('[Leave Notification Error]:', notifErr.message);
+      }
+
+      studentLeaveDrafts.delete(String(chatId));
+    } catch (submitErr) {
+      console.error('[Leave Submit Error]:', submitErr.message);
+      await editTelegramMessage(chatId, messageId, '❌ เกิดข้อผิดพลาดในการบันทึกคำขอ: ' + submitErr.message);
+    }
+  }
+}
+
+// -------------------------------------------------------------
 // TELEGRAM INLINE APPROVAL LISTENER (LONG-POLLING)
 // -------------------------------------------------------------
 
@@ -559,6 +956,13 @@ async function handleTelegramCallbackQuery(callbackQuery) {
   const data = callbackQuery.data; // e.g. "appr:15:subject_teacher" or "rejt:15:advisor"
 
   console.log(`[Telegram] Received button tap from ${fromUser.first_name} (${fromUser.id}): ${data}`);
+
+  // Handle student leave request wizard callbacks
+  if (data && data.startsWith('leave_')) {
+    await answerCallbackQuery(queryId);
+    await handleStudentLeaveCallback(chatId, messageId, data, fromUser);
+    return;
+  }
 
   if (!data || (!data.startsWith('appr:') && !data.startsWith('rejt:'))) {
     await answerCallbackQuery(queryId, 'คำสั่งไม่ถูกต้อง');
@@ -1103,16 +1507,30 @@ async function handleTelegramMessage(msg) {
     } catch (e) {}
   }
 
-  // 3. Regular /start command
+  // 3. Student Leave Request Flow (/leave, /request, or keywords)
+  const leaveKeywords = ['/leave', '/request', 'ขอออกวิทยาลัย', 'ขอออกนอกวิทยาลัย', 'ขอออกนอกสถานศึกษา', 'ยื่นคำขอ', 'ขอใบผ่าน', 'ขอออกวิไล', 'ขออนุญาตออก', 'ขอออก'];
+  const isLeaveCmd = leaveKeywords.some(k => text === k || text.startsWith(k + ' ') || text.includes(k));
+  if (isLeaveCmd) {
+    await startStudentLeaveFlow(chatId);
+    return;
+  }
+
+  // 4. Regular /start command
   if (text === '/start') {
     // Clear chat history on /start
     conversationHistory.delete(chatId);
 
     let boundNotice = '';
+    let studentButtons = null;
     try {
       const [bound] = await query('SELECT full_name, username, role FROM users WHERE telegram_chat_id = ? LIMIT 1', [String(chatId)]);
       if (bound && bound.length > 0) {
         boundNotice = `\n✅ <b>ผูกกับบัญชี:</b> ${escapeTelegramHtml(bound[0].full_name)} (@${escapeTelegramHtml(bound[0].username)})`;
+        if (bound[0].role === 'student') {
+          studentButtons = [
+            [{ text: '📝 ยื่นขออนุญาตออกนอกวิทยาลัย', callback_data: 'leave_start' }]
+          ];
+        }
       } else {
         boundNotice = `\nℹ️ <i>(ยังไม่ได้ผูกกับบัญชี OnePass — กดปุ่มโปรไฟล์ในเว็บเพื่อผูกอัตโนมัติ)</i>`;
       }
@@ -1125,11 +1543,12 @@ async function handleTelegramMessage(msg) {
 🆔 <b>Chat ID ของท่านคือ:</b> <code>${chatId}</code>${boundNotice}
 ━━━━━━━━━━━━━━━━━━━━
 ℹ️ <b>บริการของบอท:</b>
-1. <b>รับการแจ้งเตือน & กดอนุมัติ:</b> ผูกบัญชีของคุณเพื่อรับแจ้งเตือนและกดอนุมัติผ่านมือถือ
-2. <b>รับบัตรผ่าน QR:</b> สแกนออกประตูอัตโนมัติ
-3. <b>ถาม-ตอบกับ Gemini AI:</b> พิมพ์ข้อความคำถามหรือคุยกับ AI ได้อย่างต่อเนื่องในห้องแชตนี้!`;
+1. <b>ยื่นขอออกนอกสถานศึกษา:</b> พิมพ์ <code>ขอออกวิทยาลัย</code> หรือกดปุ่มด้านล่าง
+2. <b>รับการแจ้งเตือน & กดอนุมัติ:</b> แจ้งเตือนสถานะคำขออัตโนมัติ
+3. <b>รับบัตรผ่าน QR:</b> สแกนออกประตูอัตโนมัติ
+4. <b>ถาม-ตอบกับ Gemini AI:</b> พิมพ์ข้อความคำถามเพื่อสอบถามข้อมูลได้ตลอดเวลา!`;
 
-    await sendTelegramMessage(chatId, welcomeText);
+    await sendTelegramMessage(chatId, welcomeText, studentButtons);
     return;
   }
 
