@@ -827,23 +827,71 @@ async function askGeminiAI(userPrompt, senderName = 'ผู้ใช้งาน
   let userContext = '';
   if (chatId) {
     try {
-      const [linkedUser] = await query('SELECT full_name, role, username FROM users WHERE telegram_chat_id = ? LIMIT 1', [String(chatId)]);
+      const [linkedUser] = await query('SELECT id, full_name, role, username FROM users WHERE telegram_chat_id = ? LIMIT 1', [String(chatId)]);
       if (linkedUser && linkedUser.length > 0) {
-        userContext = `\nผู้สนทนาปัจจุบันในห้องแชตนี้คือ: คุณ ${linkedUser[0].full_name} (@${linkedUser[0].username}) มีบทบาท: ${linkedUser[0].role}`;
+        const u = linkedUser[0];
+        const roleLabels = {
+          'student': 'ผู้เรียน / นักศึกษา',
+          'teacher': 'ครูผู้สอน / ครูที่ปรึกษา',
+          'deputy_director': 'รองผู้อำนวยการ',
+          'admin': 'ผู้ดูแลระบบ (Admin)'
+        };
+        const roleThai = roleLabels[u.role] || u.role;
+
+        let extraWork = '';
+        if (u.role === 'teacher') {
+          const [p] = await query(`
+            SELECT COUNT(*) AS cnt FROM onepass_requests 
+            WHERE (subject_teacher_id = ? AND status = 'pending_subject')
+               OR (advisor_teacher_id = ? AND status = 'pending_advisor')
+               OR (head_major_teacher_id = ? AND status = 'pending_head_major')
+               OR (head_discipline_teacher_id = ? AND status = 'pending_head_discipline')
+          `, [u.id, u.id, u.id, u.id]);
+          const cnt = p[0]?.cnt || 0;
+          extraWork = `มีคำขอของนักเรียนที่รอให้คุณพิจารณาอนุมัติอยู่ ${cnt} รายการ`;
+        } else if (u.role === 'student') {
+          const [latestReq] = await query(`
+            SELECT request_no, status, destination FROM onepass_requests 
+            WHERE user_id = ? ORDER BY id DESC LIMIT 1
+          `, [u.id]);
+          if (latestReq && latestReq.length > 0) {
+            extraWork = `คำขอล่าสุดของคุณคือ ${latestReq[0].request_no} สถานะ: ${latestReq[0].status} (เหตุผล/ปลายทาง: ${latestReq[0].destination})`;
+          }
+        }
+
+        userContext = `
+สถานะการเชื่อมต่อบัญชีของผู้สนทนาในขณะนี้:
+- สถานะ: 'เชื่อมต่อกับระบบ OnePass เรียบร้อยแล้ว'
+- ชื่อ-นามสกุลผู้ใช้: คุณ ${u.full_name}
+- รหัส/Username: @${u.username} (User ID: #${u.id})
+- บทบาทหน้าที่ในระบบ: ${roleThai} (${u.role})
+- ข้อมูลเฉพาะตัวของผู้ใช้: ${extraWork || 'ไม่มีรายการค้าง'}
+- Telegram Chat ID: ${chatId}`;
+      } else {
+        userContext = `
+สถานะการเชื่อมต่อบัญชีของผู้สนทนาในขณะนี้:
+- สถานะ: 'ยังไม่ได้เชื่อมต่อกับบัญชีใดๆ ในระบบ OnePass' (Telegram Chat ID: ${chatId})
+- คำแนะนำ: สามารถเข้าสู่ระบบที่หน้าเว็บ OnePass แล้วกดที่รูปโปรไฟล์ด้านบน เลือก "เชื่อมต่อ Telegram" เพื่อผูกบัญชีได้ทันทีใน 1 คลิก`;
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error('[Telegram AI] Error fetching user context:', e.message);
+    }
   }
 
   const systemInstruction = 
 `คุณคือ 'OnePass AI Assistant' ผู้ช่วยอัจฉริยะประจำระบบ OnePass ของวิทยาลัยการอาชีพองครักษ์
 คุณรอบรู้ข้อมูลระบบหลังบ้าน การทำงานของตู้ไม้กั้น และขั้นตอนการขออนุญาตทั้งหมด
-${backendStats}${userContext}
+${backendStats}
+${userContext}
 
 ข้อปฏิบัติในการตอบ:
 1. ตอบให้ 'กระชับ ชัดเจน รวดเร็ว และตรงประเด็น' (หลีกเลี่ยงการเกริ่นยาว เพื่อความเร็วในการตอบกลับ)
-2. ถ้าผู้ใช้ถามสถิติ ข้อมูลคำขอ หรือสถานะระบบหลังบ้าน ให้สรุปข้อมูลตัวเลขจริงด้านบนตอบได้ทันที
-3. กฎความปลอดภัยสูงสุด: ห้ามเปิดเผยหรือตอบรหัสผ่าน/บัญชีส่วนบุคคลเด็ดขาด
-4. ตอบเป็นภาษาไทยอย่างสุภาพและเป็นมิตร`;
+2. เมื่อผู้ใช้ทักทาย หรือถามเกี่ยวกับตัวตน การล็อกอิน หรือการเชื่อมต่อระบบ (เช่น "ฉันเป็นใคร", "ฉันคือใคร", "ฉันเชื่อมต่อหรือยัง", "ใครล็อกอินอยู่", "เช็กชื่อฉันซิ", "สถานะบัญชี"):
+   - ถ้าเชื่อมต่อแล้ว: ให้ตอบระบุตัวตนของผู้ใช้อย่างชัดเจนและอบอุ่น เช่น "สวัสดีครับคุณ [ชื่อ] (@username) ขณะนี้บัญชี Telegram ของคุณเชื่อมต่อกับระบบ OnePass ในบทบาท [บทบาท] เรียบร้อยแล้วครับ!" พร้อมบอกข้อมูลคำขอหรือสถานะถ้ามี
+   - ถ้ายังไม่เชื่อมต่อ: ให้แจ้งอย่างสุภาพว่า "ขณะนี้บัญชี Telegram นี้ยังไม่ได้เชื่อมต่อกับระบบ OnePass ครับ สามารถเข้าไปที่เว็บแล้วกดเชื่อมต่อผ่านรูปโปรไฟล์ได้ทันทีครับ"
+3. ถ้าผู้ใช้ถามสถิติ ข้อมูลคำขอ หรือสถานะระบบหลังบ้าน ให้สรุปข้อมูลตัวเลขจริงด้านบนตอบได้ทันที
+4. กฎความปลอดภัยสูงสุด: ห้ามเปิดเผยหรือตอบรหัสผ่าน/บัญชีส่วนบุคคลเด็ดขาด
+5. ตอบเป็นภาษาไทยอย่างสุภาพและเป็นมิตร`;
 
   // Build contents array with conversation history
   const contents = [
