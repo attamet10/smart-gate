@@ -2048,7 +2048,7 @@ setInterval(async () => {
 
 // Health check endpoint & Keep-alive
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, timestamp: new Date().toISOString() });
+  res.json({ ok: true, version: 'v20261110_webhook_v1', timestamp: new Date().toISOString() });
 });
 
 // Keep-alive self-ping to prevent Phusion Passenger from sleeping when idle
