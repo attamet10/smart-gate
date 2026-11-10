@@ -1126,13 +1126,33 @@ async function handleTelegramMessage(msg) {
 }
 
 /**
+ * Ensure Telegram Webhook is active for instant 24/7 replies
+ */
+async function ensureTelegramWebhook() {
+  try {
+    const config = await getTelegramConfig();
+    if (config.botToken) {
+      const webhookUrl = 'https://onepass.ongkharak.ac.th/api/telegram/webhook';
+      https.get(`https://api.telegram.org/bot${config.botToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}&drop_pending_updates=false`, (res) => {
+        let d = '';
+        res.on('data', c => d += c);
+        res.on('end', () => console.log('[Telegram Webhook Ensured]:', d));
+      }).on('error', (e) => console.error('[Telegram Webhook Error]:', e.message));
+    }
+  } catch (err) {
+    console.error('[Telegram Webhook Init Error]:', err.message);
+  }
+}
+
+/**
  * Start Telegram Service (Webhook-driven for instant 24/7 autonomous replies)
  */
 async function startTelegramPolling() {
   if (isPollingStarted) return;
   isPollingStarted = true;
 
-  console.log('[Telegram] Service started. Webhook is active at /api/telegram/webhook for instant 24/7 replies.');
+  console.log('[Telegram] Service started. Ensuring Webhook is active at /api/telegram/webhook...');
+  await ensureTelegramWebhook();
 }
 
 module.exports = {
@@ -1146,5 +1166,7 @@ module.exports = {
   notifyGateRecord,
   handleTelegramCallbackQuery,
   handleTelegramMessage,
-  startTelegramPolling
+  startTelegramPolling,
+  ensureTelegramWebhook,
+  getTelegramConfig
 };
