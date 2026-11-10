@@ -1447,6 +1447,8 @@ async function handleTelegramMessage(msg) {
         const [users] = await query('SELECT id, full_name, username, role FROM users WHERE id = ? LIMIT 1', [userId]);
         if (users && users.length > 0) {
           const u = users[0];
+          // Clear any previous user bound to this Telegram Chat ID to avoid duplicate collisions
+          await query('UPDATE users SET telegram_chat_id = NULL WHERE telegram_chat_id = ? AND id != ?', [String(chatId), u.id]);
           await query('UPDATE users SET telegram_chat_id = ? WHERE id = ?', [String(chatId), u.id]);
           console.log(`[Telegram] 1-Click Bind Success: User #${u.id} (${u.full_name}) bound to Chat ID ${chatId}`);
 
