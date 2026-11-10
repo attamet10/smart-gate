@@ -572,6 +572,28 @@ app.post('/api/requests', async (req, res) => {
   }
 });
 
+// Get Telegram status for currently logged-in user
+app.get('/api/user/telegram-status', async (req, res) => {
+  try {
+    const userId = parseInt(req.query.userId, 10);
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'Missing userId' });
+    }
+    const [rows] = await query('SELECT id, username, full_name, role, telegram_chat_id FROM users WHERE id = ? LIMIT 1', [userId]);
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    res.json({
+      success: true,
+      telegram_chat_id: rows[0].telegram_chat_id,
+      user: rows[0]
+    });
+  } catch (err) {
+    console.error('Get user telegram status error:', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // Update Telegram Chat ID for currently logged-in user
 app.post('/api/user/telegram', async (req, res) => {
   try {

@@ -824,10 +824,20 @@ async function askGeminiAI(userPrompt, senderName = 'ผู้ใช้งาน
   // Get live database context (strictly no passwords or personal credentials)
   const backendStats = await getSystemBackendContext();
 
+  let userContext = '';
+  if (chatId) {
+    try {
+      const [linkedUser] = await query('SELECT full_name, role, username FROM users WHERE telegram_chat_id = ? LIMIT 1', [String(chatId)]);
+      if (linkedUser && linkedUser.length > 0) {
+        userContext = `\nผู้สนทนาปัจจุบันในห้องแชตนี้คือ: คุณ ${linkedUser[0].full_name} (@${linkedUser[0].username}) มีบทบาท: ${linkedUser[0].role}`;
+      }
+    } catch (e) {}
+  }
+
   const systemInstruction = 
 `คุณคือ 'OnePass AI Assistant' ผู้ช่วยอัจฉริยะประจำระบบ OnePass ของวิทยาลัยการอาชีพองครักษ์
 คุณรอบรู้ข้อมูลระบบหลังบ้าน การทำงานของตู้ไม้กั้น และขั้นตอนการขออนุญาตทั้งหมด
-${backendStats}
+${backendStats}${userContext}
 
 ข้อปฏิบัติในการตอบ:
 1. ตอบให้ 'กระชับ ชัดเจน รวดเร็ว และตรงประเด็น' (หลีกเลี่ยงการเกริ่นยาว เพื่อความเร็วในการตอบกลับ)
@@ -906,11 +916,6 @@ ${backendStats}
   });
 }
 
-    req.write(payload);
-    req.end();
-  });
-}
-
 /**
  * Handle incoming text messages (e.g. /start or chat with Gemini AI)
  */
@@ -921,18 +926,105 @@ async function handleTelegramMessage(msg) {
 
   if (!text) return;
 
+  // 1. One-Click Deep Linking Account Binding: /start bind_<userId> or /bind <userId>
+  const isBindCmd = text.startsWith('/start bind_') || text.startsWith('/start bind-') || text.startsWith('/start bind') || text.startsWith('/bind');
+  if (isBindCmd) {
+    let rawId = '';
+    if (text.startsWith('/start bind_')) rawId = text.substring(12);
+    else if (text.startsWith('/start bind-')) rawId = text.substring(12);
+    else if (text.startsWith('/start bind')) rawId = text.substring(11);
+    else if (text.startsWith('/bind ')) rawId = text.substring(6);
+    else if (text.startsWith('/bind_')) rawId = text.substring(6);
+
+    const userId = parseInt(rawId.trim(), 10);
+    if (userId) {
+      try {
+        const [users] = await query('SELECT id, full_name, username, role FROM users WHERE id = ? LIMIT 1', [userId]);
+        if (users && users.length > 0) {
+          const u = users[0];
+          await query('UPDATE users SET telegram_chat_id = ? WHERE id = ?', [String(chatId), u.id]);
+          console.log(`[Telegram] 1-Click Bind Success: User #${u.id} (${u.full_name}) bound to Chat ID ${chatId}`);
+
+          const roleLabels = {
+            'student': 'ผู้เรียน / นักศึกษา',
+            'teacher': 'ครูผู้สอน / ครูที่ปรึกษา',
+            'deputy_director': 'รองผู้อำนวยการ',
+            'admin': 'ผู้ดูแลระบบ (Admin)'
+          };
+          const roleDisplay = roleLabels[u.role] || u.role;
+
+          const boundSuccessMsg = 
+`🎉 <b>[ผูกบัญชี OnePass สำเร็จเรียบร้อย!]</b>
+━━━━━━━━━━━━━━━━━━━━
+👤 <b>ชื่อ-นามสกุล:</b> ${escapeTelegramHtml(u.full_name)}
+🏷️ <b>บทบาท:</b> ${escapeTelegramHtml(roleDisplay)} (@${escapeTelegramHtml(u.username)})
+🆔 <b>Telegram Chat ID:</b> <code>${chatId}</code>
+━━━━━━━━━━━━━━━━━━━━
+✅ <b>บัญชี OnePass ของท่านเชื่อมต่อกับ Telegram แล้ว</b>
+• ได้รับการแจ้งเตือนคำขอใบอนุญาตทันที
+• กดปุ่มอนุมัติ / ตรวจสอบผ่านมือถือได้ทันที
+• สนทนาหรือปรึกษาข้อมูลกับ <b>OnePass Gemini AI</b> ในห้องแชตนี้ได้ตลอด 24 ชม. 🤖`;
+
+          await sendTelegramMessage(chatId, boundSuccessMsg);
+          return;
+        } else {
+          await sendTelegramMessage(chatId, `⚠️ ไม่พบบัญชีผู้ใช้รหัส #${userId} ในระบบ OnePass กรุณาตรวจสอบหรือเข้าสู่ระบบใหม่บนเว็บไซต์`);
+          return;
+        }
+      } catch (bindErr) {
+        console.error('[Telegram] Bind error:', bindErr);
+        await sendTelegramMessage(chatId, `❌ เกิดข้อผิดพลาดในการผูกบัญชี: ${escapeTelegramHtml(bindErr.message)}`);
+        return;
+      }
+    }
+  }
+
+  // 2. Check status or whoami
+  if (text === '/status' || text === '/whoami') {
+    try {
+      const [boundUsers] = await query('SELECT id, full_name, username, role FROM users WHERE telegram_chat_id = ? LIMIT 1', [String(chatId)]);
+      if (boundUsers && boundUsers.length > 0) {
+        const u = boundUsers[0];
+        const statusMsg =
+`📋 <b>[ข้อมูลบัญชี OnePass ที่เชื่อมต่ออยู่]</b>
+━━━━━━━━━━━━━━━━━━━━
+👤 <b>ชื่อ-นามสกุล:</b> ${escapeTelegramHtml(u.full_name)}
+🏷️ <b>บทบาท:</b> ${escapeTelegramHtml(u.role)} (@${escapeTelegramHtml(u.username)})
+🆔 <b>Telegram Chat ID:</b> <code>${chatId}</code>
+━━━━━━━━━━━━━━━━━━━━
+✨ สถานะ: เชื่อมต่อและพร้อมรับการแจ้งเตือนอัตโนมัติ`;
+        await sendTelegramMessage(chatId, statusMsg);
+        return;
+      } else {
+        await sendTelegramMessage(chatId, `ℹ️ <b>Chat ID ของท่าน:</b> <code>${chatId}</code>\n⚠️ <i>(ยังไม่ได้ผูกกับบัญชีผู้ใช้ใดใน OnePass)</i>\nเปิดเว็บไซต์ OnePass แล้วกดที่รูปโปรไฟล์เพื่อผูกบัญชีอัตโนมัติ`);
+        return;
+      }
+    } catch (e) {}
+  }
+
+  // 3. Regular /start command
   if (text === '/start') {
     // Clear chat history on /start
     conversationHistory.delete(chatId);
+
+    let boundNotice = '';
+    try {
+      const [bound] = await query('SELECT full_name, username, role FROM users WHERE telegram_chat_id = ? LIMIT 1', [String(chatId)]);
+      if (bound && bound.length > 0) {
+        boundNotice = `\n✅ <b>ผูกกับบัญชี:</b> ${escapeTelegramHtml(bound[0].full_name)} (@${escapeTelegramHtml(bound[0].username)})`;
+      } else {
+        boundNotice = `\nℹ️ <i>(ยังไม่ได้ผูกกับบัญชี OnePass — กดปุ่มโปรไฟล์ในเว็บเพื่อผูกอัตโนมัติ)</i>`;
+      }
+    } catch (e) {}
 
     const welcomeText = 
 `👋 <b>ยินดีต้อนรับสู่ OnePass Bot & Gemini AI</b>
 ระบบขออนุญาตออกนอกสถานศึกษา ด้วยระบบ QR Code
 ━━━━━━━━━━━━━━━━━━━━
-🆔 <b>Chat ID ของท่านคือ:</b> <code>${chatId}</code>
+🆔 <b>Chat ID ของท่านคือ:</b> <code>${chatId}</code>${boundNotice}
 ━━━━━━━━━━━━━━━━━━━━
 ℹ️ <b>บริการของบอท:</b>
-1. <b>รับการแจ้งเตือน & กดอนุมัติ:</b> นำ Chat ID ไปผูกที่ปุ่มโปรไฟล์ในเว็บ OnePass
+1. <b>รับการแจ้งเตือน & กดอนุมัติ:</b> ผูกบัญชีของคุณเพื่อรับแจ้งเตือนและกดอนุมัติผ่านมือถือ
 2. <b>รับบัตรผ่าน QR:</b> สแกนออกประตูอัตโนมัติ
 3. <b>ถาม-ตอบกับ Gemini AI:</b> พิมพ์ข้อความคำถามหรือคุยกับ AI ได้อย่างต่อเนื่องในห้องแชตนี้!`;
 

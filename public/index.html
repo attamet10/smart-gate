@@ -929,37 +929,91 @@
 
     <!-- MODAL: LINK TELEGRAM FOR CURRENT USER -->
     <div id="modal-user-telegram" class="modal-overlay" style="display: none;">
-      <div class="modal-content" style="max-width: 480px;">
-        <div class="modal-header">
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <span style="font-size: 1.4rem;">📱</span>
-            <h3 style="margin: 0; font-size: 1.15rem;">เชื่อมต่อ Telegram & Gemini AI</h3>
+      <div class="modal-content" style="max-width: 460px;">
+        <div class="modal-header" style="margin-bottom: 12px; padding-bottom: 10px;">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <div style="width: 36px; height: 36px; border-radius: 10px; background: #0284c7; color: white; display: flex; align-items: center; justify-content: center; font-size: 1.2rem;">📱</div>
+            <div>
+              <h3 style="margin: 0; font-size: 1.1rem; font-weight: 700; color: #0f172a;">เชื่อมต่อ Telegram & Gemini AI</h3>
+              <p style="margin: 0; font-size: 0.78rem; color: #64748b;">แจ้งเตือนคำขอ & กดอนุมัติผ่านแอป Telegram</p>
+            </div>
           </div>
-          <button type="button" class="close-btn" id="btn-close-telegram-modal">&times;</button>
+          <button type="button" class="close-btn" id="btn-close-telegram-modal" style="background: none; border: none; font-size: 1.5rem; color: #94a3b8; cursor: pointer;">&times;</button>
         </div>
-        <div class="modal-body" style="padding: 10px 0;">
-          <!-- Quick Connect Button to Bot -->
-          <div style="background: linear-gradient(135deg, #0284c7, #0369a1); border-radius: 12px; padding: 14px; color: #fff; margin-bottom: 18px; text-align: center; box-shadow: 0 4px 12px rgba(2, 132, 199, 0.25);">
-            <div style="font-size: 0.95rem; font-weight: 700; margin-bottom: 4px;">🚀 ทางลัดเปิดแชทกับบอททันที</div>
-            <div style="font-size: 0.8rem; opacity: 0.9; margin-bottom: 12px;">กดปุ่มด้านล่างเพื่อเปิด Telegram แล้วพิมพ์คุยกับ Gemini AI หรือกด /start เพื่อดู Chat ID</div>
-            <a href="https://t.me/MyStd2026_bot" target="_blank" rel="noopener noreferrer" class="btn" style="background: #ffffff; color: #0369a1; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; padding: 8px 18px; border-radius: 20px; text-decoration: none; box-shadow: 0 2px 6px rgba(0,0,0,0.15);">
-              <span>✈️ เปิด Telegram Bot (@MyStd2026_bot)</span>
-            </a>
+
+        <div class="modal-body" style="padding: 0;">
+          <!-- Current User Profile Pill -->
+          <div style="display: flex; align-items: center; justify-content: space-between; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px 14px; margin-bottom: 16px;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <div id="tg-modal-user-avatar" style="width: 36px; height: 36px; border-radius: 50%; background: #0284c7; color: white; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.95rem;">U</div>
+              <div>
+                <div id="tg-modal-user-name" style="font-weight: 700; font-size: 0.92rem; color: #0f172a;">ชื่อผู้ใช้</div>
+                <div id="tg-modal-user-role" style="font-size: 0.76rem; color: #64748b;">บทบาท</div>
+              </div>
+            </div>
+            <div id="tg-modal-status-badge" style="font-size: 0.75rem; font-weight: 700; padding: 4px 10px; border-radius: 12px; background: #fef3c7; color: #b45309;">
+              🟡 ยังไม่เชื่อมต่อ
+            </div>
           </div>
 
-          <p style="font-size: 0.88rem; color: #475569; margin-bottom: 12px;">
-            นำ <b>Chat ID</b> ที่ได้จากบอทมากรอกในช่องด้านล่าง เพื่อเปิดใช้งานการแจ้งเตือนและการกดอนุมัติผ่านมือถือ:
-          </p>
-          <div class="form-group" style="margin-bottom: 15px;">
-            <label for="input-user-telegram-chatid" style="font-weight: 600; font-size: 0.9rem;">Telegram Chat ID ของคุณ:</label>
-            <input type="text" id="input-user-telegram-chatid" class="form-control" placeholder="เช่น 8527824695" style="margin-top: 6px; font-size: 1rem; padding: 10px 12px;">
-            <small style="color: #64748b; display: block; margin-top: 6px; line-height: 1.4;">
-              💡 <b>วิธีดู Chat ID:</b> ในห้องแชทบอท พิมพ์คำว่า <code>/start</code> บอทจะตอบกลับเป็นเลข Chat ID ของคุณทันที
-            </small>
+          <!-- STATE 1: NOT CONNECTED (Show 1-Click Connect Button + QR Code) -->
+          <div id="tg-modal-not-connected" style="display: block;">
+            <div style="background: linear-gradient(135deg, #0284c7, #0369a1); border-radius: 14px; padding: 18px 16px; color: #ffffff; text-align: center; box-shadow: 0 4px 16px rgba(2, 132, 199, 0.25); margin-bottom: 16px;">
+              <div style="font-size: 1.05rem; font-weight: 700; margin-bottom: 6px;">🚀 ผูกบัญชีนี้กับ Telegram ใน 1 คลิก</div>
+              <div style="font-size: 0.82rem; opacity: 0.92; margin-bottom: 14px; line-height: 1.4;">
+                กดปุ่มด้านล่างเพื่อเปิด Telegram ระบบจะผูกบัญชีนี้ให้อัตโนมัติทันที ไม่ต้องพิมพ์ Chat ID เอง!
+              </div>
+              <a id="btn-tg-oneclick" href="https://t.me/MyStd2026_bot" target="_blank" rel="noopener noreferrer" style="background: #ffffff; color: #0284c7; font-weight: 700; font-size: 0.98rem; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 11px 24px; border-radius: 25px; text-decoration: none; width: 100%; box-shadow: 0 3px 8px rgba(0,0,0,0.15); transition: transform 0.15s ease;">
+                <span style="font-size: 1.2rem;">✈️</span>
+                <span>เปิด Telegram เพื่อผูกบัญชีทันที</span>
+              </a>
+            </div>
+
+            <!-- QR Code for Desktop Users -->
+            <div id="tg-modal-qr-container" style="text-align: center; padding: 12px; background: #ffffff; border: 1px dashed #cbd5e1; border-radius: 12px; margin-bottom: 16px;">
+              <div style="font-size: 0.8rem; font-weight: 600; color: #475569; margin-bottom: 8px;">📱 หรือใช้กล้องมือถือสแกน QR Code เพื่อผูกทันที:</div>
+              <img id="tg-modal-qr-img" src="" alt="Scan to Bind Telegram" style="width: 140px; height: 140px; border-radius: 8px; border: 1px solid #e2e8f0; display: inline-block;">
+              <div style="font-size: 0.74rem; color: #64748b; margin-top: 6px;">สแกนแล้วแตะปุ่ม "Start" ใน Telegram ระบบจะผูกบัญชีทันที</div>
+            </div>
+
+            <div id="tg-modal-waiting-box" style="display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 0.82rem; color: #0284c7; background: #e0f2fe; padding: 10px; border-radius: 10px; margin-bottom: 14px;">
+              <span class="tg-pulse-dot" style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #0284c7;"></span>
+              <span>กำลังรอการเชื่อมต่อ... เมื่อกด Start ใน Telegram หน้าเว็บจะอัปเดตอัตโนมัติ</span>
+            </div>
           </div>
-          <div class="form-actions" style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; border-top: 1px solid #f1f5f9; padding-top: 15px;">
-            <button type="button" class="btn btn-secondary" id="btn-cancel-telegram-modal">ยกเลิก</button>
-            <button type="button" class="btn btn-primary" id="btn-save-user-telegram">💾 บันทึก Telegram ID</button>
+
+          <!-- STATE 2: ALREADY CONNECTED -->
+          <div id="tg-modal-connected" style="display: none;">
+            <div style="background: #f0fdf4; border: 1.5px solid #86efac; border-radius: 14px; padding: 18px 16px; text-align: center; margin-bottom: 16px;">
+              <div style="font-size: 2.2rem; margin-bottom: 6px;">🎉</div>
+              <div style="font-size: 1.05rem; font-weight: 700; color: #15803d; margin-bottom: 4px;">เชื่อมต่อ Telegram สำเร็จแล้ว!</div>
+              <div style="font-size: 0.82rem; color: #166534; margin-bottom: 14px;">บัญชีนี้เชื่อมต่อกับ Telegram แล้ว พร้อมรับแจ้งเตือนและกดอนุมัติคำขอ</div>
+              <div style="background: #ffffff; border-radius: 8px; padding: 8px 14px; display: inline-block; font-size: 0.85rem; color: #334155; margin-bottom: 16px; border: 1px solid #dcfce7;">
+                🆔 <b>Telegram Chat ID:</b> <code id="tg-modal-connected-chatid" style="color: #0284c7; font-weight: 700;">-</code>
+              </div>
+              <div style="display: flex; flex-direction: column; gap: 8px;">
+                <a href="https://t.me/MyStd2026_bot" target="_blank" rel="noopener noreferrer" class="btn btn-primary" style="display: flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none; padding: 10px 16px; border-radius: 10px; font-weight: 600;">
+                  <span>💬 เปิดแชทกับบอท & Gemini AI</span>
+                </a>
+                <button type="button" class="btn" id="btn-tg-unbind" style="background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; border-radius: 10px; padding: 9px 16px; font-weight: 600; cursor: pointer;">
+                  ❌ ยกเลิกการเชื่อมต่อ Telegram
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- TOGGLE: MANUAL CHAT ID (Accordion / Fallback) -->
+          <div style="border-top: 1px solid #f1f5f9; padding-top: 10px; margin-top: 10px;">
+            <button type="button" id="btn-toggle-manual-tg" style="background: none; border: none; font-size: 0.8rem; color: #64748b; cursor: pointer; text-decoration: underline; padding: 4px 0; width: 100%; text-align: left;">
+              ⚙️ หรือต้องการกรอกเลข Telegram Chat ID ด้วยตนเอง?
+            </button>
+            <div id="tg-manual-box" style="display: none; margin-top: 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px;">
+              <label for="input-user-telegram-chatid" style="font-weight: 600; font-size: 0.84rem; color: #334155;">Telegram Chat ID:</label>
+              <input type="text" id="input-user-telegram-chatid" class="form-control" placeholder="เช่น 8527824695" style="margin-top: 5px; font-size: 0.95rem; padding: 8px 12px;">
+              <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px;">
+                <button type="button" class="btn btn-primary btn-sm" id="btn-save-user-telegram">💾 บันทึก ID</button>
+              </div>
+            </div>
           </div>
         </div>
       </div>

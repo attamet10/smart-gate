@@ -104,35 +104,177 @@ function initEventListeners() {
   const dropdownBtnTelegram = document.getElementById('dropdown-btn-telegram');
   const modalTelegram = document.getElementById('modal-user-telegram');
   const btnCloseTelegramModal = document.getElementById('btn-close-telegram-modal');
-  const btnCancelTelegramModal = document.getElementById('btn-cancel-telegram-modal');
   const btnSaveUserTelegram = document.getElementById('btn-save-user-telegram');
   const inputUserTelegramChatId = document.getElementById('input-user-telegram-chatid');
+
+  const tgModalUserAvatar = document.getElementById('tg-modal-user-avatar');
+  const tgModalUserName = document.getElementById('tg-modal-user-name');
+  const tgModalUserRole = document.getElementById('tg-modal-user-role');
+  const tgModalStatusBadge = document.getElementById('tg-modal-status-badge');
+  const tgModalNotConnected = document.getElementById('tg-modal-not-connected');
+  const tgModalConnected = document.getElementById('tg-modal-connected');
+  const tgModalConnectedChatId = document.getElementById('tg-modal-connected-chatid');
+  const btnTgOneClick = document.getElementById('btn-tg-oneclick');
+  const tgModalQrImg = document.getElementById('tg-modal-qr-img');
+  const btnTgUnbind = document.getElementById('btn-tg-unbind');
+  const btnToggleManualTg = document.getElementById('btn-toggle-manual-tg');
+  const tgManualBox = document.getElementById('tg-manual-box');
+
+  let tgStatusPollInterval = null;
+
+  const renderTelegramModalState = () => {
+    if (!state.currentUser) return;
+    const u = state.currentUser;
+
+    const firstLetter = (u.full_name || 'U').trim().charAt(0).toUpperCase();
+    if (tgModalUserAvatar) tgModalUserAvatar.textContent = firstLetter;
+    if (tgModalUserName) tgModalUserName.textContent = u.full_name || u.username;
+
+    const roleLabels = {
+      'student': 'ผู้เรียน / นักศึกษา',
+      'teacher': 'ครูผู้สอน / ที่ปรึกษา',
+      'deputy_director': 'รองผู้อำนวยการ',
+      'admin': 'ผู้ดูแลระบบ (Admin)'
+    };
+    if (tgModalUserRole) tgModalUserRole.textContent = roleLabels[u.role] || u.role || 'ผู้ใช้งาน';
+
+    // Set 1-Click Deep link URL
+    const botDeepLink = `https://t.me/MyStd2026_bot?start=bind_${u.id}`;
+    if (btnTgOneClick) btnTgOneClick.href = botDeepLink;
+    if (tgModalQrImg) {
+      tgModalQrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=${encodeURIComponent(botDeepLink)}`;
+    }
+
+    if (inputUserTelegramChatId) {
+      inputUserTelegramChatId.value = u.telegram_chat_id || '';
+    }
+
+    if (u.telegram_chat_id) {
+      // Connected State
+      if (tgModalStatusBadge) {
+        tgModalStatusBadge.textContent = '🟢 เชื่อมต่อแล้ว';
+        tgModalStatusBadge.style.background = '#dcfce7';
+        tgModalStatusBadge.style.color = '#15803d';
+      }
+      if (tgModalConnectedChatId) tgModalConnectedChatId.textContent = u.telegram_chat_id;
+      if (tgModalConnected) tgModalConnected.style.display = 'block';
+      if (tgModalNotConnected) tgModalNotConnected.style.display = 'none';
+
+      // Clear poll interval if connected
+      if (tgStatusPollInterval) {
+        clearInterval(tgStatusPollInterval);
+        tgStatusPollInterval = null;
+      }
+    } else {
+      // Not Connected State
+      if (tgModalStatusBadge) {
+        tgModalStatusBadge.textContent = '🟡 ยังไม่เชื่อมต่อ';
+        tgModalStatusBadge.style.background = '#fef3c7';
+        tgModalStatusBadge.style.color = '#b45309';
+      }
+      if (tgModalConnected) tgModalConnected.style.display = 'none';
+      if (tgModalNotConnected) tgModalNotConnected.style.display = 'block';
+
+      // Start background polling for auto-bind detection
+      startTelegramStatusPolling();
+    }
+  };
+
+  const startTelegramStatusPolling = () => {
+    if (tgStatusPollInterval) clearInterval(tgStatusPollInterval);
+    tgStatusPollInterval = setInterval(async () => {
+      if (!modalTelegram || modalTelegram.style.display === 'none' || !state.currentUser) {
+        clearInterval(tgStatusPollInterval);
+        tgStatusPollInterval = null;
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/user/telegram-status?userId=${state.currentUser.id}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.success && data.telegram_chat_id && data.telegram_chat_id !== state.currentUser.telegram_chat_id) {
+          state.currentUser.telegram_chat_id = data.telegram_chat_id;
+          sessionStorage.setItem('onepass_user', JSON.stringify(state.currentUser));
+          updateProfileDropdown(state.currentUser);
+          renderTelegramModalState();
+          showAlert('🎉 เชื่อมต่อบัญชี OnePass กับ Telegram สำเร็จเรียบร้อย!', 'success');
+        }
+      } catch (e) {}
+    }, 2000);
+  };
+
+  const closeTelegramModal = () => {
+    if (modalTelegram) modalTelegram.style.display = 'none';
+    if (tgStatusPollInterval) {
+      clearInterval(tgStatusPollInterval);
+      tgStatusPollInterval = null;
+    }
+  };
 
   if (dropdownBtnTelegram && modalTelegram) {
     dropdownBtnTelegram.addEventListener('click', () => {
       if (profileDropdownMenu) profileDropdownMenu.style.display = 'none';
       if (profileContainer) profileContainer.classList.remove('active');
-      if (state.currentUser && inputUserTelegramChatId) {
-        inputUserTelegramChatId.value = state.currentUser.telegram_chat_id || '';
-      }
+      renderTelegramModalState();
       modalTelegram.style.display = 'flex';
     });
 
-    const closeModal = () => { modalTelegram.style.display = 'none'; };
-    if (btnCloseTelegramModal) btnCloseTelegramModal.addEventListener('click', closeModal);
-    if (btnCancelTelegramModal) btnCancelTelegramModal.addEventListener('click', closeModal);
+    if (btnCloseTelegramModal) btnCloseTelegramModal.addEventListener('click', closeTelegramModal);
 
     // Also close when clicking backdrop
     modalTelegram.addEventListener('click', (e) => {
-      if (e.target === modalTelegram) closeModal();
+      if (e.target === modalTelegram) closeTelegramModal();
     });
 
+    // Unbind Telegram Button
+    if (btnTgUnbind) {
+      btnTgUnbind.addEventListener('click', async () => {
+        if (!state.currentUser) return;
+        if (!confirm('ยืนยันที่จะยกเลิกการเชื่อมต่อ Telegram กับบัญชีนี้ใช่หรือไม่?')) return;
+
+        btnTgUnbind.disabled = true;
+        btnTgUnbind.textContent = '⏳ กำลังยกเลิก...';
+        try {
+          const res = await fetch('/api/user/telegram', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId: state.currentUser.id, telegramChatId: '' })
+          });
+          const data = await res.json();
+          if (data.success) {
+            state.currentUser.telegram_chat_id = null;
+            sessionStorage.setItem('onepass_user', JSON.stringify(state.currentUser));
+            updateProfileDropdown(state.currentUser);
+            renderTelegramModalState();
+            showAlert('ยกเลิกการเชื่อมต่อ Telegram เรียบร้อยแล้ว', 'info');
+          } else {
+            showAlert(data.message || 'เกิดข้อผิดพลาดในการยกเลิก', 'danger');
+          }
+        } catch (err) {
+          showAlert('ข้อผิดพลาด: ' + err.message, 'danger');
+        } finally {
+          btnTgUnbind.disabled = false;
+          btnTgUnbind.textContent = '❌ ยกเลิกการเชื่อมต่อ Telegram';
+        }
+      });
+    }
+
+    // Toggle Manual Chat ID Accordion
+    if (btnToggleManualTg && tgManualBox) {
+      btnToggleManualTg.addEventListener('click', () => {
+        const isHidden = tgManualBox.style.display === 'none' || !tgManualBox.style.display;
+        tgManualBox.style.display = isHidden ? 'block' : 'none';
+      });
+    }
+
+    // Save manual Telegram Chat ID
     if (btnSaveUserTelegram) {
       btnSaveUserTelegram.addEventListener('click', async () => {
         if (!state.currentUser) return;
         const tgId = inputUserTelegramChatId ? inputUserTelegramChatId.value.trim() : '';
         btnSaveUserTelegram.disabled = true;
-        btnSaveUserTelegram.textContent = '⏳ กำลังบันทึก...';
+        btnSaveUserTelegram.textContent = '⏳ บันทึก...';
 
         try {
           const res = await fetch('/api/user/telegram', {
@@ -145,8 +287,8 @@ function initEventListeners() {
             state.currentUser.telegram_chat_id = data.telegram_chat_id;
             sessionStorage.setItem('onepass_user', JSON.stringify(state.currentUser));
             updateProfileDropdown(state.currentUser);
+            renderTelegramModalState();
             showAlert(data.message, 'success');
-            closeModal();
           } else {
             showAlert(data.message || 'เกิดข้อผิดพลาดในการบันทึก', 'danger');
           }
@@ -154,7 +296,7 @@ function initEventListeners() {
           showAlert('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้: ' + err.message, 'danger');
         } finally {
           btnSaveUserTelegram.disabled = false;
-          btnSaveUserTelegram.textContent = '💾 บันทึก Telegram ID';
+          btnSaveUserTelegram.textContent = '💾 บันทึก ID';
         }
       });
     }
