@@ -1126,77 +1126,13 @@ async function handleTelegramMessage(msg) {
 }
 
 /**
- * Start Background Polling Loop for Telegram Bot
+ * Start Telegram Service (Webhook-driven for instant 24/7 autonomous replies)
  */
 async function startTelegramPolling() {
   if (isPollingStarted) return;
   isPollingStarted = true;
 
-  console.log('[Telegram] Background Polling Listener started (Listening for messages & approvals)...');
-
-  // Ensure webhook is removed on startup so getUpdates long-polling is never blocked
-  try {
-    const config = await getTelegramConfig();
-    if (config.botToken) {
-      https.get(`https://api.telegram.org/bot${config.botToken}/deleteWebhook?drop_pending_updates=false`, (res) => {
-        res.resume();
-      }).on('error', () => {});
-    }
-  } catch (e) {}
-
-  const poll = async () => {
-    try {
-      const config = await getTelegramConfig();
-      if (!config.botToken) {
-        setTimeout(poll, 5000);
-        return;
-      }
-
-      const url = `https://api.telegram.org/bot${config.botToken}/getUpdates?offset=${lastUpdateId + 1}&timeout=20`;
-
-      const req = https.get(url, (res) => {
-        let rawData = '';
-        res.on('data', chunk => rawData += chunk);
-        res.on('end', async () => {
-          try {
-            const data = JSON.parse(rawData);
-            if (data.ok && Array.isArray(data.result)) {
-              for (const update of data.result) {
-                lastUpdateId = Math.max(lastUpdateId, update.update_id);
-
-                // Handle button click (callback_query)
-                if (update.callback_query) {
-                  handleTelegramCallbackQuery(update.callback_query).catch(err => {
-                    console.error('[Telegram Callback Error]:', err.message);
-                  });
-                }
-
-                // Handle text message (/start or chat with Gemini)
-                if (update.message) {
-                  handleTelegramMessage(update.message).catch(err => {
-                    console.error('[Telegram Message Error]:', err.message);
-                  });
-                }
-              }
-            }
-          } catch (e) {}
-          setTimeout(poll, 500);
-        });
-      });
-
-      req.on('error', (err) => {
-        setTimeout(poll, 3000);
-      });
-      req.setTimeout(25000, () => {
-        req.destroy();
-        setTimeout(poll, 1000);
-      });
-    } catch (err) {
-      setTimeout(poll, 5000);
-    }
-  };
-
-  poll();
+  console.log('[Telegram] Service started. Webhook is active at /api/telegram/webhook for instant 24/7 replies.');
 }
 
 module.exports = {
