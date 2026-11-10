@@ -213,11 +213,27 @@ function initEventListeners() {
   };
 
   if (dropdownBtnTelegram && modalTelegram) {
-    dropdownBtnTelegram.addEventListener('click', () => {
+    dropdownBtnTelegram.addEventListener('click', async () => {
       if (profileDropdownMenu) profileDropdownMenu.style.display = 'none';
       if (profileContainer) profileContainer.classList.remove('active');
       renderTelegramModalState();
       modalTelegram.style.display = 'flex';
+
+      // Instantly sync latest Telegram status from database when opening modal
+      if (state.currentUser) {
+        try {
+          const res = await fetch(`/api/user/telegram-status?userId=${state.currentUser.id}`);
+          if (res.ok) {
+            const data = await res.json();
+            if (data.success && data.telegram_chat_id !== state.currentUser.telegram_chat_id) {
+              state.currentUser.telegram_chat_id = data.telegram_chat_id;
+              sessionStorage.setItem('onepass_user', JSON.stringify(state.currentUser));
+              updateProfileDropdown(state.currentUser);
+              renderTelegramModalState();
+            }
+          }
+        } catch (e) {}
+      }
     });
 
     if (btnCloseTelegramModal) btnCloseTelegramModal.addEventListener('click', closeTelegramModal);
@@ -501,6 +517,20 @@ function checkSavedSession() {
     try {
       state.currentUser = JSON.parse(saved);
       onLoginSuccess(state.currentUser);
+
+      // Auto-sync latest Telegram binding status from database
+      if (state.currentUser && state.currentUser.id) {
+        fetch(`/api/user/telegram-status?userId=${state.currentUser.id}`)
+          .then(res => res.json())
+          .then(data => {
+            if (data.success && data.telegram_chat_id !== state.currentUser.telegram_chat_id) {
+              state.currentUser.telegram_chat_id = data.telegram_chat_id;
+              sessionStorage.setItem('onepass_user', JSON.stringify(state.currentUser));
+              updateProfileDropdown(state.currentUser);
+            }
+          })
+          .catch(() => {});
+      }
     } catch (e) {
       sessionStorage.removeItem('onepass_user');
       switchView('login');

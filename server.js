@@ -50,6 +50,7 @@ async function buildUserProfile(user) {
     role: role,
     position: user.position,
     photo_url: user.photo_url,
+    telegram_chat_id: user.telegram_chat_id || null,
     is_student: isStudent,
     is_teacher: isTeacherRole,
     is_deputy_director: isDeputy,
