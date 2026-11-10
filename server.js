@@ -2050,6 +2050,20 @@ setInterval(async () => {
   }
 }, 60000);
 
+// Health check endpoint & Keep-alive
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, timestamp: new Date().toISOString() });
+});
+
+// Keep-alive self-ping to prevent Phusion Passenger from sleeping when idle
+setInterval(() => {
+  try {
+    https.get('https://onepass.ongkharak.ac.th/api/health', (res) => {
+      res.resume();
+    }).on('error', () => {});
+  } catch (e) {}
+}, 60000);
+
 // Catch-all route for SPA
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));

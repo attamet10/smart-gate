@@ -107,9 +107,14 @@ async function initDatabase() {
     const connection = await getConnectedPool();
     console.log(`[DB] Connected successfully to MySQL (${process.env.DB_NAME || 'ongkharak_onepass'})`);
 
-    // 0. Ensure must_change_password column exists on users table
+    // 0. Ensure must_change_password and telegram_chat_id columns exist on users table
     try {
       await connection.query("ALTER TABLE `users` ADD COLUMN `must_change_password` TINYINT(1) DEFAULT 0");
+    } catch (e) {
+      // Column already exists or no ALTER permission - perfectly safe to ignore
+    }
+    try {
+      await connection.query("ALTER TABLE `users` ADD COLUMN `telegram_chat_id` VARCHAR(100) NULL");
     } catch (e) {
       // Column already exists or no ALTER permission - perfectly safe to ignore
     }

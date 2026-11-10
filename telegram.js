@@ -763,11 +763,18 @@ function getGeminiApiKey() {
 
 // Memory session store for multi-turn Gemini conversations per chat
 const conversationHistory = new Map();
+let cachedBackendStats = null;
+let lastStatsCacheTime = 0;
 
 /**
- * Fetch real-time system stats (excluding sensitive user credentials)
+ * Fetch real-time system stats (cached for 30s for ultra-fast bot replies)
  */
 async function getSystemBackendContext() {
+  const now = Date.now();
+  if (cachedBackendStats && (now - lastStatsCacheTime < 30000)) {
+    return cachedBackendStats;
+  }
+
   try {
     const [stats] = await query(`
       SELECT 
@@ -805,9 +812,11 @@ async function getSystemBackendContext() {
       summary += `\n- แผนกวิชาที่เปิดในวิทยาลัย: ` + majors.map(m => m.name).join(', ');
     }
 
+    cachedBackendStats = summary;
+    lastStatsCacheTime = now;
     return summary;
   } catch (err) {
-    return '';
+    return cachedBackendStats || '';
   }
 }
 
@@ -845,10 +854,12 @@ async function askGeminiAI(userPrompt, senderName = 'ผู้ใช้งาน
             WHERE (subject_teacher_id = ? AND status = 'pending_subject')
                OR (advisor_teacher_id = ? AND status = 'pending_advisor')
                OR (head_major_teacher_id = ? AND status = 'pending_head_major')
-               OR (head_discipline_teacher_id = ? AND status = 'pending_head_discipline')
+               OR (head_discipline_user_id = ? AND status = 'pending_head_discipline')
           `, [u.id, u.id, u.id, u.id]);
           const cnt = p[0]?.cnt || 0;
-          extraWork = `มีคำขอของนักเรียนที่รอให้คุณพิจารณาอนุมัติอยู่ ${cnt} รายการ`;
+          if (cnt > 0) {
+            extraWork = `มีคำขอของนักเรียนที่รอให้คุณพิจารณาอนุมัติอยู่ ${cnt} รายการ`;
+          }
         } else if (u.role === 'student') {
           const [latestReq] = await query(`
             SELECT request_no, status, destination FROM onepass_requests 
@@ -925,6 +936,19 @@ ${userContext}
   };
 
   return new Promise((resolve) => {
+    let isResolved = false;
+    const safeResolve = (val) => {
+      if (isResolved) return;
+      isResolved = true;
+      clearTimeout(timer);
+      resolve(val);
+    };
+
+    const timer = setTimeout(() => {
+      console.warn('[Gemini AI] Request timed out after 9s');
+      safeResolve('ขออภัยครับ ระบบ AI ตอบกลับช้า กรุณาลองส่งคำถามใหม่อีกครั้ง');
+    }, 9000);
+
     const req = https.request(options, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
@@ -942,21 +966,21 @@ ${userContext}
               conversationHistory.set(chatId, history);
             }
             
-            resolve(replyText);
+            safeResolve(replyText);
           } else {
             console.warn('[Gemini AI] Unexpected response structure:', data);
-            resolve(null);
+            safeResolve(null);
           }
         } catch (e) {
           console.error('[Gemini AI] JSON parse error:', e.message);
-          resolve(null);
+          safeResolve(null);
         }
       });
     });
 
     req.on('error', (err) => {
       console.error('[Gemini AI] Network error:', err.message);
-      resolve(null);
+      safeResolve(null);
     });
 
     req.write(payload);
@@ -1108,7 +1132,17 @@ async function startTelegramPolling() {
   if (isPollingStarted) return;
   isPollingStarted = true;
 
-  console.log('[Telegram] Background Polling Listener started (Listening for button approvals)...');
+  console.log('[Telegram] Background Polling Listener started (Listening for messages & approvals)...');
+
+  // Ensure webhook is removed on startup so getUpdates long-polling is never blocked
+  try {
+    const config = await getTelegramConfig();
+    if (config.botToken) {
+      https.get(`https://api.telegram.org/bot${config.botToken}/deleteWebhook?drop_pending_updates=false`, (res) => {
+        res.resume();
+      }).on('error', () => {});
+    }
+  } catch (e) {}
 
   const poll = async () => {
     try {
